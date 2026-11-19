@@ -1,0 +1,19 @@
+{
+  "name": "migration-guard-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MigrationGuard — AI-Native Data Migration & Assurance Platform",
+  "scripts": {
+    "build": "pnpm --recursive run build",
+    "test": "pnpm --recursive run test",
+    "lint": "pnpm --recursive run lint",
+    "dev:backend": "pnpm --filter @migrationguard/backend run start:dev",
+    "dev:worker": "pnpm --filter @migrationguard/worker run start:dev",
+    "dev:frontend": "pnpm --filter @migrationguard/frontend run dev",
+    "test:fault-injection": "pnpm --filter @migrationguard/core run test:fault-injection"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.0",
+    "typescript": "^5.7.3"
+  }
+}

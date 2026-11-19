@@ -110,7 +110,7 @@ const destinationConnector: DestinationConnector =
 
 // Source Connector (MongoDB if available, or synthetic fallback)
 let sourceConnector: SourceConnector;
-const MONGO_URL = process.env.MONGO_URL;
+const MONGO_URL = process.env.MONGO_URL || process.env.MONGODB_URI;
 
 if (MONGO_URL) {
   sourceConnector = ConnectorFactory.createMongoSource(MONGO_URL);

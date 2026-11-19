@@ -1,0 +1,192 @@
+import { describe, expect, it } from 'vitest';
+import { BatchManifestTracker } from '../src/engine/batch-manifest.js';
+import { CheckpointManager } from '../src/engine/checkpoint.js';
+import { RecoveryEngine } from '../src/engine/recovery-engine.js';
+import { MockDestinationConnector } from './helpers/mock-connectors.js';
+
+describe('Recovery Engine & Crash Reconciliation Matrix', () => {
+  it('reconciles crash after target commit, before manifest (DESTINATION_WRITTEN)', async () => {
+    const destinationConnector = new MockDestinationConnector();
+    const manifestTracker = new BatchManifestTracker();
+    const checkpointManager = new CheckpointManager();
+
+    const engine = new RecoveryEngine({
+      destinationConnector,
+      manifestTracker,
+      checkpointManager,
+    });
+
+    // Create a batch that crashed at DESTINATION_WRITTEN
+    const batch = await manifestTracker.createBatch({
+      migrationRunId: 'run_crash_1',
+      batchKey: 'batch_dw',
+      sequenceNo: 1,
+      sourceObject: 'orders',
+      destinationObject: 'orders',
+      sourceCursorStart: null,
+    });
+
+    await manifestTracker.transitionState('run_crash_1', 'batch_dw', 'RUNNING');
+    await manifestTracker.updateSubStage('run_crash_1', 'batch_dw', 'DESTINATION_WRITTEN');
+    await manifestTracker.updateCounters('run_crash_1', 'batch_dw', {
+      recordsRead: 25,
+      recordsWritten: 25,
+      sourceCursorEnd: { lastId: 'ord_25' },
+    });
+
+    // Reconcile
+    const plan = await engine.prepareResume('run_crash_1', 'orders', 'orders');
+
+    expect(plan.lastCommittedSequenceNo).toBe(1);
+    expect(plan.startingCursor?.lastId).toBe('ord_25');
+    expect(plan.reconciledBatches[0].resolvedStatus).toBe('COMMITTED');
+
+    const updatedBatch = await manifestTracker.getBatch('run_crash_1', 'batch_dw');
+    expect(updatedBatch?.status).toBe('COMMITTED');
+  });
+
+  it('reconciles crash after manifest persisted, before checkpoint (MANIFEST_COMMITTED)', async () => {
+    const destinationConnector = new MockDestinationConnector();
+    const manifestTracker = new BatchManifestTracker();
+    const checkpointManager = new CheckpointManager();
+
+    const engine = new RecoveryEngine({
+      destinationConnector,
+      manifestTracker,
+      checkpointManager,
+    });
+
+    await manifestTracker.createBatch({
+      migrationRunId: 'run_crash_2',
+      batchKey: 'batch_mc',
+      sequenceNo: 1,
+      sourceObject: 'customers',
+      destinationObject: 'customers',
+      sourceCursorStart: null,
+    });
+
+    await manifestTracker.transitionState('run_crash_2', 'batch_mc', 'RUNNING');
+    await manifestTracker.updateSubStage('run_crash_2', 'batch_mc', 'MANIFEST_COMMITTED');
+    await manifestTracker.updateCounters('run_crash_2', 'batch_mc', {
+      recordsRead: 15,
+      recordsWritten: 15,
+      sourceCursorEnd: { lastId: 'cust_15' },
+    });
+
+    const plan = await engine.prepareResume('run_crash_2', 'customers', 'customers');
+
+    expect(plan.lastCommittedSequenceNo).toBe(1);
+    expect(plan.startingCursor?.lastId).toBe('cust_15');
+    expect(plan.reconciledBatches[0].resolvedStatus).toBe('COMMITTED');
+
+    const checkpoint = await checkpointManager.getCheckpoint('run_crash_2', 'customers');
+    expect(checkpoint?.lastCommittedSequenceNo).toBe(1);
+  });
+
+  it('reconciles OUTCOME_UNKNOWN when destination write actually succeeded before disconnect', async () => {
+    const destinationConnector = new MockDestinationConnector();
+    // Simulate that the records actually landed in destination database!
+    destinationConnector.store.set('dest_key_1', { id: 'dest_key_1', val: 1 });
+    destinationConnector.store.set('dest_key_2', { id: 'dest_key_2', val: 2 });
+
+    const manifestTracker = new BatchManifestTracker();
+    const checkpointManager = new CheckpointManager();
+
+    const engine = new RecoveryEngine({
+      destinationConnector,
+      manifestTracker,
+      checkpointManager,
+    });
+
+    await manifestTracker.createBatch({
+      migrationRunId: 'run_crash_unknown_success',
+      batchKey: 'batch_unknown_1',
+      sequenceNo: 1,
+      sourceObject: 'items',
+      destinationObject: 'items',
+      sourceCursorStart: null,
+    });
+
+    await manifestTracker.transitionState('run_crash_unknown_success', 'batch_unknown_1', 'RUNNING');
+    await manifestTracker.updateSubStage('run_crash_unknown_success', 'batch_unknown_1', 'WRITE_STARTED');
+    await manifestTracker.transitionState('run_crash_unknown_success', 'batch_unknown_1', 'OUTCOME_UNKNOWN');
+
+    // Record manifests for destination keys
+    await manifestTracker.recordManifests([
+      {
+        migrationRunId: 'run_crash_unknown_success',
+        batchKey: 'batch_unknown_1',
+        sourceObject: 'items',
+        sourceKey: 'src_1',
+        destinationObject: 'items',
+        destinationKey: 'dest_key_1',
+        status: 'WRITTEN',
+      },
+      {
+        migrationRunId: 'run_crash_unknown_success',
+        batchKey: 'batch_unknown_1',
+        sourceObject: 'items',
+        sourceKey: 'src_2',
+        destinationObject: 'items',
+        destinationKey: 'dest_key_2',
+        status: 'WRITTEN',
+      },
+    ]);
+
+    const plan = await engine.prepareResume('run_crash_unknown_success', 'items', 'items');
+
+    // Engine discovered all records exist in destination, so it commits the batch!
+    expect(plan.reconciledBatches[0].resolvedStatus).toBe('COMMITTED');
+    expect(plan.lastCommittedSequenceNo).toBe(1);
+
+    const updated = await manifestTracker.getBatch('run_crash_unknown_success', 'batch_unknown_1');
+    expect(updated?.status).toBe('COMMITTED');
+  });
+
+  it('reconciles OUTCOME_UNKNOWN when destination write did not land, resetting to RETRY_WAIT', async () => {
+    const destinationConnector = new MockDestinationConnector();
+    // Destination store is empty: write did not land before socket drop
+    const manifestTracker = new BatchManifestTracker();
+    const checkpointManager = new CheckpointManager();
+
+    const engine = new RecoveryEngine({
+      destinationConnector,
+      manifestTracker,
+      checkpointManager,
+    });
+
+    await manifestTracker.createBatch({
+      migrationRunId: 'run_crash_unknown_fail',
+      batchKey: 'batch_unknown_2',
+      sequenceNo: 1,
+      sourceObject: 'items',
+      destinationObject: 'items',
+      sourceCursorStart: null,
+    });
+
+    await manifestTracker.transitionState('run_crash_unknown_fail', 'batch_unknown_2', 'RUNNING');
+    await manifestTracker.updateSubStage('run_crash_unknown_fail', 'batch_unknown_2', 'WRITE_STARTED');
+    await manifestTracker.transitionState('run_crash_unknown_fail', 'batch_unknown_2', 'OUTCOME_UNKNOWN');
+
+    await manifestTracker.recordManifests([
+      {
+        migrationRunId: 'run_crash_unknown_fail',
+        batchKey: 'batch_unknown_2',
+        sourceObject: 'items',
+        sourceKey: 'src_1',
+        destinationObject: 'items',
+        destinationKey: 'missing_key_1',
+        status: 'WRITTEN',
+      },
+    ]);
+
+    const plan = await engine.prepareResume('run_crash_unknown_fail', 'items', 'items');
+
+    // Engine discovered records are missing in destination, resets to RETRY_WAIT for idempotent retry
+    expect(plan.reconciledBatches[0].resolvedStatus).toBe('RETRY_WAIT');
+    expect(plan.lastCommittedSequenceNo).toBe(0);
+
+    const updated = await manifestTracker.getBatch('run_crash_unknown_fail', 'batch_unknown_2');
+    expect(updated?.status).toBe('RETRY_WAIT');
+  });
+});

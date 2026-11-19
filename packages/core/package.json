@@ -1,0 +1,20 @@
+{
+  "name": "@migrationguard/core",
+  "version": "0.1.0",
+  "description": "MigrationGuard core domain types, connectors, transformation engine, and canonical hashing",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --test --experimental-strip-types \"test/**/*.spec.ts\"",
+    "test:fault-injection": "node --test --experimental-strip-types \"test/fault-injection.spec.ts\""
+  }
+}

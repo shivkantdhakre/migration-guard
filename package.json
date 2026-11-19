@@ -1,6 +1,7 @@
 {
   "name": "migration-guard-monorepo",
   "version": "0.1.0",
+  "type": "module",
   "private": true,
   "description": "MigrationGuard — AI-Native Data Migration & Assurance Platform",
   "scripts": {

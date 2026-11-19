@@ -24,7 +24,17 @@ import {
   MOCK_COPILOT_MESSAGES,
 } from './mock-data';
 
-const BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001/api/v1';
+const BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000/api/v1';
+
+function getAuthHeader(): Record<string, string> {
+  if (typeof window !== 'undefined') {
+    const token = localStorage.getItem('mg_auth_token');
+    if (token) {
+      return { Authorization: `Bearer ${token}` };
+    }
+  }
+  return {};
+}
 
 async function fetchWithFallback<T>(url: string, options: any = {}, fallbackData: T): Promise<T> {
   try {
@@ -32,6 +42,7 @@ async function fetchWithFallback<T>(url: string, options: any = {}, fallbackData
       ...options,
       headers: {
         'Content-Type': 'application/json',
+        ...getAuthHeader(),
         ...(options.headers || {}),
       },
     });

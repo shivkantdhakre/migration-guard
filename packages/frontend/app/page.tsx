@@ -58,9 +58,9 @@ export default function DashboardPage() {
     load();
   }, []);
 
-  const activeRun = runs.find((r) => r.status === 'RUNNING') || runs[0];
+  const activeRun = runs.find((r) => r.status === 'RUNNING') || runs[0] || MOCK_MIGRATION_RUNS[0];
   const progressPercent = Math.round(
-    (activeRun.processedRecords / activeRun.totalRecords) * 100
+    ((activeRun?.processedRecords || 0) / (activeRun?.totalRecords || 1)) * 100
   );
 
   return (

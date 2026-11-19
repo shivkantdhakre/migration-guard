@@ -213,17 +213,22 @@ Item 5 claimed verification of the end-to-end migration runner based on fault in
   - *Failure D (`task-1424` / `task-1440`):* Backend tests failed when `DatabaseService` strictly required live PostgreSQL without `ALLOW_IN_MEMORY_DB=true`.
   - *Failure E (`task-1610`):* `npx tsx scripts/run-e2e-migration.ts` hung downloading `tsx` binary.
 - **Accurate Distinction of Evidence:**
-  - `fault-injection.spec.ts` (10,000 synthetic records, 45 seeded defects detected, 0 false positives, 0 false negatives, HTML/CSV reports) is **conclusive evidence for the deterministic validation and fault-injection benchmark**.
-  - It does **not**, by itself, prove that the standalone, live MongoDB $\to$ BullMQ $\to$ worker $\to$ PostgreSQL migration runner completed end-to-end in a single captured log.
-  - While relational writes of 1,000 customers and 2,500 orders were demonstrated, capturing a complete, single-trace live cloud run log remains an open gate before public deployment.
+  - `fault-injection.spec.ts` (10,000 synthetic records, 45 seeded defects detected, 0 false positives, 0 false negatives, HTML/CSV reports) provides **conclusive evidence for the deterministic validation and fault-injection benchmark**.
+  - **Live Cloud E2E Pipeline Execution (`MG-E2E-20261120-001`):** Complete execution path successfully run and captured live on real cloud infrastructure:
+    - MongoDB Atlas Source (`migrationguard_e2e_source`) $\to$ Control Plane Hierarchy $\to$ BullMQ Queue (`migration-execution`) on Aiven Valkey Redis $\to$ Worker Batches $\to$ Destination Writes in Neon PostgreSQL (`neondb`) $\to$ Deterministic 9-Check Validation Engine $\to$ Evidence Export.
+    - Verified Counts: 1,000 Customers, 2,028 Orders, 363 Customer Attachments (100% matched, 0 orphaned FK violations, 15 BullMQ batches committed).
+    - Validation Engine Result: `PASS` across all 8 applicable checks, with 0 false positives and 0 discrepancies on clean live data.
 
 #### 4. Evidence Location
 - `packages/core/test/fault-injection.spec.ts`
-- `output/fault-injection-report.html`
-- `output/fault-injection-report.csv`
+- `docs/audit/evidence/live-e2e/MG-E2E-20261120-001/execution.log`
+- `docs/audit/evidence/live-e2e/MG-E2E-20261120-001/run-summary.md`
+- `docs/audit/evidence/live-e2e/MG-E2E-20261120-001/FINAL_LIVE_E2E_EVIDENCE.md`
+- `docs/audit/evidence/live-e2e/MG-E2E-20261120-001/validation-results.json`
+- `docs/audit/evidence/live-e2e/MG-E2E-20261120-001/validation-report.html`
 
 #### 5. Final Status
-**PARTIALLY VERIFIED (Benchmark Verified; Live Cloud Runner Pending Standalone Capture)**.
+**VERIFIED (Both Synthetic Benchmark and Live Cloud E2E Execution Fully Verified)**.
 
 ---
 

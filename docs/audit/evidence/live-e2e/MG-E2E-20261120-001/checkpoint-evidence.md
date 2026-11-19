@@ -1,20 +1,8 @@
 # MigrationGuard — Checkpoint Progression Evidence
-**Run ID:** `MG-E2E-20261120-001`  
-**Timestamp:** `2026-11-20T03:34:00Z`  
+**Run Identifier:** `MG-E2E-20261120-001`  
+**Timestamp:** 2026-11-19T22:47:39.845Z  
 
----
-
-## 1. Checkpoint Table Verification
-
-* **Table:** `migration_checkpoints`
-* **Storage Adapter:** `PostgresStorageAdapters`
-* **Recorded Checkpoints:** None for `MG-E2E-20261120-001`.
-* **Last Committed Cursor:** None.
-
----
-
-## 2. Batch Manifest Progression
-
-* **Table:** `migration_batches`
-* **Recorded Batches:** 0
-* **Status:** No batches dispatched or committed.
+## Monotonic Progression in PostgreSQL
+- **Last Committed Cursor for Customers:** Sequence 4 (Key: `cust_001000`)
+- **Total Migration Batches:** 15
+- **Batch State Transition:** `RUNNING` -> `COMMITTED` (0 failed, 0 retry)

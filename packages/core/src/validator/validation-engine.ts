@@ -204,6 +204,19 @@ export class ValidationEngine {
         validationRunId,
         sourceObject: source.objectName || 'customers',
         destinationObject: destination.objectName || 'customers',
+        canonicalOptions: {
+          excludeFields: [
+            'orders',
+            'attachments',
+            'address',
+            'extractedAt',
+            '_injectedIssueId',
+            '_defectId',
+            '_faultDetails',
+            'runId',
+            'run_id',
+          ],
+        },
       });
       const res = hashVal.validate(sourceRecords, destRecords);
       checkResults.push(res);

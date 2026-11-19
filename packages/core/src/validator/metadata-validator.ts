@@ -3,6 +3,7 @@ import {
   ValidationCheckResult,
   ValidationCheckState,
 } from './discrepancy.types.js';
+import { canonicalizeToJson } from './canonicalizer.js';
 
 export interface MetadataValidatorOptions {
   checkId?: string;
@@ -114,7 +115,9 @@ export class MetadataValidator {
           valSrc === valDest ||
           (typeof valSrc === 'object' &&
             valSrc !== null &&
-            JSON.stringify(valSrc) === JSON.stringify(valDest));
+            typeof valDest === 'object' &&
+            valDest !== null &&
+            canonicalizeToJson(valSrc) === canonicalizeToJson(valDest));
 
         if (!match) {
           hasMismatch = true;

@@ -90,7 +90,7 @@ export default function MigrationExecutionPage() {
   );
 
   const progressPercent = Math.round(
-    (selectedRun.processedRecords / selectedRun.totalRecords) * 100
+    ((selectedRun?.processedRecords || 0) / (selectedRun?.totalRecords || 1)) * 100
   );
 
   const getBatchBadgeVariant = (status: BatchStatus) => {

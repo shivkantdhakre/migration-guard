@@ -16,7 +16,8 @@
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "start": "node dist/index.js"
+    "start": "node dist/worker-main.js",
+    "start:dev": "tsc -p tsconfig.json && node dist/worker-main.js"
   },
   "dependencies": {
     "@migrationguard/core": "workspace:*",

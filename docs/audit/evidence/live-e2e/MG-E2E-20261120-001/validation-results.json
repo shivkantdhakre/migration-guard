@@ -1,0 +1,19 @@
+{
+  "runId": "MG-E2E-20261120-001",
+  "status": "SKIPPED",
+  "reason": "Preflight failure: MONGO_URL missing and unsandboxed network permission denied",
+  "timestamp": "2026-11-20T03:34:00Z",
+  "checks": [
+    { "checkId": "ROW_COUNT_VERIFICATION", "status": "SKIPPED", "discrepancies": 0 },
+    { "checkId": "PRIMARY_KEY_UNIQUENESS", "status": "SKIPPED", "discrepancies": 0 },
+    { "checkId": "FOREIGN_KEY_REFERENTIAL_INTEGRITY", "status": "SKIPPED", "discrepancies": 0 },
+    { "checkId": "DATA_TYPE_FIDELITY", "status": "SKIPPED", "discrepancies": 0 },
+    { "checkId": "NULLABILITY_CONSTRAINT_MATCH", "status": "SKIPPED", "discrepancies": 0 },
+    { "checkId": "CANONICAL_HASH_CHECKSUM", "status": "SKIPPED", "discrepancies": 0 },
+    { "checkId": "ATTACHMENT_METADATA_INTEGRITY", "status": "SKIPPED", "discrepancies": 0 },
+    { "checkId": "STRING_NORMALIZATION_VALIDATION", "status": "SKIPPED", "discrepancies": 0 },
+    { "checkId": "NUMERIC_SCALE_PRECISION_CHECK", "status": "SKIPPED", "discrepancies": 0 }
+  ],
+  "discrepanciesDetected": 0,
+  "fabricated": false
+}

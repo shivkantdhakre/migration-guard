@@ -340,9 +340,11 @@ All 59 (or 54) requirements implemented; CDC hooks implemented.
    - Rotate Google Cloud Gemini API key in Google AI Studio.
    - Verify that all previously recorded credential values fail to authenticate.
 
-2. **Capture Reproducible Standalone Live Cloud E2E Migration Run Log:**
-   - Execute a single, un-interrupted cloud migration trace (MongoDB $\to$ BullMQ $\to$ worker $\to$ PostgreSQL $\to$ Validation).
-   - Capture the end-to-end log showing connection, batch dispatch, destination writes, and validation check summary in a single artifact.
+2. **Capture Reproducible Standalone Live Cloud E2E Migration Run Log (ACTIVE GATE):**
+   - Attempted execution under Run ID `MG-E2E-20261120-001`.
+   - Preflight inspection halted run prior to data mutation: `MONGO_URL` unconfigured in `.env`; standard execution sandbox blocks outbound cloud network DNS (`getaddrinfo ENOTFOUND`), and unsandboxed execution was denied.
+   - Comprehensive preflight evidence and un-fabricated audit records preserved in `docs/audit/evidence/live-e2e/MG-E2E-20261120-001/`.
+   - Gate remains open until executed in a network-enabled environment with configured MongoDB.
 
 3. **Demonstrate OS-Level Process Crash & Restart:**
    - Terminate an active worker process using OS signals (`SIGKILL`) and restart against persistent PostgreSQL and Valkey queue to confirm live process-level crash recovery.

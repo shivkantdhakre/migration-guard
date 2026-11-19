@@ -23,8 +23,18 @@ export class DiscrepancyService {
     let paramIdx = 2;
 
     if (filter.category) {
-      query += ` AND category = $${paramIdx++}`;
-      params.push(filter.category);
+      if (filter.category === 'ATTACHMENT' || filter.category === 'MISSING_ATTACHMENT') {
+        query += ` AND (category = 'ATTACHMENT' OR category = 'MISSING_ATTACHMENT')`;
+      } else if (filter.category === 'DUPLICATE' || filter.category === 'DUPLICATE_RECORD') {
+        query += ` AND (category = 'DUPLICATE' OR category = 'DUPLICATE_RECORD')`;
+      } else if (filter.category === 'RELATIONSHIP' || filter.category === 'BROKEN_REFERENCE') {
+        query += ` AND (category = 'RELATIONSHIP' OR category = 'BROKEN_REFERENCE')`;
+      } else if (filter.category === 'METADATA' || filter.category === 'METADATA_MISMATCH') {
+        query += ` AND (category = 'METADATA' OR category = 'METADATA_MISMATCH')`;
+      } else {
+        query += ` AND category = $${paramIdx++}`;
+        params.push(filter.category);
+      }
     }
     if (filter.severity) {
       query += ` AND severity = $${paramIdx++}`;
@@ -45,8 +55,18 @@ export class DiscrepancyService {
     const countParams: any[] = [validationRunId];
     let cIdx = 2;
     if (filter.category) {
-      countQuery += ` AND category = $${cIdx++}`;
-      countParams.push(filter.category);
+      if (filter.category === 'ATTACHMENT' || filter.category === 'MISSING_ATTACHMENT') {
+        countQuery += ` AND (category = 'ATTACHMENT' OR category = 'MISSING_ATTACHMENT')`;
+      } else if (filter.category === 'DUPLICATE' || filter.category === 'DUPLICATE_RECORD') {
+        countQuery += ` AND (category = 'DUPLICATE' OR category = 'DUPLICATE_RECORD')`;
+      } else if (filter.category === 'RELATIONSHIP' || filter.category === 'BROKEN_REFERENCE') {
+        countQuery += ` AND (category = 'RELATIONSHIP' OR category = 'BROKEN_REFERENCE')`;
+      } else if (filter.category === 'METADATA' || filter.category === 'METADATA_MISMATCH') {
+        countQuery += ` AND (category = 'METADATA' OR category = 'METADATA_MISMATCH')`;
+      } else {
+        countQuery += ` AND category = $${cIdx++}`;
+        countParams.push(filter.category);
+      }
     }
     if (filter.severity) {
       countQuery += ` AND severity = $${cIdx++}`;

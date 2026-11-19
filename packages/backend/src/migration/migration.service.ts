@@ -3,15 +3,18 @@ import {
   NotFoundException,
   ConflictException,
   ForbiddenException,
+  Optional,
 } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
 import { WorkspaceService } from '../workspace/workspace.service';
+import { QueueService, MigrationJobPayload } from '../queue/queue.service';
 
 @Injectable()
 export class MigrationService {
   constructor(
     private db: DatabaseService,
     private workspaceService: WorkspaceService,
+    @Optional() private queueService?: QueueService,
   ) {}
 
   async startMigrationRun(planVersionId: string, userId: string) {
@@ -67,6 +70,12 @@ export class MigrationService {
 
     // Seed initial batches for worker processing
     const batchSize = version.execution_config_json?.batchSize || 1000;
+    const scope = version.scope_json || {};
+    const sourceObject = scope.sourceObject || scope.tables?.[0]?.source || 'customers';
+    const destinationObject = scope.destinationObject || scope.tables?.[0]?.destination || 'customers';
+    const writeMode = version.execution_config_json?.writeMode || 'upsert';
+
+    const payloads: MigrationJobPayload[] = [];
     const totalBatches = 10;
 
     for (let i = 1; i <= totalBatches; i++) {
@@ -79,6 +88,26 @@ export class MigrationService {
          VALUES ($1, $2, $3, 'QUEUED', 0, 0, 0, 0)`,
         [run.id, batchKey, i],
       );
+
+      payloads.push({
+        jobId: `${run.id}_${batchKey}`,
+        migrationRunId: run.id,
+        batchKey,
+        sequenceNo: i,
+        sourceObject,
+        destinationObject,
+        cursorStart: i === 1 ? null : { offset: (i - 1) * batchSize },
+        cursorEnd: { offset: i * batchSize },
+        batchSize,
+        planVersionId,
+        mappingVersionId: version.mapping_version_id || 'default-mapping',
+        writeMode,
+      });
+    }
+
+    // Real BullMQ job dispatch (Phase 2 Remediation)
+    if (this.queueService) {
+      await this.queueService.dispatchBatches(payloads);
     }
 
     // Append to audit events
@@ -100,6 +129,22 @@ export class MigrationService {
       planHash: version.plan_hash,
       createdAt: run.created_at,
     };
+  }
+
+  async listRuns(workspaceId: string, userId: string) {
+    const wsId = await this.workspaceService.resolveWorkspaceId(workspaceId, userId);
+    await this.workspaceService.assertWorkspaceAccess(wsId, userId, 'Viewer');
+
+    const res = await this.db.query(
+      `SELECT mr.*, p.name as project_name, mpv.version as plan_version
+       FROM migration_runs mr
+       LEFT JOIN projects p ON mr.project_id = p.id
+       LEFT JOIN migration_plan_versions mpv ON mr.plan_version_id = mpv.id
+       WHERE mr.workspace_id = $1
+       ORDER BY mr.created_at DESC`,
+      [wsId],
+    );
+    return res.rows;
   }
 
   async getRun(runId: string, userId: string) {
@@ -226,9 +271,42 @@ export class MigrationService {
       `UPDATE migration_batches
        SET status = 'QUEUED', attempt_count = attempt_count + 1
        WHERE migration_run_id = $1 AND status IN ('FAILED_RETRYABLE', 'RETRY_WAIT')
-       RETURNING id`,
+       RETURNING *`,
       [runId],
     );
+
+    // Re-dispatch reset batches to BullMQ
+    if (this.queueService && res.rows.length > 0) {
+      const planRes = await this.db.query(
+        `SELECT mpv.* FROM migration_plan_versions mpv
+         JOIN migration_runs mr ON mr.plan_version_id = mpv.id
+         WHERE mr.id = $1`,
+        [runId],
+      );
+      const version = planRes.rows[0];
+      const batchSize = version?.execution_config_json?.batchSize || 1000;
+      const scope = version?.scope_json || {};
+      const sourceObject = scope.sourceObject || 'customers';
+      const destinationObject = scope.destinationObject || 'customers';
+      const writeMode = version?.execution_config_json?.writeMode || 'upsert';
+
+      const retryPayloads: MigrationJobPayload[] = res.rows.map((b: any) => ({
+        jobId: `${runId}_${b.batch_key}_retry_${b.attempt_count}`,
+        migrationRunId: runId,
+        batchKey: b.batch_key,
+        sequenceNo: Number(b.sequence_no),
+        sourceObject,
+        destinationObject,
+        cursorStart: b.source_cursor_start || null,
+        cursorEnd: b.source_cursor_end || null,
+        batchSize,
+        planVersionId: version?.id || '',
+        mappingVersionId: version?.mapping_version_id || 'default-mapping',
+        writeMode,
+      }));
+
+      await this.queueService.dispatchBatches(retryPayloads);
+    }
 
     return {
       runId,

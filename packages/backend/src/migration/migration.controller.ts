@@ -4,6 +4,7 @@ import {
   Post,
   Param,
   Query,
+  Body,
   UseGuards,
   HttpCode,
   HttpStatus,
@@ -20,6 +21,23 @@ export class MigrationController {
     private readonly migrationService: MigrationService,
     private readonly progressService: ProgressService,
   ) {}
+
+  @Get('migration-runs')
+  async listRuns(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('workspaceId') workspaceId?: string,
+  ) {
+    return this.migrationService.listRuns(workspaceId || 'default', user.id);
+  }
+
+  @Post('migration-runs')
+  @HttpCode(HttpStatus.ACCEPTED)
+  async createRun(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: { planVersionId: string },
+  ) {
+    return this.migrationService.startMigrationRun(body.planVersionId, user.id);
+  }
 
   @Post('plan-versions/:versionId/runs')
   @HttpCode(HttpStatus.ACCEPTED)

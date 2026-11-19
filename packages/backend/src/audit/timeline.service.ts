@@ -10,7 +10,8 @@ export class TimelineService {
   ) {}
 
   async getWorkspaceAuditEvents(workspaceId: string, limit = 50, userId: string) {
-    await this.workspaceService.assertWorkspaceAccess(workspaceId, userId, 'Viewer');
+    const wsId = await this.workspaceService.resolveWorkspaceId(workspaceId, userId);
+    await this.workspaceService.assertWorkspaceAccess(wsId, userId, 'Viewer');
 
     const res = await this.db.query(
       `SELECT ae.*, u.email as actor_email, u.name as actor_name
@@ -19,7 +20,7 @@ export class TimelineService {
        WHERE ae.workspace_id = $1
        ORDER BY ae.created_at DESC
        LIMIT $2`,
-      [workspaceId, limit],
+      [wsId, limit],
     );
     return res.rows;
   }

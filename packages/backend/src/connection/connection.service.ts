@@ -26,19 +26,21 @@ export class ConnectionService {
   ) {}
 
   async listConnections(workspaceId: string, userId: string) {
-    await this.workspaceService.assertWorkspaceAccess(workspaceId, userId, 'Viewer');
+    const wsId = await this.workspaceService.resolveWorkspaceId(workspaceId, userId);
+    await this.workspaceService.assertWorkspaceAccess(wsId, userId, 'Viewer');
     const res = await this.db.query(
       `SELECT id, workspace_id, name, engine, connection_role, config_json, secret_ref, credential_version, status, created_at, updated_at
        FROM connections
        WHERE workspace_id = $1
        ORDER BY created_at DESC`,
-      [workspaceId],
+      [wsId],
     );
     return res.rows.map((r) => this.redactConnection(r));
   }
 
   async createConnection(workspaceId: string, dto: CreateConnectionDto, userId: string) {
-    await this.workspaceService.assertWorkspaceAccess(workspaceId, userId, 'Admin');
+    const wsId = await this.workspaceService.resolveWorkspaceId(workspaceId, userId);
+    await this.workspaceService.assertWorkspaceAccess(wsId, userId, 'Admin');
 
     if (!dto.name || !dto.engine || !dto.connectionRole) {
       throw new BadRequestException('Name, engine, and connectionRole are required.');
@@ -56,7 +58,7 @@ export class ConnectionService {
       `INSERT INTO connections (workspace_id, name, engine, connection_role, config_json, credential_version, status, created_by)
        VALUES ($1, $2, $3, $4, $5, 1, 'UNTESTED', $6)
        RETURNING *`,
-      [workspaceId, dto.name, dto.engine, safeConfig, userId],
+      [wsId, dto.name, dto.engine, dto.connectionRole, safeConfig, userId],
     );
     const conn = connRes.rows[0];
 

@@ -54,7 +54,8 @@ describe('Plan Approval & Canonical Hashing', () => {
     const jwt = new JwtService({ secret: appConfig.jwtSecret });
     authService = new AuthService(db, jwt);
 
-    user = await authService.register('lead@corp.com', 'Tech Lead', 'SecurePassword!');
+    const email = `lead_${Date.now()}_${Math.random().toString(36).slice(2)}@corp.com`;
+    user = await authService.register(email, 'Tech Lead', 'SecurePassword!');
     workspaceId = user.workspace.id;
 
     project = await projectService.createProject(workspaceId, 'E-Commerce Modernization', 'Mongo to PG', user.user.id);

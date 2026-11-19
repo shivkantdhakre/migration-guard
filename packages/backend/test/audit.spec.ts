@@ -28,19 +28,21 @@ describe('Audit Events & Timeline', () => {
     const jwt = new JwtService({ secret: appConfig.jwtSecret });
     authService = new AuthService(db, jwt);
 
-    user = await authService.register('compliance@corp.com', 'Compliance Officer', 'Pass123!');
+    const email = `compliance_${Date.now()}_${Math.random().toString(36).slice(2)}@corp.com`;
+    user = await authService.register(email, 'Compliance Officer', 'Pass123!');
     workspaceId = user.workspace.id;
   });
 
   it('should log immutable audit events with sanitized details and retrieve timeline', async () => {
     // 1. Log privileged mutation with potentially sensitive fields
+    const testResourceId = crypto.randomUUID ? crypto.randomUUID() : 'a0000000-0000-0000-0000-000000000123';
     const event = await auditService.log({
       workspaceId,
       actorType: 'USER',
       actorId: user.user.id,
       action: 'CONNECTION_CREDENTIALS_ROTATED',
       resourceType: 'CONNECTION',
-      resourceId: 'conn_123',
+      resourceId: testResourceId,
       correlationId: 'corr_abc',
       details: {
         engine: 'MONGODB',

@@ -33,12 +33,18 @@ export default function MigrationExecutionPage() {
 
   useEffect(() => {
     async function load() {
-      const data = await apiClient.getMigrationRuns();
-      setRuns(data);
-      if (data.length > 0) {
-        setSelectedRun(data[0]);
-        const b = await apiClient.getMigrationBatches(data[0].id);
-        setBatches(b);
+      try {
+        const data = await apiClient.getMigrationRuns();
+        if (data && Array.isArray(data) && data.length > 0) {
+          setRuns(data);
+          setSelectedRun(data[0]);
+          const b = await apiClient.getMigrationBatches(data[0].id);
+          if (b && Array.isArray(b)) {
+            setBatches(b);
+          }
+        }
+      } catch (err) {
+        console.warn('[MigrationExecutionPage] Notice loading runs:', err);
       }
     }
     load();

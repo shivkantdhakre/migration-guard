@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
 
 @Injectable()
@@ -6,10 +6,17 @@ export class HealthService {
   constructor(private db: DatabaseService) {}
 
   async checkHealth() {
-    const dbStatus = this.db.isDbConnected ? 'UP' : 'MEMORY_STORE_ACTIVE';
+    const isDbAlive = await this.db.ping();
+    const dbStatus = isDbAlive
+      ? 'UP'
+      : this.db.isDbConnected
+      ? 'CONNECTED'
+      : process.env.ALLOW_IN_MEMORY_DB === 'true'
+      ? 'MEMORY_STORE_ACTIVE'
+      : 'DOWN';
 
     return {
-      status: 'OK',
+      status: isDbAlive || process.env.ALLOW_IN_MEMORY_DB === 'true' ? 'OK' : 'DEGRADED',
       timestamp: new Date().toISOString(),
       uptime: process.uptime(),
       components: {
@@ -33,10 +40,19 @@ export class HealthService {
   }
 
   async checkReadiness() {
+    const isDbAlive = await this.db.ping();
+    if (!isDbAlive && process.env.ALLOW_IN_MEMORY_DB !== 'true') {
+      throw new ServiceUnavailableException({
+        status: 'NOT_READY',
+        reason: 'PostgreSQL database is unreachable and in-memory fallback is disabled',
+        timestamp: new Date().toISOString(),
+      });
+    }
+
     return {
       status: 'READY',
       timestamp: new Date().toISOString(),
-      database: this.db.isDbConnected ? 'CONNECTED' : 'MEMORY_FALLBACK',
+      database: isDbAlive ? 'CONNECTED' : 'MEMORY_FALLBACK',
     };
   }
 }

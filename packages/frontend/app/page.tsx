@@ -36,14 +36,24 @@ export default function DashboardPage() {
 
   useEffect(() => {
     async function load() {
-      const [r, v, a] = await Promise.all([
-        apiClient.getMigrationRuns(),
-        apiClient.getValidationRun('run-7c1cda51-0001'),
-        apiClient.getAuditEvents(),
-      ]);
-      setRuns(r);
-      setValRun(v);
-      setAudits(a);
+      try {
+        const [r, v, a] = await Promise.allSettled([
+          apiClient.getMigrationRuns(),
+          apiClient.getValidationRun('run-7c1cda51-0001'),
+          apiClient.getAuditEvents(),
+        ]);
+        if (r.status === 'fulfilled' && r.value && Array.isArray(r.value) && r.value.length > 0) {
+          setRuns(r.value);
+        }
+        if (v.status === 'fulfilled' && v.value) {
+          setValRun(v.value);
+        }
+        if (a.status === 'fulfilled' && a.value && Array.isArray(a.value) && a.value.length > 0) {
+          setAudits(a.value);
+        }
+      } catch (err) {
+        console.warn('[DashboardPage] Notice loading live data:', err);
+      }
     }
     load();
   }, []);

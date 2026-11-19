@@ -36,7 +36,13 @@ export class ProjectService {
   }
 
   async getProject(projectId: string, userId: string) {
-    const res = await this.db.query('SELECT * FROM projects WHERE id = $1', [projectId]);
+    let query = 'SELECT * FROM projects WHERE id = $1';
+    let params: any[] = [projectId];
+    if (projectId === 'default') {
+      query = 'SELECT * FROM projects ORDER BY created_at ASC LIMIT 1';
+      params = [];
+    }
+    const res = await this.db.query(query, params);
     if (res.rows.length === 0) {
       throw new NotFoundException('Project not found.');
     }

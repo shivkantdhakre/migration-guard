@@ -28,7 +28,8 @@ describe('Connection & Secret Redaction', () => {
     const jwt = new JwtService({ secret: appConfig.jwtSecret });
     authService = new AuthService(db, jwt);
 
-    user = await authService.register('dbadmin@corp.com', 'DB Admin', 'SecretPassword!');
+    const email = `dbadmin_${Date.now()}_${Math.random().toString(36).slice(2)}@corp.com`;
+    user = await authService.register(email, 'DB Admin', 'SecretPassword!');
     workspaceId = user.workspace.id;
   });
 

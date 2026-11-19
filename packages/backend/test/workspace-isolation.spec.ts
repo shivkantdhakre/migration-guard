@@ -21,8 +21,9 @@ describe('WorkspaceIsolation', () => {
   });
 
   it('should isolate workspaces so User A cannot access Workspace B', async () => {
-    const userA = await authService.register('usera@corp.com', 'User A', 'Pass123!');
-    const userB = await authService.register('userb@corp.com', 'User B', 'Pass123!');
+    const rand = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const userA = await authService.register(`usera_${rand}@corp.com`, 'User A', 'Pass123!');
+    const userB = await authService.register(`userb_${rand}@corp.com`, 'User B', 'Pass123!');
 
     const wsAId = userA.workspace.id;
     const wsBId = userB.workspace.id;
@@ -38,12 +39,14 @@ describe('WorkspaceIsolation', () => {
   });
 
   it('should enforce workspace roles and permissions', async () => {
-    const owner = await authService.register('owner@corp.com', 'Owner', 'Pass123!');
-    const member = await authService.register('viewer@corp.com', 'Viewer', 'Pass123!');
+    const rand2 = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const viewerEmail = `viewer_${rand2}@corp.com`;
+    const owner = await authService.register(`owner_${rand2}@corp.com`, 'Owner', 'Pass123!');
+    const member = await authService.register(viewerEmail, 'Viewer', 'Pass123!');
     const wsId = owner.workspace.id;
 
     // Add member as Viewer
-    await workspaceService.addMember(wsId, 'viewer@corp.com', 'Viewer', owner.user.id);
+    await workspaceService.addMember(wsId, viewerEmail, 'Viewer', owner.user.id);
 
     // Viewer can read workspace
     const ws = await workspaceService.getWorkspace(wsId, member.user.id);

@@ -91,10 +91,14 @@ export function injectFaults(cleanDataset: ValidationDataset): FaultInjectionRes
   // 2. EXACTLY 10 DUPLICATE RECORDS
   // -------------------------------------------------------------
   const duplicateCount = 10;
-  // Pick 10 records at distinct positions (e.g. indices 100, 200, 300, ...)
+  // Pick 10 records at distinct positions
   for (let i = 0; i < duplicateCount; i++) {
-    const originalIndex = (i + 1) * 100;
+    const originalIndex = Math.min(
+      clonedRecords.length - 1,
+      Math.floor(((i + 1) * clonedRecords.length) / (duplicateCount + 2))
+    );
     const originalRecord = clonedRecords[originalIndex];
+    if (!originalRecord) continue;
     const issueId = `INJ-DUP-${String(i + 1).padStart(3, '0')}`;
 
     // Create duplicate copy with same primary id
@@ -123,8 +127,12 @@ export function injectFaults(cleanDataset: ValidationDataset): FaultInjectionRes
   const brokenRefCount = 8;
   // Pick 8 orders from child orders
   for (let i = 0; i < brokenRefCount; i++) {
-    const orderIndex = (i + 1) * 75;
+    const orderIndex = Math.min(
+      clonedOrders.length - 1,
+      Math.floor(((i + 1) * clonedOrders.length) / (brokenRefCount + 2))
+    );
     const order = clonedOrders[orderIndex];
+    if (!order) continue;
     const issueId = `INJ-REF-${String(i + 1).padStart(3, '0')}`;
     const originalCustomerId = order.customerId;
     const nonExistentCustomerId = `cust_BROKEN_NONEXISTENT_${String(i + 1).padStart(3, '0')}`;

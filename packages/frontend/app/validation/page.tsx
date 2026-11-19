@@ -39,10 +39,16 @@ export default function ValidationCenterPage() {
 
   useEffect(() => {
     async function load() {
-      const v = await apiClient.getValidationRun('run-7c1cda51-0001');
-      const d = await apiClient.getDiscrepancies('run-7c1cda51-0001');
-      setValRun(v);
-      setDiscrepancies(d);
+      try {
+        const [v, d] = await Promise.allSettled([
+          apiClient.getValidationRun('run-7c1cda51-0001'),
+          apiClient.getDiscrepancies('run-7c1cda51-0001'),
+        ]);
+        if (v.status === 'fulfilled' && v.value) setValRun(v.value);
+        if (d.status === 'fulfilled' && d.value && Array.isArray(d.value)) setDiscrepancies(d.value);
+      } catch (err) {
+        console.warn('[ValidationCenterPage] Notice loading validation data:', err);
+      }
     }
     load();
   }, []);

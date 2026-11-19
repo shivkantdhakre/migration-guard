@@ -6,5 +6,8 @@ export default defineConfig({
     environment: 'node',
     include: ['test/**/*.spec.ts'],
     testTimeout: 20000,
+    env: {
+      ALLOW_IN_MEMORY_DB: 'true',
+    },
   },
 });

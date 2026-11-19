@@ -24,5 +24,7 @@ export {
   ValidationEngine,
   generateSyntheticDataset,
   injectFaults,
+  type ValidationDataset,
+  type ValidationRunSummary,
 } from './validator/index.js';
 export * from './reports/index.js';

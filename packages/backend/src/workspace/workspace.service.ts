@@ -128,14 +128,33 @@ export class WorkspaceService {
     return updateRes.rows[0];
   }
 
+  public async resolveWorkspaceId(workspaceId: string, userId: string): Promise<string> {
+    if (workspaceId === 'default') {
+      const defaultWs = await this.db.query(
+        'SELECT workspace_id FROM workspace_members WHERE user_id = $1 ORDER BY created_at ASC LIMIT 1',
+        [userId],
+      );
+      if (defaultWs.rows.length > 0) {
+        return defaultWs.rows[0].workspace_id;
+      }
+      const anyWs = await this.db.query('SELECT id FROM workspaces ORDER BY created_at ASC LIMIT 1');
+      if (anyWs.rows.length > 0) {
+        return anyWs.rows[0].id;
+      }
+      throw new ForbiddenException('No active workspace found.');
+    }
+    return workspaceId;
+  }
+
   public async assertWorkspaceAccess(
     workspaceId: string,
     userId: string,
     minRole: UserRole = 'Viewer',
   ): Promise<UserRole> {
+    const resolvedId = await this.resolveWorkspaceId(workspaceId, userId);
     const res = await this.db.query(
       'SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_id = $2',
-      [workspaceId, userId],
+      [resolvedId, userId],
     );
 
     if (res.rows.length === 0) {

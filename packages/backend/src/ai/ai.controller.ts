@@ -11,7 +11,7 @@ import {
 import { AiService } from './ai.service.js';
 import { ToolExecutionContext } from './types.js';
 
-@Controller('api/v1')
+@Controller()
 export class AiController {
   constructor(private readonly aiService: AiService) {}
 

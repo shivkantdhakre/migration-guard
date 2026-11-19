@@ -31,6 +31,32 @@ export class PlanService {
     return res.rows[0];
   }
 
+  async listPlansForProject(projectId: string, userId: string) {
+    const project = await this.projectService.getProject(projectId, userId);
+    await this.workspaceService.assertWorkspaceAccess(project.workspace_id, userId, 'Viewer');
+
+    const res = await this.db.query(
+      `SELECT mp.*, (
+         SELECT json_agg(json_build_object(
+           'id', mpv.id,
+           'version', mpv.version,
+           'planHash', mpv.plan_hash,
+           'sourceConnectionId', mpv.source_connection_id,
+           'destinationConnectionId', mpv.destination_connection_id,
+           'status', mpv.status,
+           'createdAt', mpv.created_at
+         ))
+         FROM migration_plan_versions mpv
+         WHERE mpv.plan_id = mp.id
+       ) as versions
+       FROM migration_plans mp
+       WHERE mp.project_id = $1
+       ORDER BY mp.created_at DESC`,
+      [project.id],
+    );
+    return res.rows;
+  }
+
   async getPlan(planId: string, userId: string) {
     const res = await this.db.query('SELECT * FROM migration_plans WHERE id = $1', [planId]);
     if (res.rows.length === 0) {

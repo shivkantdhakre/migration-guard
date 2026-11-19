@@ -32,6 +32,14 @@ export class ValidationController {
     return this.validationService.triggerValidation(runId, user.id);
   }
 
+  @Get('migration-runs/:runId/validations')
+  async getValidationForRun(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('runId') runId: string,
+  ) {
+    return this.validationService.getValidationForRun(runId, user.id);
+  }
+
   @Get('validation-runs/:validationRunId')
   async getValidationRun(
     @CurrentUser() user: AuthenticatedUser,

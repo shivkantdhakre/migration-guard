@@ -35,6 +35,14 @@ export class PlanController {
     return this.planService.createPlan(projectId, body.name, user.id);
   }
 
+  @Get('projects/:projectId/plans')
+  async listPlans(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('projectId') projectId: string,
+  ) {
+    return this.planService.listPlansForProject(projectId, user.id);
+  }
+
   @Get('plans/:planId')
   async getPlan(
     @CurrentUser() user: AuthenticatedUser,

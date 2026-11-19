@@ -13,10 +13,12 @@ import { ReportModule } from './report/report.module';
 import { AuditModule } from './audit/audit.module';
 import { HealthModule } from './health/health.module';
 import { AiModule } from './ai/ai.module';
+import { QueueModule } from './queue/queue.module';
 
 @Module({
   imports: [
     DatabaseModule,
+    QueueModule,
     AuthModule,
     WorkspaceModule,
     ProjectModule,

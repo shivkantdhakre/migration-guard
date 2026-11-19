@@ -15,15 +15,18 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   private pool: pg.Pool | null = null;
   private isConnected = false;
 
-  // In-memory relational store fallback for testing or offline dev
+  // In-memory relational store fallback for unit testing or explicitly enabled offline dev
   private memoryStore: Map<string, Map<string, any>> = new Map();
 
   async onModuleInit() {
     this.initMemoryTables();
+    const isInMemoryAllowed = process.env.ALLOW_IN_MEMORY_DB === 'true';
+
     try {
       this.pool = new pg.Pool({
         connectionString: appConfig.databaseUrl,
-        connectionTimeoutMillis: 2000,
+        connectionTimeoutMillis: 10000,
+        max: 10,
       });
 
       const client = await this.pool.connect();
@@ -32,21 +35,43 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       console.log('[DatabaseService] Connected to PostgreSQL successfully.');
       await this.runMigrations();
     } catch (err: any) {
-      console.warn(
-        `[DatabaseService] PostgreSQL not available (${err.message}). Using built-in memory store.`,
-      );
       this.isConnected = false;
+      if (process.env.NODE_ENV === 'production' || !isInMemoryAllowed) {
+        console.error(`[DatabaseService] CRITICAL: Failed to connect to mandatory PostgreSQL (${err.message}).`);
+        // If in-memory is not explicitly permitted, throw fatal error
+        if (!isInMemoryAllowed) {
+          throw new Error(
+            `[DatabaseService] Database connection failed and in-memory fallback is disabled: ${err.message}`,
+          );
+        }
+      }
+      console.warn(
+        `[DatabaseService] PostgreSQL not available (${err.message}). Using built-in memory store (ALLOW_IN_MEMORY_DB=true).`,
+      );
     }
   }
 
   async onModuleDestroy() {
     if (this.pool) {
       await this.pool.end();
+      this.isConnected = false;
     }
   }
 
   public get isDbConnected(): boolean {
     return this.isConnected;
+  }
+
+  public async ping(): Promise<boolean> {
+    if (!this.isConnected || !this.pool) {
+      return false;
+    }
+    try {
+      await this.pool.query('SELECT 1');
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private initMemoryTables() {
@@ -98,29 +123,56 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       }
     } catch (err: any) {
       console.error('[DatabaseService] Migration failed:', err.message);
+      throw err;
     }
   }
 
   /**
-   * Executes a parameterized SQL query
+   * Executes a parameterized SQL query.
+   * If PostgreSQL is connected, executes directly on PostgreSQL.
+   * SQL errors from PostgreSQL are NEVER swallowed or silently redirected to memory.
    */
   async query<T extends pg.QueryResultRow = any>(text: string, params: any[] = []): Promise<QueryResult<T>> {
     if (this.isConnected && this.pool) {
-      try {
-        const res = await this.pool.query<T>(text, params);
-        return {
-          rows: res.rows,
-          rowCount: res.rowCount ?? res.rows.length,
-        };
-      } catch (err) {
-        return this.queryMemory<T>(text, params);
-      }
+      const res = await this.pool.query<T>(text, params);
+      return {
+        rows: res.rows,
+        rowCount: res.rowCount ?? res.rows.length,
+      };
     }
-    return this.queryMemory<T>(text, params);
+
+    if (process.env.ALLOW_IN_MEMORY_DB === 'true' || process.env.NODE_ENV === 'test') {
+      return this.queryMemory<T>(text, params);
+    }
+
+    throw new Error(
+      '[DatabaseService] Cannot execute query: PostgreSQL is not connected and in-memory store is disabled.',
+    );
   }
 
   /**
-   * Memory store query simulator supporting standard CRUD
+   * Execute operations within a PostgreSQL transaction
+   */
+  async transaction<T>(callback: (client: pg.PoolClient) => Promise<T>): Promise<T> {
+    if (!this.isConnected || !this.pool) {
+      throw new Error('[DatabaseService] Transactions require an active PostgreSQL connection.');
+    }
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await callback(client);
+      await client.query('COMMIT');
+      return result;
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Memory store query simulator supporting standard CRUD (used only when ALLOW_IN_MEMORY_DB=true)
    */
   private queryMemory<T extends pg.QueryResultRow = any>(text: string, params: any[] = []): QueryResult<T> {
     const trimmed = text.trim();
@@ -298,7 +350,6 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       const conditions = whereClause.split(/\s+AND\s+/i);
 
       for (const cond of conditions) {
-        // match (alias.)col = $n or (alias.)col = 'literal' or (alias.)col IN (...)
         const paramMatch = /(?:[a-zA-Z0-9_]+\.)?([a-zA-Z0-9_]+)\s*=\s*\$(\d+)/i.exec(cond);
         if (paramMatch) {
           const col = paramMatch[1].toLowerCase();
@@ -393,7 +444,6 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     const setPairs = this.splitSqlCsv(setMatch[1]);
     const whereCond = whereMatch[1].trim();
 
-    // Match where condition
     const targetMatch = /(?:[a-zA-Z0-9_]+\.)?([a-zA-Z0-9_]+)\s*=\s*\$(\d+)/i.exec(whereCond);
     if (!targetMatch) return { rows: [], rowCount: 0 };
 

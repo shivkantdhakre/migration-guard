@@ -1,0 +1,989 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MigrationGuard — Automated Validation Assurance Report</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: #f1f5f9;
+      color: #0f172a;
+      margin: 0;
+      padding: 32px 24px;
+      line-height: 1.5;
+    }
+    .container {
+      max-width: 1300px;
+      margin: 0 auto;
+    }
+    .header {
+      background: #0f172a;
+      color: #ffffff;
+      padding: 24px 32px;
+      border-radius: 12px 12px 0 0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .brand {
+      font-size: 22px;
+      font-weight: 800;
+      letter-spacing: -0.5px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .badge-sub {
+      background: #334155;
+      color: #94a3b8;
+      font-size: 12px;
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-weight: 500;
+    }
+    .banner {
+      background: #fef2f2;
+      border: 1px solid #fca5a5;
+      color: #991b1b;
+      padding: 18px 32px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-weight: 600;
+    }
+    .card {
+      background: #ffffff;
+      border-radius: 10px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+      margin-bottom: 24px;
+      border: 1px solid #e2e8f0;
+      overflow: hidden;
+    }
+    .card-header {
+      padding: 16px 24px;
+      background: #f8fafc;
+      border-bottom: 1px solid #e2e8f0;
+      font-size: 15px;
+      font-weight: 700;
+      color: #1e293b;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .card-body {
+      padding: 20px 24px;
+    }
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+    .kpi-card {
+      background: #ffffff;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      padding: 16px 20px;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+    }
+    .kpi-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: #64748b;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .kpi-value {
+      font-size: 28px;
+      font-weight: 800;
+      margin-top: 6px;
+      color: #0f172a;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    th {
+      background: #f8fafc;
+      color: #475569;
+      font-weight: 600;
+      text-align: left;
+      padding: 10px 14px;
+      border-bottom: 1px solid #cbd5e1;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    td {
+      border-bottom: 1px solid #f1f5f9;
+    }
+    .footer {
+      text-align: center;
+      color: #94a3b8;
+      font-size: 12px;
+      margin-top: 40px;
+      padding-bottom: 20px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div>
+        <div class="brand">
+          <span>🛡️ MigrationGuard</span>
+          <span class="badge-sub">Validation Engine v1.0</span>
+        </div>
+        <div style="font-size: 13px; color: #94a3b8; margin-top: 4px;">
+          Project: Production Database Migration · MigrationGuard Assurance Engine
+        </div>
+      </div>
+      <div style="text-align: right; font-size: 12px; color: #94a3b8;">
+        <div>Run ID: <code style="color: #38bdf8;">VAL-RUN-FAULT-INJECTION-001</code></div>
+        <div>Migration Run: <code style="color: #a78bfa;">MIG-RUN-FAULT-INJECTION-001</code></div>
+      </div>
+    </div>
+
+    <div class="banner">
+      <div>
+        <span style="font-size: 18px; font-weight: 800;">VERDICT: DISCREPANCIES DETECTED</span>
+        <span style="margin-left: 12px; font-size: 13px; opacity: 0.85;">Completed in 63ms</span>
+      </div>
+      <div>
+        <span style="padding: 4px 12px; border-radius: 9999px; font-size: 12px; font-weight: 700; background-color: #fee2e2; color: #991b1b; border: 1px solid #f87171;">FAIL</span>
+      </div>
+    </div>
+
+    <div style="margin-top: 24px;">
+      <div class="kpi-grid">
+        <div class="kpi-card">
+          <div class="kpi-label">Total Checks</div>
+          <div class="kpi-value">4</div>
+          <div style="font-size: 12px; color: #16a34a; margin-top: 4px;">0 passed · 4 failed</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Total Discrepancies</div>
+          <div class="kpi-value" style="color: #dc2626;">
+            45
+          </div>
+          <div style="font-size: 12px; color: #64748b; margin-top: 4px;">Seed verification</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Critical Severity</div>
+          <div class="kpi-value" style="color: #64748b;">
+            0
+          </div>
+          <div style="font-size: 12px; color: #64748b; margin-top: 4px;">Blocking cutover</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">High Severity</div>
+          <div class="kpi-value" style="color: #ea580c;">
+            33
+          </div>
+          <div style="font-size: 12px; color: #64748b; margin-top: 4px;">Data fidelity issues</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Medium Severity</div>
+          <div class="kpi-value" style="color: #ca8a04;">
+            12
+          </div>
+          <div style="font-size: 12px; color: #64748b; margin-top: 4px;">Metadata & formatting</div>
+        </div>
+      </div>
+    </div>
+
+    
+    <div class="card">
+      <div class="card-header">Discrepancy Distribution by Category</div>
+      <div class="card-body" style="display: flex; flex-wrap: wrap; gap: 8px;">
+        
+      <div style="background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 16px; margin: 4px; flex: 1 1 200px; box-shadow: 0 1px 2px rgba(0,0,0,0.03);">
+        <div style="font-size: 11px; font-weight: 600; text-transform: uppercase; color: #64748b; letter-spacing: 0.5px;">DUPLICATE_RECORD</div>
+        <div style="font-size: 20px; font-weight: 700; color: #0f172a; margin-top: 4px;">10</div>
+      </div>
+      <div style="background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 16px; margin: 4px; flex: 1 1 200px; box-shadow: 0 1px 2px rgba(0,0,0,0.03);">
+        <div style="font-size: 11px; font-weight: 600; text-transform: uppercase; color: #64748b; letter-spacing: 0.5px;">MISSING_ATTACHMENT</div>
+        <div style="font-size: 20px; font-weight: 700; color: #0f172a; margin-top: 4px;">15</div>
+      </div>
+      <div style="background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 16px; margin: 4px; flex: 1 1 200px; box-shadow: 0 1px 2px rgba(0,0,0,0.03);">
+        <div style="font-size: 11px; font-weight: 600; text-transform: uppercase; color: #64748b; letter-spacing: 0.5px;">BROKEN_REFERENCE</div>
+        <div style="font-size: 20px; font-weight: 700; color: #0f172a; margin-top: 4px;">8</div>
+      </div>
+      <div style="background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 16px; margin: 4px; flex: 1 1 200px; box-shadow: 0 1px 2px rgba(0,0,0,0.03);">
+        <div style="font-size: 11px; font-weight: 600; text-transform: uppercase; color: #64748b; letter-spacing: 0.5px;">METADATA_MISMATCH</div>
+        <div style="font-size: 20px; font-weight: 700; color: #0f172a; margin-top: 4px;">12</div>
+      </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span>Deterministic Check Breakdown</span>
+        <span style="font-size: 12px; font-weight: 500; color: #64748b;">4 verification engines executed</span>
+      </div>
+      <div style="overflow-x: auto;">
+        <table>
+          <thead>
+            <tr>
+              <th>Check Suite</th>
+              <th>Category</th>
+              <th style="text-align: center;">State</th>
+              <th style="text-align: right;">Evaluated</th>
+              <th style="text-align: right;">Passed</th>
+              <th style="text-align: right;">Failed</th>
+              <th style="text-align: right;">Duration</th>
+            </tr>
+          </thead>
+          <tbody>
+            
+      <tr>
+        <td style="padding: 10px 14px; font-weight: 600; color: #1e293b;">Duplicate Record Detection (customers)</td>
+        <td style="padding: 10px 14px; font-family: monospace; font-size: 12px; color: #475569;">DUPLICATE_RECORD</td>
+        <td style="padding: 10px 14px; text-align: center;"><span style="padding: 4px 12px; border-radius: 9999px; font-size: 12px; font-weight: 700; background-color: #fee2e2; color: #991b1b; border: 1px solid #f87171;">FAIL</span></td>
+        <td style="padding: 10px 14px; text-align: right; font-family: monospace;">10,010</td>
+        <td style="padding: 10px 14px; text-align: right; color: #16a34a; font-family: monospace;">10,000</td>
+        <td style="padding: 10px 14px; text-align: right; color: #dc2626; font-family: monospace; font-weight: 700;">10</td>
+        <td style="padding: 10px 14px; text-align: right; color: #64748b; font-size: 12px;">7ms</td>
+      </tr>
+      <tr>
+        <td style="padding: 10px 14px; font-weight: 600; color: #1e293b;">Attachment Presence &amp; Checksum Verification (attachments)</td>
+        <td style="padding: 10px 14px; font-family: monospace; font-size: 12px; color: #475569;">MISSING_ATTACHMENT</td>
+        <td style="padding: 10px 14px; text-align: center;"><span style="padding: 4px 12px; border-radius: 9999px; font-size: 12px; font-weight: 700; background-color: #fee2e2; color: #991b1b; border: 1px solid #f87171;">FAIL</span></td>
+        <td style="padding: 10px 14px; text-align: right; font-family: monospace;">3,546</td>
+        <td style="padding: 10px 14px; text-align: right; color: #16a34a; font-family: monospace;">3,531</td>
+        <td style="padding: 10px 14px; text-align: right; color: #dc2626; font-family: monospace; font-weight: 700;">15</td>
+        <td style="padding: 10px 14px; text-align: right; color: #64748b; font-size: 12px;">2ms</td>
+      </tr>
+      <tr>
+        <td style="padding: 10px 14px; font-weight: 600; color: #1e293b;">Parent-Child Relationship Integrity (orders -&gt; customers)</td>
+        <td style="padding: 10px 14px; font-family: monospace; font-size: 12px; color: #475569;">BROKEN_REFERENCE</td>
+        <td style="padding: 10px 14px; text-align: center;"><span style="padding: 4px 12px; border-radius: 9999px; font-size: 12px; font-weight: 700; background-color: #fee2e2; color: #991b1b; border: 1px solid #f87171;">FAIL</span></td>
+        <td style="padding: 10px 14px; text-align: right; font-family: monospace;">19,938</td>
+        <td style="padding: 10px 14px; text-align: right; color: #16a34a; font-family: monospace;">19,930</td>
+        <td style="padding: 10px 14px; text-align: right; color: #dc2626; font-family: monospace; font-weight: 700;">8</td>
+        <td style="padding: 10px 14px; text-align: right; color: #64748b; font-size: 12px;">5ms</td>
+      </tr>
+      <tr>
+        <td style="padding: 10px 14px; font-weight: 600; color: #1e293b;">Metadata Comparison (customers -&gt; customers)</td>
+        <td style="padding: 10px 14px; font-family: monospace; font-size: 12px; color: #475569;">METADATA_MISMATCH</td>
+        <td style="padding: 10px 14px; text-align: center;"><span style="padding: 4px 12px; border-radius: 9999px; font-size: 12px; font-weight: 700; background-color: #fee2e2; color: #991b1b; border: 1px solid #f87171;">FAIL</span></td>
+        <td style="padding: 10px 14px; text-align: right; font-family: monospace;">10,000</td>
+        <td style="padding: 10px 14px; text-align: right; color: #16a34a; font-family: monospace;">9,988</td>
+        <td style="padding: 10px 14px; text-align: right; color: #dc2626; font-family: monospace; font-weight: 700;">12</td>
+        <td style="padding: 10px 14px; text-align: right; color: #64748b; font-size: 12px;">46ms</td>
+      </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span>Discrepancy Explorer</span>
+        <span style="font-size: 12px; font-weight: 500; color: #64748b;">Showing 45 itemized findings</span>
+      </div>
+      <div style="overflow-x: auto; max-height: 600px; overflow-y: auto;">
+        <table>
+          <thead>
+            <tr>
+              <th>Issue ID</th>
+              <th>Category</th>
+              <th style="text-align: center;">Severity</th>
+              <th>Source Key</th>
+              <th>Dest Key</th>
+              <th>Expected</th>
+              <th>Actual</th>
+              <th>Explanation</th>
+              <th>Detected At</th>
+            </tr>
+          </thead>
+          <tbody>
+            
+      <tr style="background-color: #ffffff;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-DUP-001</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            DUPLICATE_RECORD
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #ffedd5; color: #9a3412; border: 1px solid #fb923c;">HIGH</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">cust_000101</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">cust_000101</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="Unique occurrence for key cust_000101">Unique occurrence for key cust_000101</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title="Duplicate record observed at index 10000 (occurrence #2)">Duplicate record observed at index 10000 (occurrence #2)</td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Duplicate record detected for key &#039;cust_000101&#039; in customers. Key was already seen previously in dataset.</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #f8fafc;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-DUP-002</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            DUPLICATE_RECORD
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #ffedd5; color: #9a3412; border: 1px solid #fb923c;">HIGH</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">cust_000201</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">cust_000201</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="Unique occurrence for key cust_000201">Unique occurrence for key cust_000201</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title="Duplicate record observed at index 10001 (occurrence #2)">Duplicate record observed at index 10001 (occurrence #2)</td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Duplicate record detected for key &#039;cust_000201&#039; in customers. Key was already seen previously in dataset.</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #ffffff;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-DUP-003</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            DUPLICATE_RECORD
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #ffedd5; color: #9a3412; border: 1px solid #fb923c;">HIGH</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">cust_000301</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">cust_000301</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="Unique occurrence for key cust_000301">Unique occurrence for key cust_000301</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title="Duplicate record observed at index 10002 (occurrence #2)">Duplicate record observed at index 10002 (occurrence #2)</td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Duplicate record detected for key &#039;cust_000301&#039; in customers. Key was already seen previously in dataset.</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #f8fafc;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-DUP-004</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            DUPLICATE_RECORD
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #ffedd5; color: #9a3412; border: 1px solid #fb923c;">HIGH</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">cust_000401</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">cust_000401</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="Unique occurrence for key cust_000401">Unique occurrence for key cust_000401</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title="Duplicate record observed at index 10003 (occurrence #2)">Duplicate record observed at index 10003 (occurrence #2)</td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Duplicate record detected for key &#039;cust_000401&#039; in customers. Key was already seen previously in dataset.</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #ffffff;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-DUP-005</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            DUPLICATE_RECORD
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #ffedd5; color: #9a3412; border: 1px solid #fb923c;">HIGH</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">cust_000501</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">cust_000501</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="Unique occurrence for key cust_000501">Unique occurrence for key cust_000501</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title="Duplicate record observed at index 10004 (occurrence #2)">Duplicate record observed at index 10004 (occurrence #2)</td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Duplicate record detected for key &#039;cust_000501&#039; in customers. Key was already seen previously in dataset.</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #f8fafc;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-DUP-006</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            DUPLICATE_RECORD
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #ffedd5; color: #9a3412; border: 1px solid #fb923c;">HIGH</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">cust_000601</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">cust_000601</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="Unique occurrence for key cust_000601">Unique occurrence for key cust_000601</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title="Duplicate record observed at index 10005 (occurrence #2)">Duplicate record observed at index 10005 (occurrence #2)</td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Duplicate record detected for key &#039;cust_000601&#039; in customers. Key was already seen previously in dataset.</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #ffffff;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-DUP-007</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            DUPLICATE_RECORD
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #ffedd5; color: #9a3412; border: 1px solid #fb923c;">HIGH</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">cust_000701</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">cust_000701</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="Unique occurrence for key cust_000701">Unique occurrence for key cust_000701</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title="Duplicate record observed at index 10006 (occurrence #2)">Duplicate record observed at index 10006 (occurrence #2)</td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Duplicate record detected for key &#039;cust_000701&#039; in customers. Key was already seen previously in dataset.</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #f8fafc;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-DUP-008</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            DUPLICATE_RECORD
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #ffedd5; color: #9a3412; border: 1px solid #fb923c;">HIGH</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">cust_000801</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">cust_000801</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="Unique occurrence for key cust_000801">Unique occurrence for key cust_000801</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title="Duplicate record observed at index 10007 (occurrence #2)">Duplicate record observed at index 10007 (occurrence #2)</td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Duplicate record detected for key &#039;cust_000801&#039; in customers. Key was already seen previously in dataset.</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #ffffff;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-DUP-009</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            DUPLICATE_RECORD
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #ffedd5; color: #9a3412; border: 1px solid #fb923c;">HIGH</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">cust_000901</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">cust_000901</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="Unique occurrence for key cust_000901">Unique occurrence for key cust_000901</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title="Duplicate record observed at index 10008 (occurrence #2)">Duplicate record observed at index 10008 (occurrence #2)</td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Duplicate record detected for key &#039;cust_000901&#039; in customers. Key was already seen previously in dataset.</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #f8fafc;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-DUP-010</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            DUPLICATE_RECORD
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #ffedd5; color: #9a3412; border: 1px solid #fb923c;">HIGH</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">cust_001001</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">cust_001001</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="Unique occurrence for key cust_001001">Unique occurrence for key cust_001001</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title="Duplicate record observed at index 10009 (occurrence #2)">Duplicate record observed at index 10009 (occurrence #2)</td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Duplicate record detected for key &#039;cust_001001&#039; in customers. Key was already seen previously in dataset.</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #ffffff;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-ATT-001</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            MISSING_ATTACHMENT
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #ffedd5; color: #9a3412; border: 1px solid #fb923c;">HIGH</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">cust_000003</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">att_000001</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{&quot;attachmentId&quot;:&quot;att_000001&quot;,&quot;fileName&quot;:&quot;agreement_000003.pdf&quot;,&quot;byteSize&quot;:27305,&quot;checksum&quot;:&quot;2bce734481d38a77fd27736497987a37522df8170af724e2726f813efd2c368e&quot;}">{&quot;attachmentId&quot;:&quot;att_000001&quot;,&quot;fileName&quot;:&quot;agreement_000003.pdf&quot;,&quot;byteSize&quot;:27305,&quot;checksum&quot;:&quot;2bce734481d38a77fd27736497987a37522df8170af724e2726f813efd2c368e&quot;}</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title=""></td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Attachment &#039;agreement_000003.pdf&#039; (att_000001) belonging to record &#039;cust_000003&#039; was not migrated or is missing from destination storage.</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #f8fafc;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-ATT-002</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            MISSING_ATTACHMENT
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #ffedd5; color: #9a3412; border: 1px solid #fb923c;">HIGH</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">cust_000006</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">att_000002</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{&quot;attachmentId&quot;:&quot;att_000002&quot;,&quot;fileName&quot;:&quot;agreement_000006.pdf&quot;,&quot;byteSize&quot;:43398,&quot;checksum&quot;:&quot;eec6df16cedaf479db0f411b2592fdcb76d9fac82a86d8db470ca38e36ce6652&quot;}">{&quot;attachmentId&quot;:&quot;att_000002&quot;,&quot;fileName&quot;:&quot;agreement_000006.pdf&quot;,&quot;byteSize&quot;:43398,&quot;checksum&quot;:&quot;eec6df16cedaf479db0f411b2592fdcb76d9fac82a86d8db470ca38e36ce6652&quot;}</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title=""></td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Attachment &#039;agreement_000006.pdf&#039; (att_000002) belonging to record &#039;cust_000006&#039; was not migrated or is missing from destination storage.</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #ffffff;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-ATT-003</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            MISSING_ATTACHMENT
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #ffedd5; color: #9a3412; border: 1px solid #fb923c;">HIGH</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">cust_000010</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">att_000003</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{&quot;attachmentId&quot;:&quot;att_000003&quot;,&quot;fileName&quot;:&quot;agreement_000010.pdf&quot;,&quot;byteSize&quot;:15083,&quot;checksum&quot;:&quot;ea7bbe94deaf941ac8866569fc4b8bcbc9c0488b3010272abd5b766cf3e3c4cc&quot;}">{&quot;attachmentId&quot;:&quot;att_000003&quot;,&quot;fileName&quot;:&quot;agreement_000010.pdf&quot;,&quot;byteSize&quot;:15083,&quot;checksum&quot;:&quot;ea7bbe94deaf941ac8866569fc4b8bcbc9c0488b3010272abd5b766cf3e3c4cc&quot;}</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title=""></td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Attachment &#039;agreement_000010.pdf&#039; (att_000003) belonging to record &#039;cust_000010&#039; was not migrated or is missing from destination storage.</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #f8fafc;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-ATT-004</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            MISSING_ATTACHMENT
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #ffedd5; color: #9a3412; border: 1px solid #fb923c;">HIGH</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">cust_000011</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">att_000004</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{&quot;attachmentId&quot;:&quot;att_000004&quot;,&quot;fileName&quot;:&quot;agreement_000011.pdf&quot;,&quot;byteSize&quot;:31882,&quot;checksum&quot;:&quot;ac5dcf6bd70c1dae76b962376d3d744514a455c2ac91f27fa45043f3706017b7&quot;}">{&quot;attachmentId&quot;:&quot;att_000004&quot;,&quot;fileName&quot;:&quot;agreement_000011.pdf&quot;,&quot;byteSize&quot;:31882,&quot;checksum&quot;:&quot;ac5dcf6bd70c1dae76b962376d3d744514a455c2ac91f27fa45043f3706017b7&quot;}</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title=""></td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Attachment &#039;agreement_000011.pdf&#039; (att_000004) belonging to record &#039;cust_000011&#039; was not migrated or is missing from destination storage.</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #ffffff;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-ATT-005</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            MISSING_ATTACHMENT
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #ffedd5; color: #9a3412; border: 1px solid #fb923c;">HIGH</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">cust_000013</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">att_000005</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{&quot;attachmentId&quot;:&quot;att_000005&quot;,&quot;fileName&quot;:&quot;agreement_000013.pdf&quot;,&quot;byteSize&quot;:10074,&quot;checksum&quot;:&quot;281e825a526135d9515bc7f757ef8de22fb65dc408f7bc4a6468f41b34a6a929&quot;}">{&quot;attachmentId&quot;:&quot;att_000005&quot;,&quot;fileName&quot;:&quot;agreement_000013.pdf&quot;,&quot;byteSize&quot;:10074,&quot;checksum&quot;:&quot;281e825a526135d9515bc7f757ef8de22fb65dc408f7bc4a6468f41b34a6a929&quot;}</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title=""></td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Attachment &#039;agreement_000013.pdf&#039; (att_000005) belonging to record &#039;cust_000013&#039; was not migrated or is missing from destination storage.</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #f8fafc;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-ATT-006</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            MISSING_ATTACHMENT
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #ffedd5; color: #9a3412; border: 1px solid #fb923c;">HIGH</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">cust_000014</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">att_000006</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{&quot;attachmentId&quot;:&quot;att_000006&quot;,&quot;fileName&quot;:&quot;agreement_000014.pdf&quot;,&quot;byteSize&quot;:21960,&quot;checksum&quot;:&quot;bc7b2bd7cdc5252873ee93510ce22ffcc02138bddc737bea9921531397c785ea&quot;}">{&quot;attachmentId&quot;:&quot;att_000006&quot;,&quot;fileName&quot;:&quot;agreement_000014.pdf&quot;,&quot;byteSize&quot;:21960,&quot;checksum&quot;:&quot;bc7b2bd7cdc5252873ee93510ce22ffcc02138bddc737bea9921531397c785ea&quot;}</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title=""></td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Attachment &#039;agreement_000014.pdf&#039; (att_000006) belonging to record &#039;cust_000014&#039; was not migrated or is missing from destination storage.</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #ffffff;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-ATT-007</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            MISSING_ATTACHMENT
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #ffedd5; color: #9a3412; border: 1px solid #fb923c;">HIGH</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">cust_000018</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">att_000007</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{&quot;attachmentId&quot;:&quot;att_000007&quot;,&quot;fileName&quot;:&quot;agreement_000018.pdf&quot;,&quot;byteSize&quot;:35778,&quot;checksum&quot;:&quot;80854492c15223baad7f1f70c255653ce75e072d65575c0c608720548802a18e&quot;}">{&quot;attachmentId&quot;:&quot;att_000007&quot;,&quot;fileName&quot;:&quot;agreement_000018.pdf&quot;,&quot;byteSize&quot;:35778,&quot;checksum&quot;:&quot;80854492c15223baad7f1f70c255653ce75e072d65575c0c608720548802a18e&quot;}</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title=""></td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Attachment &#039;agreement_000018.pdf&#039; (att_000007) belonging to record &#039;cust_000018&#039; was not migrated or is missing from destination storage.</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #f8fafc;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-ATT-008</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            MISSING_ATTACHMENT
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #ffedd5; color: #9a3412; border: 1px solid #fb923c;">HIGH</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">cust_000019</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">att_000008</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{&quot;attachmentId&quot;:&quot;att_000008&quot;,&quot;fileName&quot;:&quot;agreement_000019.pdf&quot;,&quot;byteSize&quot;:30402,&quot;checksum&quot;:&quot;bc0bd05351c69800f26ef8b516eaf78ea64901a590a42782d20e73b3161c2531&quot;}">{&quot;attachmentId&quot;:&quot;att_000008&quot;,&quot;fileName&quot;:&quot;agreement_000019.pdf&quot;,&quot;byteSize&quot;:30402,&quot;checksum&quot;:&quot;bc0bd05351c69800f26ef8b516eaf78ea64901a590a42782d20e73b3161c2531&quot;}</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title=""></td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Attachment &#039;agreement_000019.pdf&#039; (att_000008) belonging to record &#039;cust_000019&#039; was not migrated or is missing from destination storage.</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #ffffff;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-ATT-009</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            MISSING_ATTACHMENT
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #ffedd5; color: #9a3412; border: 1px solid #fb923c;">HIGH</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">cust_000020</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">att_000009</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{&quot;attachmentId&quot;:&quot;att_000009&quot;,&quot;fileName&quot;:&quot;agreement_000020.pdf&quot;,&quot;byteSize&quot;:33933,&quot;checksum&quot;:&quot;437e88913916b8440913ef3a7f1ee88451d0987b73376c68d596af25fe9aeed5&quot;}">{&quot;attachmentId&quot;:&quot;att_000009&quot;,&quot;fileName&quot;:&quot;agreement_000020.pdf&quot;,&quot;byteSize&quot;:33933,&quot;checksum&quot;:&quot;437e88913916b8440913ef3a7f1ee88451d0987b73376c68d596af25fe9aeed5&quot;}</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title=""></td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Attachment &#039;agreement_000020.pdf&#039; (att_000009) belonging to record &#039;cust_000020&#039; was not migrated or is missing from destination storage.</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #f8fafc;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-ATT-010</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            MISSING_ATTACHMENT
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #ffedd5; color: #9a3412; border: 1px solid #fb923c;">HIGH</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">cust_000022</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">att_000010</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{&quot;attachmentId&quot;:&quot;att_000010&quot;,&quot;fileName&quot;:&quot;agreement_000022.pdf&quot;,&quot;byteSize&quot;:1207,&quot;checksum&quot;:&quot;0e5ab5eed0c3e9426d4e4207e67e393035515fb3165f69fb8faf4cedc64beacd&quot;}">{&quot;attachmentId&quot;:&quot;att_000010&quot;,&quot;fileName&quot;:&quot;agreement_000022.pdf&quot;,&quot;byteSize&quot;:1207,&quot;checksum&quot;:&quot;0e5ab5eed0c3e9426d4e4207e67e393035515fb3165f69fb8faf4cedc64beacd&quot;}</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title=""></td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Attachment &#039;agreement_000022.pdf&#039; (att_000010) belonging to record &#039;cust_000022&#039; was not migrated or is missing from destination storage.</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #ffffff;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-ATT-011</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            MISSING_ATTACHMENT
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #ffedd5; color: #9a3412; border: 1px solid #fb923c;">HIGH</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">cust_000026</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">att_000011</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{&quot;attachmentId&quot;:&quot;att_000011&quot;,&quot;fileName&quot;:&quot;agreement_000026.pdf&quot;,&quot;byteSize&quot;:36142,&quot;checksum&quot;:&quot;48462a7ac4fa5cfd6102bcc73c1c44a4dd3a68d36776043f4dcc6210226355f6&quot;}">{&quot;attachmentId&quot;:&quot;att_000011&quot;,&quot;fileName&quot;:&quot;agreement_000026.pdf&quot;,&quot;byteSize&quot;:36142,&quot;checksum&quot;:&quot;48462a7ac4fa5cfd6102bcc73c1c44a4dd3a68d36776043f4dcc6210226355f6&quot;}</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title=""></td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Attachment &#039;agreement_000026.pdf&#039; (att_000011) belonging to record &#039;cust_000026&#039; was not migrated or is missing from destination storage.</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #f8fafc;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-ATT-012</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            MISSING_ATTACHMENT
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #ffedd5; color: #9a3412; border: 1px solid #fb923c;">HIGH</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">cust_000029</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">att_000012</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{&quot;attachmentId&quot;:&quot;att_000012&quot;,&quot;fileName&quot;:&quot;agreement_000029.pdf&quot;,&quot;byteSize&quot;:18102,&quot;checksum&quot;:&quot;e780bc85f0a92e5d521b91d018ec145b3b7b139b2f6688a14c1be092d6e06237&quot;}">{&quot;attachmentId&quot;:&quot;att_000012&quot;,&quot;fileName&quot;:&quot;agreement_000029.pdf&quot;,&quot;byteSize&quot;:18102,&quot;checksum&quot;:&quot;e780bc85f0a92e5d521b91d018ec145b3b7b139b2f6688a14c1be092d6e06237&quot;}</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title=""></td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Attachment &#039;agreement_000029.pdf&#039; (att_000012) belonging to record &#039;cust_000029&#039; was not migrated or is missing from destination storage.</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #ffffff;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-ATT-013</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            MISSING_ATTACHMENT
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #ffedd5; color: #9a3412; border: 1px solid #fb923c;">HIGH</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">cust_000032</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">att_000013</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{&quot;attachmentId&quot;:&quot;att_000013&quot;,&quot;fileName&quot;:&quot;agreement_000032.pdf&quot;,&quot;byteSize&quot;:4369,&quot;checksum&quot;:&quot;650f9a3cff9fda0f3b2b3cd61d0cc888c212503659d27023634523d30b3b978e&quot;}">{&quot;attachmentId&quot;:&quot;att_000013&quot;,&quot;fileName&quot;:&quot;agreement_000032.pdf&quot;,&quot;byteSize&quot;:4369,&quot;checksum&quot;:&quot;650f9a3cff9fda0f3b2b3cd61d0cc888c212503659d27023634523d30b3b978e&quot;}</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title=""></td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Attachment &#039;agreement_000032.pdf&#039; (att_000013) belonging to record &#039;cust_000032&#039; was not migrated or is missing from destination storage.</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #f8fafc;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-ATT-014</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            MISSING_ATTACHMENT
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #ffedd5; color: #9a3412; border: 1px solid #fb923c;">HIGH</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">cust_000033</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">att_000014</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{&quot;attachmentId&quot;:&quot;att_000014&quot;,&quot;fileName&quot;:&quot;agreement_000033.pdf&quot;,&quot;byteSize&quot;:10688,&quot;checksum&quot;:&quot;2fd47b91668e3c16a31a675ec610e87c17173b0481a60e312aecafacbd6d5abf&quot;}">{&quot;attachmentId&quot;:&quot;att_000014&quot;,&quot;fileName&quot;:&quot;agreement_000033.pdf&quot;,&quot;byteSize&quot;:10688,&quot;checksum&quot;:&quot;2fd47b91668e3c16a31a675ec610e87c17173b0481a60e312aecafacbd6d5abf&quot;}</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title=""></td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Attachment &#039;agreement_000033.pdf&#039; (att_000014) belonging to record &#039;cust_000033&#039; was not migrated or is missing from destination storage.</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #ffffff;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-ATT-015</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            MISSING_ATTACHMENT
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #ffedd5; color: #9a3412; border: 1px solid #fb923c;">HIGH</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">cust_000034</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">att_000015</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{&quot;attachmentId&quot;:&quot;att_000015&quot;,&quot;fileName&quot;:&quot;agreement_000034.pdf&quot;,&quot;byteSize&quot;:13535,&quot;checksum&quot;:&quot;632ff742f1ba88933311bc87ab430716c769aa2e397acce45cc86556ad999c6b&quot;}">{&quot;attachmentId&quot;:&quot;att_000015&quot;,&quot;fileName&quot;:&quot;agreement_000034.pdf&quot;,&quot;byteSize&quot;:13535,&quot;checksum&quot;:&quot;632ff742f1ba88933311bc87ab430716c769aa2e397acce45cc86556ad999c6b&quot;}</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title=""></td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Attachment &#039;agreement_000034.pdf&#039; (att_000015) belonging to record &#039;cust_000034&#039; was not migrated or is missing from destination storage.</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #f8fafc;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-REF-001</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            BROKEN_REFERENCE
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #ffedd5; color: #9a3412; border: 1px solid #fb923c;">HIGH</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">ord_0000076</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">ord_0000076</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="Valid reference to parent in &#039;customers&#039;">Valid reference to parent in &#039;customers&#039;</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title="cust_BROKEN_NONEXISTENT_001">cust_BROKEN_NONEXISTENT_001</td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Child record &#039;ord_0000076&#039; in &#039;orders&#039; references non-existent parent key &#039;cust_BROKEN_NONEXISTENT_001&#039; in &#039;customers&#039;. Foreign-key constraint violation.</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #ffffff;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-REF-002</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            BROKEN_REFERENCE
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #ffedd5; color: #9a3412; border: 1px solid #fb923c;">HIGH</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">ord_0000151</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">ord_0000151</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="Valid reference to parent in &#039;customers&#039;">Valid reference to parent in &#039;customers&#039;</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title="cust_BROKEN_NONEXISTENT_002">cust_BROKEN_NONEXISTENT_002</td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Child record &#039;ord_0000151&#039; in &#039;orders&#039; references non-existent parent key &#039;cust_BROKEN_NONEXISTENT_002&#039; in &#039;customers&#039;. Foreign-key constraint violation.</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #f8fafc;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-REF-003</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            BROKEN_REFERENCE
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #ffedd5; color: #9a3412; border: 1px solid #fb923c;">HIGH</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">ord_0000226</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">ord_0000226</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="Valid reference to parent in &#039;customers&#039;">Valid reference to parent in &#039;customers&#039;</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title="cust_BROKEN_NONEXISTENT_003">cust_BROKEN_NONEXISTENT_003</td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Child record &#039;ord_0000226&#039; in &#039;orders&#039; references non-existent parent key &#039;cust_BROKEN_NONEXISTENT_003&#039; in &#039;customers&#039;. Foreign-key constraint violation.</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #ffffff;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-REF-004</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            BROKEN_REFERENCE
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #ffedd5; color: #9a3412; border: 1px solid #fb923c;">HIGH</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">ord_0000301</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">ord_0000301</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="Valid reference to parent in &#039;customers&#039;">Valid reference to parent in &#039;customers&#039;</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title="cust_BROKEN_NONEXISTENT_004">cust_BROKEN_NONEXISTENT_004</td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Child record &#039;ord_0000301&#039; in &#039;orders&#039; references non-existent parent key &#039;cust_BROKEN_NONEXISTENT_004&#039; in &#039;customers&#039;. Foreign-key constraint violation.</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #f8fafc;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-REF-005</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            BROKEN_REFERENCE
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #ffedd5; color: #9a3412; border: 1px solid #fb923c;">HIGH</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">ord_0000376</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">ord_0000376</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="Valid reference to parent in &#039;customers&#039;">Valid reference to parent in &#039;customers&#039;</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title="cust_BROKEN_NONEXISTENT_005">cust_BROKEN_NONEXISTENT_005</td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Child record &#039;ord_0000376&#039; in &#039;orders&#039; references non-existent parent key &#039;cust_BROKEN_NONEXISTENT_005&#039; in &#039;customers&#039;. Foreign-key constraint violation.</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #ffffff;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-REF-006</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            BROKEN_REFERENCE
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #ffedd5; color: #9a3412; border: 1px solid #fb923c;">HIGH</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">ord_0000451</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">ord_0000451</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="Valid reference to parent in &#039;customers&#039;">Valid reference to parent in &#039;customers&#039;</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title="cust_BROKEN_NONEXISTENT_006">cust_BROKEN_NONEXISTENT_006</td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Child record &#039;ord_0000451&#039; in &#039;orders&#039; references non-existent parent key &#039;cust_BROKEN_NONEXISTENT_006&#039; in &#039;customers&#039;. Foreign-key constraint violation.</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #f8fafc;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-REF-007</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            BROKEN_REFERENCE
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #ffedd5; color: #9a3412; border: 1px solid #fb923c;">HIGH</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">ord_0000526</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">ord_0000526</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="Valid reference to parent in &#039;customers&#039;">Valid reference to parent in &#039;customers&#039;</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title="cust_BROKEN_NONEXISTENT_007">cust_BROKEN_NONEXISTENT_007</td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Child record &#039;ord_0000526&#039; in &#039;orders&#039; references non-existent parent key &#039;cust_BROKEN_NONEXISTENT_007&#039; in &#039;customers&#039;. Foreign-key constraint violation.</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #ffffff;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-REF-008</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            BROKEN_REFERENCE
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #ffedd5; color: #9a3412; border: 1px solid #fb923c;">HIGH</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">ord_0000601</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">ord_0000601</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="Valid reference to parent in &#039;customers&#039;">Valid reference to parent in &#039;customers&#039;</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title="cust_BROKEN_NONEXISTENT_008">cust_BROKEN_NONEXISTENT_008</td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Child record &#039;ord_0000601&#039; in &#039;orders&#039; references non-existent parent key &#039;cust_BROKEN_NONEXISTENT_008&#039; in &#039;customers&#039;. Foreign-key constraint violation.</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #f8fafc;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-MET-001</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            METADATA_MISMATCH
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #fef9c3; color: #854d0e; border: 1px solid #facc15;">MEDIUM</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">cust_005006</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">cust_005006</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="721">721</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title="300">300</td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Customer credit score mismatch. Expected 721, but found 300</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #ffffff;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-MET-002</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            METADATA_MISMATCH
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #fef9c3; color: #854d0e; border: 1px solid #facc15;">MEDIUM</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">cust_005021</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">cust_005021</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="709">709</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title="301">301</td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Customer credit score mismatch. Expected 709, but found 301</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #f8fafc;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-MET-003</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            METADATA_MISMATCH
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #fef9c3; color: #854d0e; border: 1px solid #facc15;">MEDIUM</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">cust_005036</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">cust_005036</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="661">661</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title="302">302</td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Customer credit score mismatch. Expected 661, but found 302</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #ffffff;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-MET-004</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            METADATA_MISMATCH
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #fef9c3; color: #854d0e; border: 1px solid #facc15;">MEDIUM</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">cust_005051</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">cust_005051</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="725">725</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title="303">303</td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Customer credit score mismatch. Expected 725, but found 303</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #f8fafc;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-MET-005</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            METADATA_MISMATCH
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #fef9c3; color: #854d0e; border: 1px solid #facc15;">MEDIUM</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">cust_005066</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">cust_005066</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="610">610</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title="304">304</td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Customer credit score mismatch. Expected 610, but found 304</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #ffffff;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-MET-006</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            METADATA_MISMATCH
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #fef9c3; color: #854d0e; border: 1px solid #facc15;">MEDIUM</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">cust_005081</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">cust_005081</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="808">808</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title="305">305</td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Customer credit score mismatch. Expected 808, but found 305</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #f8fafc;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-MET-007</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            METADATA_MISMATCH
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #fef9c3; color: #854d0e; border: 1px solid #facc15;">MEDIUM</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">cust_005096</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">cust_005096</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="622">622</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title="306">306</td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Customer credit score mismatch. Expected 622, but found 306</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #ffffff;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-MET-008</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            METADATA_MISMATCH
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #fef9c3; color: #854d0e; border: 1px solid #facc15;">MEDIUM</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">cust_005111</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">cust_005111</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="688">688</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title="307">307</td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Customer credit score mismatch. Expected 688, but found 307</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #f8fafc;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-MET-009</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            METADATA_MISMATCH
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #fef9c3; color: #854d0e; border: 1px solid #facc15;">MEDIUM</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">cust_005126</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">cust_005126</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="652">652</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title="308">308</td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Customer credit score mismatch. Expected 652, but found 308</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #ffffff;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-MET-010</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            METADATA_MISMATCH
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #fef9c3; color: #854d0e; border: 1px solid #facc15;">MEDIUM</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">cust_005141</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">cust_005141</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="787">787</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title="309">309</td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Customer credit score mismatch. Expected 787, but found 309</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #f8fafc;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-MET-011</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            METADATA_MISMATCH
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #fef9c3; color: #854d0e; border: 1px solid #facc15;">MEDIUM</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">cust_005156</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">cust_005156</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="748">748</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title="310">310</td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Customer credit score mismatch. Expected 748, but found 310</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+      <tr style="background-color: #ffffff;">
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; font-weight: 600; color: #0f172a;">INJ-MET-012</td>
+        <td style="padding: 8px 12px;">
+          <span style="font-size: 11px; font-family: monospace; background: #e2e8f0; padding: 2px 6px; border-radius: 4px; color: #334155;">
+            METADATA_MISMATCH
+          </span>
+        </td>
+        <td style="padding: 8px 12px; text-align: center;"><span style="padding: 3px 8px; border-radius: 9999px; font-size: 11px; font-weight: 700; background-color: #fef9c3; color: #854d0e; border: 1px solid #facc15;">MEDIUM</span></td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #3b82f6;">cust_005171</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #6366f1;">cust_005171</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="661">661</td>
+        <td style="padding: 8px 12px; font-family: monospace; font-size: 11px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #dc2626;" title="311">311</td>
+        <td style="padding: 8px 12px; font-size: 12px; color: #334155;">Customer credit score mismatch. Expected 661, but found 311</td>
+        <td style="padding: 8px 12px; font-size: 11px; color: #64748b; white-space: nowrap;">2026-11-19 18:32:42</td>
+      </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="footer">
+      Generated automatically by MigrationGuard Assurance Engine · Cryptographically Verified Report · Deterministic Quality Guarantee
+    </div>
+  </div>
+</body>
+</html>

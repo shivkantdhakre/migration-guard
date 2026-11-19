@@ -2,6 +2,8 @@
  * Fault Injection Scenario Runner
  * Proves exact detection of all 45 injected discrepancies without false positives.
  */
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import {
   generateSyntheticDataset,
   injectFaults,
@@ -81,8 +83,19 @@ async function main() {
   // Generate Reports
   const csv = generateDiscrepancyCsv(summary);
   const html = generateHtmlReport(summary);
-  console.log(`CSV Report generated (${csv.length} bytes)`);
-  console.log(`HTML Report generated (${html.length} bytes)`);
+
+  const outDir = path.resolve(process.cwd(), 'output');
+  if (!fs.existsSync(outDir)) {
+    fs.mkdirSync(outDir, { recursive: true });
+  }
+
+  const csvPath = path.join(outDir, 'fault-injection-report.csv');
+  const htmlPath = path.join(outDir, 'fault-injection-report.html');
+  fs.writeFileSync(csvPath, csv, 'utf8');
+  fs.writeFileSync(htmlPath, html, 'utf8');
+
+  console.log(`CSV Report written to ${csvPath} (${csv.length} bytes)`);
+  console.log(`HTML Report written to ${htmlPath} (${html.length} bytes)`);
 }
 
 main().catch((err) => {

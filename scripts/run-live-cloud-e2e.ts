@@ -9,9 +9,13 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+// @ts-ignore
 import pg from '../packages/backend/node_modules/pg/lib/index.js';
+// @ts-ignore
 import { MongoClient } from '../packages/worker/node_modules/mongodb/lib/index.js';
+// @ts-ignore
 import { Redis } from '../packages/worker/node_modules/ioredis/built/index.js';
+// @ts-ignore
 import * as bullmq from '../packages/worker/node_modules/bullmq/dist/cjs/index.js';
 const { Queue } = bullmq as any;
 import {
@@ -20,6 +24,7 @@ import {
   generateDiscrepancyCsv,
   generateHtmlReport,
   calculatePlanHash,
+  type ValidationDataset,
 } from '../packages/core/dist/index.js';
 
 // Load .env

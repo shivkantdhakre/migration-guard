@@ -8,6 +8,8 @@ export default defineConfig({
     testTimeout: 20000,
     env: {
       ALLOW_IN_MEMORY_DB: 'true',
+      ALLOW_DEV_JWT: 'true',
+      ENCRYPTION_KEY: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
     },
   },
 });

@@ -10,6 +10,12 @@ jobs:
   build-and-test:
     name: Build & Monorepo Test Suite
     runs-on: ubuntu-latest
+    env:
+      CI: "true"
+      ALLOW_IN_MEMORY_DB: "true"
+      ALLOW_DEV_JWT: "true"
+      ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      JWT_SECRET: "migrationguard_super_secure_jwt_dev_secret_key_minimum_32_chars!"
 
     steps:
       - name: Checkout repository

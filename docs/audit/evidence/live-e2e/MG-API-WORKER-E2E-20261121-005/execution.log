@@ -1,0 +1,269 @@
+[2026-11-20T23:22:48.949Z] ========================================================================
+[2026-11-20T23:22:48.951Z]    MIGRATIONGUARD — INDEPENDENT WORKER & REAL API LIVE E2E RUNNER 005   
+[2026-11-20T23:22:48.951Z]    Run Label: MG-API-WORKER-E2E-20261121-005                                           
+[2026-11-20T23:22:48.951Z]    Isolated Queue: migration-execution-e2e-005                                      
+[2026-11-20T23:22:48.951Z]    Host: DESKTOP-TJQKT2A (win32 x64)             
+[2026-11-20T23:22:48.952Z] ========================================================================
+[2026-11-20T23:22:48.952Z] Control Plane DB: postgresql://neondb_owner:***@ep-billowing-block-ao9lt8tz-pooler.c-2.ap-southeast-1.aws.neon.tech/neondb?sslmode=require (Database: neondb, Schema: public)
+[2026-11-20T23:22:48.952Z] Destination DB:   postgresql://neondb_owner:***@ep-billowing-block-ao9lt8tz.c-2.ap-southeast-1.aws.neon.tech/migrationguard_destination_005?sslmode=require (Database: migrationguard_destination_005, Schema: public)
+[2026-11-20T23:22:48.952Z] 
+--- STAGE 1: INFRASTRUCTURE PREFLIGHT & SEPARATE DESTINATION DATABASE SETUP ---
+[2026-11-20T23:22:50.670Z] ✔ Control-Plane PostgreSQL Connected: Database 'neondb', Schema 'public' (Strict TLS: true)
+[2026-11-20T23:22:51.471Z] ✔ Dedicated destination database 'migrationguard_destination_005' already exists on Neon
+[2026-11-20T23:22:52.312Z] ✔ Dedicated Destination PostgreSQL Connected: Database 'migrationguard_destination_005', Schema 'public' (Strict TLS: true)
+[2026-11-20T23:22:52.312Z] ✔ DATABASE ISOLATION VERIFIED: Destination catalog 'migrationguard_destination_005' !== Control-plane catalog 'neondb'
+[2026-11-20T23:22:52.465Z] ✔ Destination tables created fresh in dedicated 'migrationguard_destination_005' database
+[2026-11-20T23:22:53.505Z] ✔ Aiven Valkey Redis Connected: PING response 'PONG' (Strict TLS: true)
+[2026-11-20T23:22:53.753Z] Checking isolated BullMQ queue 'migration-execution-e2e-005': 0 waiting jobs before purge
+[2026-11-20T23:22:54.191Z] ✔ Isolated BullMQ Queue 'migration-execution-e2e-005' drained and purged
+[2026-11-20T23:22:58.651Z] ✔ MongoDB Atlas Connected ('migrationguard_e2e_source'):
+[2026-11-20T23:22:58.651Z]   - customers:            1000 documents in source collection
+[2026-11-20T23:22:58.651Z]   - orders:               2028 documents in source collection
+[2026-11-20T23:22:58.651Z]   - customer_attachments: 363 documents in source collection
+[2026-11-20T23:22:58.651Z]   - Controlled Scope:     200 records per entity (2 batches x 100 records) = 600 total records
+[2026-11-20T23:22:58.651Z] 
+--- STAGE 2: SPAWN STANDALONE WORKER PROCESS (DAEMON) ---
+[2026-11-20T23:22:58.651Z] Spawning worker process from: D:\Projects\migration-guard\packages\worker\dist\worker-main.js
+[2026-11-20T23:23:02.245Z] ✔ Standalone Worker Daemon spawned: PID = 18740, Host = DESKTOP-TJQKT2A
+[2026-11-20T23:23:02.245Z] ✔ Worker environment verified: MONGO_URL stripped (Enforcing Vault Credential Resolution)
+[2026-11-20T23:23:04.252Z] 
+--- STAGE 3: SPAWN NESTJS BACKEND CONTROL PLANE API SERVER ---
+[2026-11-20T23:23:04.252Z] Spawning backend API server from: D:\Projects\migration-guard\packages\backend\dist\main.js on port 4002...
+[2026-11-20T23:23:04.266Z] Waiting for NestJS backend to become healthy on port 4002...
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[NestFactory] [39m[32mStarting Nest application...[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[InstanceLoader] [39m[32mAppModule dependencies initialized[39m[38;5;3m +30ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[InstanceLoader] [39m[32mDatabaseModule dependencies initialized[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[InstanceLoader] [39m[32mQueueModule dependencies initialized[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[InstanceLoader] [39m[32mJwtModule dependencies initialized[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[InstanceLoader] [39m[32mAiModule dependencies initialized[39m[38;5;3m +1ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[InstanceLoader] [39m[32mHealthModule dependencies initialized[39m[38;5;3m +1ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[InstanceLoader] [39m[32mWorkspaceModule dependencies initialized[39m[38;5;3m +1ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[InstanceLoader] [39m[32mAuthModule dependencies initialized[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[InstanceLoader] [39m[32mProjectModule dependencies initialized[39m[38;5;3m +1ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[InstanceLoader] [39m[32mConnectionModule dependencies initialized[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[InstanceLoader] [39m[32mMappingModule dependencies initialized[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[InstanceLoader] [39m[32mMigrationModule dependencies initialized[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[InstanceLoader] [39m[32mValidationModule dependencies initialized[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[InstanceLoader] [39m[32mReportModule dependencies initialized[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[InstanceLoader] [39m[32mAuditModule dependencies initialized[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[InstanceLoader] [39m[32mPlanModule dependencies initialized[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[InstanceLoader] [39m[32mSchemaModule dependencies initialized[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RoutesResolver] [39m[32mAuthController {/api/v1}:[39m[38;5;3m +11ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/auth/register, POST} route[39m[38;5;3m +3ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/auth/login, POST} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/me, GET} route[39m[38;5;3m +1ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RoutesResolver] [39m[32mWorkspaceController {/api/v1/workspaces}:[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/workspaces, GET} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/workspaces, POST} route[39m[38;5;3m +1ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/workspaces/:workspaceId, GET} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/workspaces/:workspaceId/members, GET} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/workspaces/:workspaceId/members, POST} route[39m[38;5;3m +1ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/workspaces/:workspaceId/members/:memberId, PATCH} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RoutesResolver] [39m[32mProjectController {/api/v1}:[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/workspaces/:workspaceId/projects, GET} route[39m[38;5;3m +1ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/workspaces/:workspaceId/projects, POST} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/projects/:projectId, GET} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/projects/:projectId, PATCH} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/projects/:projectId/activity, GET} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RoutesResolver] [39m[32mConnectionController {/api/v1}:[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/workspaces/:workspaceId/connections, GET} route[39m[38;5;3m +1ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/workspaces/:workspaceId/connections, POST} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/connections/:connectionId, GET} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/connections/:connectionId, PATCH} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/connections/:connectionId/rotate-credentials, POST} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/connections/:connectionId/test, POST} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/connections/:connectionId, DELETE} route[39m[38;5;3m +1ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RoutesResolver] [39m[32mSchemaController {/api/v1}:[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/connections/:connectionId/schema-discovery, POST} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/schema-discovery-jobs/:jobId, GET} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/connections/:connectionId/schema-snapshots, GET} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/schema-snapshots/:snapshotId, GET} route[39m[38;5;3m +1ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/schema-snapshots/:snapshotId/profiles, POST} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/profile-runs/:profileRunId, GET} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/schema-snapshots/compare, POST} route[39m[38;5;3m +1ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RoutesResolver] [39m[32mMappingController {/api/v1}:[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/projects/:projectId/mappings, POST} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/mappings/:planId/versions, POST} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/mapping-versions/:versionId, GET} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/mapping-versions/:versionId/validate, POST} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/mapping-versions/:versionId/preview, POST} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RoutesResolver] [39m[32mPlanController {/api/v1}:[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/projects/:projectId/plans, POST} route[39m[38;5;3m +1ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/projects/:projectId/plans, GET} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/plans/:planId, GET} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/plans/:planId/versions, POST} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/plan-versions/:versionId, GET} route[39m[38;5;3m +1ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/plan-versions/:versionId/readiness-check, POST} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/plan-versions/:versionId/dry-runs, POST} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/dry-runs/:dryRunId, GET} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/plan-versions/:versionId/approvals, POST} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/plan-versions/:versionId/approvals, GET} route[39m[38;5;3m +1ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RoutesResolver] [39m[32mMigrationController {/api/v1}:[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/migration-runs, GET} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/migration-runs, POST} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/plan-versions/:versionId/runs, POST} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/migration-runs/:runId, GET} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/migration-runs/:runId/progress, GET} route[39m[38;5;3m +1ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/migration-runs/:runId/batches, GET} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/migration-runs/:runId/batches/:batchId, GET} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/migration-runs/:runId/pause, POST} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/migration-runs/:runId/resume, POST} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/migration-runs/:runId/cancel, POST} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/migration-runs/:runId/retry-failed, POST} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/migration-runs/:runId/events, GET} route[39m[38;5;3m +1ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RoutesResolver] [39m[32mValidationController {/api/v1}:[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/migration-runs/:runId/validations, POST} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/migration-runs/:runId/validations, GET} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/validation-runs/:validationRunId, GET} route[39m[38;5;3m +1ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/validation-runs/:validationRunId/checks, GET} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/validation-runs/:validationRunId/discrepancies, GET} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/discrepancies/:discrepancyId, GET} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/discrepancies/:discrepancyId, PATCH} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RoutesResolver] [39m[32mReportController {/api/v1}:[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/validation-runs/:validationRunId/reports, POST} route[39m[38;5;3m +1ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/reports/:reportId, GET} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/reports/:reportId/download, GET} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RoutesResolver] [39m[32mAuditController {/api/v1}:[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/workspaces/:workspaceId/audit-events, GET} route[39m[38;5;3m +1ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/projects/:projectId/audit-events, GET} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RoutesResolver] [39m[32mHealthController {/api/v1/health}:[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/health, GET} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/health/liveness, GET} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/health/readiness, GET} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RoutesResolver] [39m[32mAiController {/api/v1}:[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/mapping-versions/:versionId/ai-suggestions, POST} route[39m[38;5;3m +1ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/plan-versions/:versionId/ai-plan, POST} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/validation-runs/:validationRunId/ai-analysis, POST} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/projects/:projectId/ai/conversations, POST} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/ai/conversations/:conversationId/messages, POST} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/ai/conversations/:conversationId, GET} route[39m[38;5;3m +1ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/ai/workflows/:workflowId, GET} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/ai/proposals/:proposalId/accept, POST} route[39m[38;5;3m +5ms[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:09 AM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/api/v1/ai/proposals/:proposalId/reject, POST} route[39m[38;5;3m +0ms[39m
+[Backend PID:18268 STDERR] (node:18268) Warning: SECURITY WARNING: The SSL modes 'prefer', 'require', and 'verify-ca' are treated as aliases for 'verify-full'.
+[Backend PID:18268 STDERR] In the next major version (pg-connection-string v3.0.0 and pg v9.0.0), these modes will adopt standard libpq semantics, which have weaker security guarantees.
+[Backend PID:18268 STDERR] To prepare for this change:
+[Backend PID:18268 STDERR] - If you want the current behavior, explicitly use 'sslmode=verify-full'
+[Backend PID:18268 STDERR] - If you want libpq compatibility now, use 'uselibpqcompat=true&sslmode=require'
+[Backend PID:18268 STDERR] See https://www.postgresql.org/docs/current/libpq-ssl.html for libpq SSL mode definitions.
+[Backend PID:18268 STDERR] (Use `node --trace-warnings ...` to show where the warning was created)
+[Backend PID:18268] [DatabaseService] Connected to PostgreSQL successfully.
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:11 AM [32m    LOG[39m [38;5;3m[QueueService] [39m[32m[QueueService] Connected to BullMQ queue: 'migration-execution-e2e-005'[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:11 AM [32m    LOG[39m [38;5;3m[NestApplication] [39m[32mNest application successfully started[39m[38;5;3m +5ms[39m
+[Backend PID:18268] MigrationGuard Control Plane API listening on port 4002
+[2026-11-20T23:23:11.511Z] ✔ Backend API Server is healthy and listening on port 4002
+[2026-11-20T23:23:11.511Z] 
+--- STAGE 4: EXECUTE REAL AUTHENTICATED API ENDPOINTS ---
+[2026-11-20T23:23:11.511Z] 1. Registering Operator via POST /auth/register (operator_e2e_005_1795216991511@migrationguard.io)...
+[2026-11-20T23:23:12.148Z] ✔ Operator Authenticated: User ID = 4ca31d83-cfe5-4d96-9ef2-981d5dd955ef, Workspace ID = 22a1cfab-faef-486c-9586-47661d8229f6
+[2026-11-20T23:23:12.148Z] 2. Creating Project via POST /workspaces/:workspaceId/projects...
+[2026-11-20T23:23:12.394Z] ✔ Project Created: Project ID = 05fd43ce-5b72-45e1-9d4c-4c61126cb61a
+[2026-11-20T23:23:12.394Z] 3. Registering Source Connection with Real MongoDB Credentials into Vault...
+[2026-11-20T23:23:12.888Z] ✔ Source Connection Registered: ID = 90a78a9f-40b4-4cb7-a6ae-f7cd6c353ca4 (Stored encrypted in Vault)
+[2026-11-20T23:23:12.888Z] 4. Registering Dedicated Destination Connection with SEPARATE Database 'migrationguard_destination_005' into Vault...
+[2026-11-20T23:23:13.344Z] ✔ Dedicated Destination Connection Registered: ID = 83a8f86e-8d8d-44a5-bbd4-3f3b03a6d0e0 (Stored encrypted in Vault)
+[2026-11-20T23:23:13.344Z] 5. Creating Migration Plan via POST /projects/:projectId/plans...
+[2026-11-20T23:23:13.814Z] ✔ Migration Plan Created: Plan ID = 5186cf47-abd3-48e8-b9cc-e09b9dcf4741
+[2026-11-20T23:23:13.814Z] 6. Creating Plan Version via POST /plans/:planId/versions...
+[2026-11-20T23:23:14.431Z] ✔ Plan Version Created: Version ID = 1c6a92e3-6c79-4e42-b19f-2ac50a16211f, Canonical Hash = sha256:8c747b04bbcf79fd6e1b17d8679a3956b52cf57ef9d18ee46a6fb519c1af6d8a
+[2026-11-20T23:23:14.432Z] 7. Submitting Plan Version Approval via POST /plan-versions/:versionId/approvals...
+[2026-11-20T23:23:14.997Z] ✔ Plan Version Approved: Status = APPROVE
+[2026-11-20T23:23:14.997Z] 8. Initiating Migration Run via POST /migration-runs...
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:16 AM [32m    LOG[39m [38;5;3m[QueueService] [39m[32m[QueueService] Dispatched job 0ebd821e-2571-4b76-84a4-20e8bd4315c1_batch_customers_0001 for run 0ebd821e-2571-4b76-84a4-20e8bd4315c1[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:16 AM [32m    LOG[39m [38;5;3m[QueueService] [39m[32m[QueueService] Dispatched job 0ebd821e-2571-4b76-84a4-20e8bd4315c1_batch_customers_0002 for run 0ebd821e-2571-4b76-84a4-20e8bd4315c1[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:16 AM [32m    LOG[39m [38;5;3m[QueueService] [39m[32m[QueueService] Dispatched job 0ebd821e-2571-4b76-84a4-20e8bd4315c1_batch_orders_0001 for run 0ebd821e-2571-4b76-84a4-20e8bd4315c1[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:16 AM [32m    LOG[39m [38;5;3m[QueueService] [39m[32m[QueueService] Dispatched job 0ebd821e-2571-4b76-84a4-20e8bd4315c1_batch_orders_0002 for run 0ebd821e-2571-4b76-84a4-20e8bd4315c1[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:16 AM [32m    LOG[39m [38;5;3m[QueueService] [39m[32m[QueueService] Dispatched job 0ebd821e-2571-4b76-84a4-20e8bd4315c1_batch_customer_attachments_0001 for run 0ebd821e-2571-4b76-84a4-20e8bd4315c1[39m
+[Backend PID:18268] [32m[Nest] 18268  - [39m11/21/2026, 4:53:17 AM [32m    LOG[39m [38;5;3m[QueueService] [39m[32m[QueueService] Dispatched job 0ebd821e-2571-4b76-84a4-20e8bd4315c1_batch_customer_attachments_0002 for run 0ebd821e-2571-4b76-84a4-20e8bd4315c1[39m
+[2026-11-20T23:23:17.162Z] ✔ Migration Run Enqueued via Real Backend API: Run ID = 0ebd821e-2571-4b76-84a4-20e8bd4315c1, Status = QUEUED
+[2026-11-20T23:23:17.162Z] 
+--- STAGE 5: VERIFY REAL BULLMQ CONSUMPTION BY INDEPENDENT WORKER DAEMON ---
+[2026-11-20T23:23:17.162Z] Watching isolated BullMQ queue 'migration-execution-e2e-005' and worker logs...
+[2026-11-20T23:23:18.356Z] [Queue Monitor] BullMQ 'migration-execution-e2e-005': waiting=0, active=2, completed=0, failed=0 | DB Batches: {"QUEUED":4,"RUNNING":2}
+[2026-11-20T23:23:21.579Z] [Queue Monitor] BullMQ 'migration-execution-e2e-005': waiting=0, active=2, completed=0, failed=0 | DB Batches: {"QUEUED":4,"RUNNING":2}
+[2026-11-20T23:23:24.697Z] [Queue Monitor] BullMQ 'migration-execution-e2e-005': waiting=0, active=2, completed=0, failed=0 | DB Batches: {"QUEUED":4,"RUNNING":2}
+[2026-11-20T23:23:27.846Z] [Queue Monitor] BullMQ 'migration-execution-e2e-005': waiting=0, active=2, completed=0, failed=0 | DB Batches: {"QUEUED":4,"RUNNING":2}
+[2026-11-20T23:23:30.962Z] [Queue Monitor] BullMQ 'migration-execution-e2e-005': waiting=0, active=2, completed=0, failed=0 | DB Batches: {"QUEUED":4,"RUNNING":2}
+[2026-11-20T23:23:34.071Z] [Queue Monitor] BullMQ 'migration-execution-e2e-005': waiting=0, active=2, completed=0, failed=0 | DB Batches: {"QUEUED":4,"RUNNING":2}
+[2026-11-20T23:23:37.191Z] [Queue Monitor] BullMQ 'migration-execution-e2e-005': waiting=0, active=2, completed=0, failed=0 | DB Batches: {"QUEUED":4,"RUNNING":2}
+[2026-11-20T23:23:40.373Z] [Queue Monitor] BullMQ 'migration-execution-e2e-005': waiting=0, active=2, completed=0, failed=0 | DB Batches: {"QUEUED":4,"RUNNING":2}
+[2026-11-20T23:23:43.485Z] [Queue Monitor] BullMQ 'migration-execution-e2e-005': waiting=0, active=2, completed=0, failed=0 | DB Batches: {"QUEUED":4,"RUNNING":2}
+[2026-11-20T23:23:46.653Z] [Queue Monitor] BullMQ 'migration-execution-e2e-005': waiting=0, active=2, completed=0, failed=0 | DB Batches: {"QUEUED":4,"RUNNING":2}
+[2026-11-20T23:23:49.766Z] [Queue Monitor] BullMQ 'migration-execution-e2e-005': waiting=0, active=2, completed=2, failed=0 | DB Batches: {"COMMITTED":2,"QUEUED":2,"RUNNING":2}
+[2026-11-20T23:23:50.077Z] 
+--- STAGE 6: UNAMBIGUOUS PROCESS CRASH INTERRUPTION & CHECKPOINT RESUMPTION ---
+[2026-11-20T23:23:50.077Z] Verified conditions for unambiguous crash interruption:
+[2026-11-20T23:23:50.077Z]   - Durably Committed Batches in DB: 2 (>= 1)
+[2026-11-20T23:23:50.077Z]   - In-Flight Active Job in BullMQ:  0ebd821e-2571-4b76-84a4-20e8bd4315c1_batch_orders_0001 (batch_orders_0001)
+[2026-11-20T23:23:50.077Z]   - Target Worker Process PID:       18740
+[2026-11-20T23:23:50.077Z]   - Pre-Kill Database Checkpoint:    {"customers":{"updatedAt":"2026-11-20T23:23:47.909Z","sourceObject":"customers","planVersionId":"1c6a92e3-6c79-4e42-b19f-2ac50a16211f","baseSequenceNo":2,"migrationRunId":"0ebd821e-2571-4b76-84a4-20e8bd4315c1","committedEntries":{"1":{"batchKey":"batch_customers_0001","cursorEnd":{"lastId":"cust_000100"}},"2":{"batchKey":"batch_customers_0002","cursorEnd":{"lastId":"cust_000200"}}},"mappingVersionId":"default-mapping","committedSequences":[1,2],"lastCommittedCursor":{"lastId":"cust_000200"},"lastCommittedBatchKey":"batch_customers_0002","totalRecordsCommitted":200,"lastCommittedSequenceNo":2}}
+[2026-11-20T23:23:50.077Z]   - Pre-Kill Manifest Written:       200 records
+[2026-11-20T23:23:50.077Z]   - Pre-Kill Checkpoint Committed:   200 records
+[2026-11-20T23:23:50.077Z] ✔ PRE-KILL CHECKPOINT RECONCILIATION PASSED: Checkpoint records (200) === Manifest records (200)
+[2026-11-20T23:23:50.077Z] Executing SIGKILL against worker PID 18740 during active processing...
+[2026-11-20T23:23:50.079Z] ✔ Worker process PID:18740 terminated abruptly via SIGKILL.
+[2026-11-20T23:23:50.101Z] Worker process PID:18740 exited with code 1, signal null
+[2026-11-20T23:23:52.585Z] Relaunching Worker Daemon process to test resumption of in-flight batch and remaining queue...
+[2026-11-20T23:23:54.151Z] ✔ Replacement Worker Daemon started: New PID = 22652
+[2026-11-20T23:23:57.159Z] [Queue Monitor] BullMQ 'migration-execution-e2e-005': waiting=0, active=4, completed=2, failed=0 | DB Batches: {"COMMITTED":2,"QUEUED":2,"RUNNING":2}
+[2026-11-20T23:24:00.295Z] [Queue Monitor] BullMQ 'migration-execution-e2e-005': waiting=2, active=2, completed=2, failed=0 | DB Batches: {"COMMITTED":2,"RUNNING":4}
+[2026-11-20T23:24:03.403Z] [Queue Monitor] BullMQ 'migration-execution-e2e-005': waiting=2, active=2, completed=2, failed=0 | DB Batches: {"COMMITTED":2,"RUNNING":4}
+[2026-11-20T23:24:06.596Z] [Queue Monitor] BullMQ 'migration-execution-e2e-005': waiting=2, active=2, completed=2, failed=0 | DB Batches: {"COMMITTED":2,"RUNNING":4}
+[2026-11-20T23:24:09.779Z] [Queue Monitor] BullMQ 'migration-execution-e2e-005': waiting=2, active=2, completed=2, failed=0 | DB Batches: {"COMMITTED":2,"RUNNING":4}
+[2026-11-20T23:24:12.876Z] [Queue Monitor] BullMQ 'migration-execution-e2e-005': waiting=2, active=2, completed=2, failed=0 | DB Batches: {"COMMITTED":2,"RUNNING":4}
+[2026-11-20T23:24:16.000Z] [Queue Monitor] BullMQ 'migration-execution-e2e-005': waiting=2, active=2, completed=2, failed=0 | DB Batches: {"COMMITTED":2,"RUNNING":4}
+[2026-11-20T23:24:19.116Z] [Queue Monitor] BullMQ 'migration-execution-e2e-005': waiting=2, active=2, completed=2, failed=0 | DB Batches: {"COMMITTED":2,"RUNNING":4}
+[2026-11-20T23:24:22.246Z] [Queue Monitor] BullMQ 'migration-execution-e2e-005': waiting=2, active=2, completed=2, failed=0 | DB Batches: {"COMMITTED":2,"RUNNING":4}
+[2026-11-20T23:24:25.497Z] [Queue Monitor] BullMQ 'migration-execution-e2e-005': waiting=2, active=2, completed=2, failed=0 | DB Batches: {"COMMITTED":2,"RUNNING":4}
+[2026-11-20T23:24:28.644Z] [Queue Monitor] BullMQ 'migration-execution-e2e-005': waiting=2, active=2, completed=2, failed=0 | DB Batches: {"COMMITTED":3,"RUNNING":3}
+[2026-11-20T23:24:31.797Z] [Queue Monitor] BullMQ 'migration-execution-e2e-005': waiting=0, active=2, completed=4, failed=0 | DB Batches: {"COMMITTED":4,"RUNNING":2}
+[2026-11-20T23:24:34.900Z] [Queue Monitor] BullMQ 'migration-execution-e2e-005': waiting=0, active=2, completed=4, failed=0 | DB Batches: {"COMMITTED":4,"RUNNING":2}
+[2026-11-20T23:24:38.095Z] [Queue Monitor] BullMQ 'migration-execution-e2e-005': waiting=0, active=2, completed=4, failed=0 | DB Batches: {"COMMITTED":4,"RUNNING":2}
+[2026-11-20T23:24:41.192Z] [Queue Monitor] BullMQ 'migration-execution-e2e-005': waiting=0, active=2, completed=4, failed=0 | DB Batches: {"COMMITTED":4,"RUNNING":2}
+[2026-11-20T23:24:44.302Z] [Queue Monitor] BullMQ 'migration-execution-e2e-005': waiting=0, active=2, completed=4, failed=0 | DB Batches: {"COMMITTED":4,"RUNNING":2}
+[2026-11-20T23:24:47.471Z] [Queue Monitor] BullMQ 'migration-execution-e2e-005': waiting=0, active=2, completed=4, failed=0 | DB Batches: {"COMMITTED":4,"RUNNING":2}
+[2026-11-20T23:24:50.599Z] [Queue Monitor] BullMQ 'migration-execution-e2e-005': waiting=0, active=2, completed=4, failed=0 | DB Batches: {"COMMITTED":4,"RUNNING":2}
+[2026-11-20T23:24:53.730Z] [Queue Monitor] BullMQ 'migration-execution-e2e-005': waiting=0, active=2, completed=4, failed=0 | DB Batches: {"COMMITTED":4,"RUNNING":2}
+[2026-11-20T23:24:56.893Z] [Queue Monitor] BullMQ 'migration-execution-e2e-005': waiting=0, active=2, completed=4, failed=0 | DB Batches: {"COMMITTED":4,"RUNNING":2}
+[2026-11-20T23:24:59.996Z] [Queue Monitor] BullMQ 'migration-execution-e2e-005': waiting=0, active=0, completed=6, failed=0 | DB Batches: {"COMMITTED":6}
+[2026-11-20T23:25:00.091Z] ✔ All 6 batches committed successfully! Total completed: 6
+[2026-11-20T23:25:00.091Z] 
+--- STAGE 7: INDEPENDENT DESTINATION SQL & DATABASE ISOLATION VERIFICATION ---
+[2026-11-20T23:25:01.973Z] 
+Destination SQL Verification Results:
+[2026-11-20T23:25:01.973Z]   [Dedicated Database: migrationguard_destination_005]
+[2026-11-20T23:25:01.973Z]   - customers written:            200
+[2026-11-20T23:25:01.973Z]   - orders written:               200
+[2026-11-20T23:25:01.973Z]   - customer_attachments written: 200
+[2026-11-20T23:25:01.973Z]   - Duplicates detected:          0
+[2026-11-20T23:25:01.973Z]   [Control-Plane DB Check: neondb (Must be 0)]
+[2026-11-20T23:25:01.973Z]   - neondb.customers:             0
+[2026-11-20T23:25:01.973Z]   - neondb.orders:                0
+[2026-11-20T23:25:01.973Z]   - neondb.customer_attachments:  0
+[2026-11-20T23:25:01.973Z]   ✔ DATABASE ISOLATION PROVEN:    YES (100% Isolated Catalog)
+[2026-11-20T23:25:01.973Z]   - Record Manifests logged:      600
+[2026-11-20T23:25:01.974Z]   - Batches Committed:            6 / 6
+[2026-11-20T23:25:01.974Z] 
+--- STAGE 8: EXECUTE DETERMINISTIC VALIDATION ENGINE ---
+[2026-11-20T23:25:03.719Z] ✔ Validation Engine Run Complete:
+[2026-11-20T23:25:03.719Z]   - Overall State:        PASS
+[2026-11-20T23:25:03.719Z]   - Total Checks:         8
+[2026-11-20T23:25:03.719Z]   - Passed Checks:        8
+[2026-11-20T23:25:03.719Z]   - Total Discrepancies:  0
+[2026-11-20T23:25:03.719Z]   - Distinct Records:     600 unique entities validated (200 customers, 200 orders, 200 attachments)
+[2026-11-20T23:25:03.719Z]   - Check Evaluations:    1,600 evaluations across 8 configured checks
+[2026-11-20T23:25:03.719Z]   [Check: Record Count Reconciliation (customers -> customers)] State: PASS, Evaluated: 200, Failed: 0
+[2026-11-20T23:25:03.719Z]   [Check: Missing Record Detection (customers)] State: PASS, Evaluated: 200, Failed: 0
+[2026-11-20T23:25:03.719Z]   [Check: Unexpected / Extra Record Detection (customers)] State: PASS, Evaluated: 200, Failed: 0
+[2026-11-20T23:25:03.719Z]   [Check: Duplicate Record Detection (customers)] State: PASS, Evaluated: 200, Failed: 0
+[2026-11-20T23:25:03.719Z]   [Check: Attachment Presence & Checksum Verification (attachments)] State: PASS, Evaluated: 200, Failed: 0
+[2026-11-20T23:25:03.719Z]   [Check: Parent-Child Relationship Integrity (orders -> customers)] State: PASS, Evaluated: 200, Failed: 0
+[2026-11-20T23:25:03.719Z]   [Check: Metadata Comparison (customers -> customers)] State: PASS, Evaluated: 200, Failed: 0
+[2026-11-20T23:25:03.719Z]   [Check: Canonical Content Hash Verification (customers -> customers)] State: PASS, Evaluated: 200, Failed: 0
+[2026-11-20T23:25:03.719Z] 
+--- STAGE 9: PROCESS SHUTDOWN ---
+[2026-11-20T23:25:03.720Z] ✔ Worker Process (PID: 22652) terminated.
+[2026-11-20T23:25:03.720Z] ✔ NestJS Backend API Server (PID: 18268) terminated.
+[2026-11-20T23:25:03.743Z] Worker process PID:22652 exited with code null, signal SIGTERM
+[2026-11-20T23:25:03.832Z] 
+--- STAGE 10: WRITE AUDIT EVIDENCE DOSSIER ---

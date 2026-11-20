@@ -1,0 +1,21 @@
+# Run Summary: MG-API-WORKER-E2E-20261121-005
+
+- **Migration Run ID:** `0ebd821e-2571-4b76-84a4-20e8bd4315c1`
+- **Execution Timestamp:** 2026-11-20T23:25:03.889Z
+- **Queue Name:** `migration-execution-e2e-005`
+- **Control-Plane Database:** `neondb` (`public` schema)
+- **Dedicated Destination Database:** `migrationguard_destination_005` (`public` schema)
+- **Source Database:** `migrationguard_e2e_source` (MongoDB Atlas)
+- **Batches Committed:** 6 / 6
+- **Destination Records Written:**
+  - `customers`: 200
+  - `orders`: 200
+  - `customer_attachments`: 200
+- **Control-Plane Database Check:**
+  - `public.customers`: 0
+  - `public.orders`: 0
+  - `public.customer_attachments`: 0
+- **Database Catalog Isolation:** PROVEN (100% Isolated Database Catalog)
+- **Validation Outcome:** PASS (8 / 8 checks passed)
+- **Pre-Kill Checkpoint Reconciliation:** PASSED (200 === 200)
+- **Process Crash Recovery:** SIGKILL executed against PID 18740; cleanly resumed under PID 22652

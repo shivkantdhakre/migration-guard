@@ -9,7 +9,11 @@ import {
   IdMappingRecord,
 } from '../types.js';
 import { BatchManifestStorageAdapter } from './batch-manifest.js';
-import { CheckpointStorageAdapter } from './checkpoint.js';
+import {
+  CheckpointAdvanceParams,
+  CheckpointStorageAdapter,
+  mergeCheckpointUpdate,
+} from './checkpoint.js';
 import { IdMappingStorageAdapter } from './id-tracker.js';
 
 export class PostgresStorageAdapters
@@ -161,9 +165,66 @@ export class PostgresStorageAdapters
   // --- CheckpointStorageAdapter ---
 
   /**
-   * P0.4: Atomically read-modify-write the checkpoint using a PostgreSQL transaction
-   * with SELECT ... FOR UPDATE row-level locking. This prevents the lost-update
-   * race condition when multiple concurrent workers advance the same run's checkpoint.
+   * P0.1: Atomically read, merge, advance, and persist the checkpoint within a single
+   * PostgreSQL transaction holding a SELECT ... FOR UPDATE row-level lock on migration_runs.
+   * This completely prevents the lost-update race condition when concurrent workers
+   * commit batches for the same migration run.
+   */
+  async advanceCheckpoint(params: CheckpointAdvanceParams): Promise<MigrationCheckpoint> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // 1. Lock the row and fetch the latest committed boundary state
+      const lockRes = await client.query(
+        `SELECT source_boundary_json FROM migration_runs WHERE id = $1 FOR UPDATE`,
+        [params.migrationRunId],
+      );
+
+      if (lockRes.rows.length === 0) {
+        throw new Error(`Migration run not found: ${params.migrationRunId}`);
+      }
+
+      // 2. Parse current checkpoint for this sourceObject
+      const boundary = lockRes.rows[0].source_boundary_json;
+      const parsedBoundary = typeof boundary === 'string' ? JSON.parse(boundary) : (boundary || {});
+      let current: MigrationCheckpoint | null = null;
+      if (parsedBoundary && typeof parsedBoundary === 'object') {
+        if (parsedBoundary[params.sourceObject]) {
+          current = parsedBoundary[params.sourceObject];
+        } else if (parsedBoundary.sourceObject === params.sourceObject) {
+          current = parsedBoundary;
+        }
+      }
+
+      // 3. Compute the updated checkpoint using pure merge logic
+      const updated = mergeCheckpointUpdate(current, params);
+
+      // 4. Atomically persist the updated checkpoint
+      await client.query(
+        `UPDATE migration_runs 
+         SET source_boundary_json = jsonb_set(
+           COALESCE(source_boundary_json, '{}'::jsonb),
+           ARRAY[$1],
+           $2::jsonb
+         ), 
+         updated_at = NOW() 
+         WHERE id = $3`,
+        [params.sourceObject, JSON.stringify(updated), params.migrationRunId],
+      );
+
+      await client.query('COMMIT');
+      return updated;
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Save checkpoint directly within a row-locked transaction.
    */
   async saveCheckpoint(checkpoint: MigrationCheckpoint): Promise<void> {
     const client = await this.pool.connect();

@@ -93,12 +93,17 @@ let isShuttingDown = false;
 let dbPool: pg.Pool | null = null;
 let redisClient: Redis | null = null;
 
+const allowInsecureTls = process.env.ALLOW_INSECURE_TLS === 'true';
+if (allowInsecureTls && process.env.NODE_ENV === 'production') {
+  throw new Error('[Security] Insecure TLS (ALLOW_INSECURE_TLS=true) is strictly forbidden in production.');
+}
+
 // Initialize persistent PostgreSQL connection pool and adapters
 dbPool = new pg.Pool({
   connectionString: DATABASE_URL,
   connectionTimeoutMillis: 10000,
   max: 20,
-  ssl: { rejectUnauthorized: false },
+  ssl: { rejectUnauthorized: !allowInsecureTls },
 });
 
 const postgresAdapters = new PostgresStorageAdapters(dbPool);
@@ -262,46 +267,56 @@ async function resolveConnectionFromVault(connectionId: string): Promise<{
 
 async function getSourceConnector(payload: MigrationJobPayload): Promise<SourceConnector> {
   const connectionId = payload.sourceConnectionId;
-  if (!connectionId) return defaultSourceConnector;
+  if (!connectionId) {
+    if (process.env.ALLOW_SYNTHETIC_SOURCE === 'true') {
+      console.warn(`[Worker] Using synthetic source connector fallback (ALLOW_SYNTHETIC_SOURCE=true).`);
+      return defaultSourceConnector;
+    }
+    throw new Error(
+      `[Worker] Missing sourceConnectionId in payload. Production migrations strictly require explicit Vault connection IDs.`,
+    );
+  }
 
   if (sourceConnectorCache.has(connectionId)) {
     return sourceConnectorCache.get(connectionId)!;
   }
 
   const vault = await resolveConnectionFromVault(connectionId);
-  if (vault && vault.credentials) {
-    const uri = vault.credentials.uri || vault.credentials.connectionString || vault.credentials.url;
-    const dbName = vault.config?.database || process.env.MONGO_DB_NAME || 'migrationguard_e2e_source';
-
-    if (uri && (vault.engine === 'MONGODB' || uri.startsWith('mongodb'))) {
-      console.log(`[Worker] ✔ Dynamically resolved MongoDB source connector from Vault for connection ${connectionId} (database: ${dbName})`);
-      const connector = ConnectorFactory.createMongoSource(uri, dbName);
-      sourceConnectorCache.set(connectionId, connector);
-      return connector;
-    }
-  }
-
-  // If a connectionId was provided but resolution produced nothing usable, fail the job
-  if (connectionId) {
+  if (!vault || !vault.credentials) {
     throw new Error(
-      `[Worker] Source connector resolution failed for connectionId ${connectionId}. ` +
-        `Check vault configuration and engine type.`,
+      `[Worker] Source connection ${connectionId} could not be resolved from Vault or has no credentials.`,
     );
   }
 
-  return defaultSourceConnector;
+  const uri = vault.credentials.uri || vault.credentials.connectionString || vault.credentials.url;
+  const dbName = vault.config?.database || process.env.MONGO_DB_NAME || 'migrationguard_e2e_source';
+
+  if (!uri || (vault.engine !== 'MONGODB' && !uri.startsWith('mongodb'))) {
+    throw new Error(
+      `[Worker] Source connection ${connectionId} is not a valid MONGODB connection (engine=${vault.engine}).`,
+    );
+  }
+
+  console.log(`[Worker] ✔ Dynamically resolved MongoDB source connector from Vault for connection ${connectionId} (database: ${dbName})`);
+  const connector = ConnectorFactory.createMongoSource(uri, dbName);
+  sourceConnectorCache.set(connectionId, connector);
+  return connector;
 }
 
 /**
- * P0.1: Resolve the destination connector from the encrypted vault and create a
- * dedicated pg.Pool for that connection string — never return defaultDestinationConnector
- * when a destinationConnectionId is present in the payload.
+ * P0.1 & P0.4: Resolve the destination connector from the encrypted vault and create a
+ * dedicated pg.Pool for that connection string. Never route a production migration to
+ * defaultDestinationConnector / control-plane DATABASE_URL.
  *
  * Cache key: "<connectionId>:v<credentialVersion>" (P0.3 — version-pinned).
  */
 async function getDestinationConnector(payload: MigrationJobPayload): Promise<DestinationConnector> {
   const connectionId = payload.destinationConnectionId;
-  if (!connectionId) return defaultDestinationConnector;
+  if (!connectionId) {
+    throw new Error(
+      `[Worker] Missing destinationConnectionId in payload. Writing to control-plane DATABASE_URL is strictly forbidden.`,
+    );
+  }
 
   const vault = await resolveConnectionFromVault(connectionId);
   if (!vault || !vault.credentials) {
@@ -328,12 +343,12 @@ async function getDestinationConnector(payload: MigrationJobPayload): Promise<De
     return destPoolCache.get(cacheKey)!.connector;
   }
 
-  console.log(`[Worker] ✔ Creating dedicated PostgreSQL destination pool for connection ${connectionId} v${credVer}`);
+  console.log(`[Worker] ✔ Creating dedicated PostgreSQL destination pool for connection ${connectionId} v${credVer} (Strict TLS: ${!allowInsecureTls})`);
   const pool = new pg.Pool({
     connectionString: connStr,
     connectionTimeoutMillis: 10000,
     max: 10,
-    ssl: { rejectUnauthorized: false },
+    ssl: { rejectUnauthorized: !allowInsecureTls },
   });
 
   const connector = ConnectorFactory.createPostgresDestination(pool);
@@ -343,18 +358,20 @@ async function getDestinationConnector(payload: MigrationJobPayload): Promise<De
 
 async function startWorker() {
   try {
+    const redisTls = IS_REDIS_TLS ? { rejectUnauthorized: !allowInsecureTls } : undefined;
+
     if (REDIS_URL) {
       redisClient = new Redis(REDIS_URL, {
         maxRetriesPerRequest: null,
         enableReadyCheck: false,
-        tls: IS_REDIS_TLS ? { rejectUnauthorized: false } : undefined,
+        tls: redisTls,
       });
     } else {
       redisClient = new Redis({
         host: REDIS_HOST,
         port: REDIS_PORT,
         password: REDIS_PASSWORD,
-        tls: IS_REDIS_TLS ? { rejectUnauthorized: false } : undefined,
+        tls: redisTls,
         maxRetriesPerRequest: null,
         enableReadyCheck: false,
       });
@@ -367,8 +384,11 @@ async function startWorker() {
       async (job: Job<MigrationJobPayload>) => {
         console.log(`[Worker] Received job: ${job.name} (Job ID: ${job.id}) on queue '${QUEUE_NAME}'`);
 
-        // FR-EXEC-002: strictly validate queue message contains identifiers/cursors, NOT bulk records
-        QueueHandler.validatePayload(job.data);
+        // FR-EXEC-002 & P0.4: strictly validate queue message contains identifiers/cursors, NOT bulk records
+        // and requires explicit connection references in production
+        QueueHandler.validatePayload(job.data, {
+          requireConnections: process.env.ALLOW_SYNTHETIC_SOURCE !== 'true',
+        });
 
         console.log(
           `[Worker] Executing run: ${job.data.migrationRunId}, Batch: ${job.data.batchKey}, Object: ${job.data.sourceObject} -> ${job.data.destinationObject}`,

@@ -1,0 +1,83 @@
+{
+  "migrationRunId": "0ebd821e-2571-4b76-84a4-20e8bd4315c1",
+  "timestamp": "2026-11-20T23:25:01.972Z",
+  "destinationDatabaseUrl": "postgresql://neondb_owner:***@ep-billowing-block-ao9lt8tz.c-2.ap-southeast-1.aws.neon.tech/migrationguard_destination_005?sslmode=require",
+  "destinationDatabaseName": "migrationguard_destination_005",
+  "destinationSchema": "public",
+  "controlPlaneDatabaseUrl": "postgresql://neondb_owner:***@ep-billowing-block-ao9lt8tz-pooler.c-2.ap-southeast-1.aws.neon.tech/neondb?sslmode=require",
+  "controlPlaneDatabaseName": "neondb",
+  "controlPlaneSchema": "public",
+  "destinationTables": {
+    "customers": 200,
+    "orders": 200,
+    "customer_attachments": 200
+  },
+  "controlPlaneTablesCheck": {
+    "customers": 0,
+    "orders": 0,
+    "customer_attachments": 0
+  },
+  "isolationVerified": true,
+  "duplicates": {
+    "customers": 0,
+    "orders": 0,
+    "customer_attachments": 0
+  },
+  "recordManifestsTracked": 600,
+  "batches": [
+    {
+      "batch_key": "batch_customers_0001",
+      "sequence_no": "1",
+      "status": "COMMITTED",
+      "records_read": "100",
+      "records_written": "100",
+      "records_skipped": "0",
+      "records_failed": "0"
+    },
+    {
+      "batch_key": "batch_customers_0002",
+      "sequence_no": "2",
+      "status": "COMMITTED",
+      "records_read": "100",
+      "records_written": "100",
+      "records_skipped": "0",
+      "records_failed": "0"
+    },
+    {
+      "batch_key": "batch_orders_0001",
+      "sequence_no": "3",
+      "status": "COMMITTED",
+      "records_read": "100",
+      "records_written": "100",
+      "records_skipped": "0",
+      "records_failed": "0"
+    },
+    {
+      "batch_key": "batch_orders_0002",
+      "sequence_no": "4",
+      "status": "COMMITTED",
+      "records_read": "100",
+      "records_written": "100",
+      "records_skipped": "0",
+      "records_failed": "0"
+    },
+    {
+      "batch_key": "batch_customer_attachments_0001",
+      "sequence_no": "5",
+      "status": "COMMITTED",
+      "records_read": "100",
+      "records_written": "100",
+      "records_skipped": "0",
+      "records_failed": "0"
+    },
+    {
+      "batch_key": "batch_customer_attachments_0002",
+      "sequence_no": "6",
+      "status": "COMMITTED",
+      "records_read": "100",
+      "records_written": "100",
+      "records_skipped": "0",
+      "records_failed": "0"
+    }
+  ]
+}

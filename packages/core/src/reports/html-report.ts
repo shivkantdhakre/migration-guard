@@ -9,6 +9,8 @@ export interface HtmlReportOptions {
   title?: string;
   projectName?: string;
   organization?: string;
+  runLabel?: string;
+  expectedMigrationRunId?: string;
 }
 
 function escapeHtml(str: unknown): string {
@@ -46,6 +48,16 @@ export function generateHtmlReport(
   summary: ValidationRunSummary,
   options: HtmlReportOptions = {}
 ): string {
+  if (!summary.migrationRunId || summary.migrationRunId.trim() === '') {
+    throw new Error('[HtmlReport] Automated Consistency Error: summary.migrationRunId is missing or empty.');
+  }
+
+  if (options.expectedMigrationRunId && options.expectedMigrationRunId !== summary.migrationRunId) {
+    throw new Error(
+      `[HtmlReport] Automated Consistency Error: Migration run ID mismatch between expected '${options.expectedMigrationRunId}' and summary '${summary.migrationRunId}'.`,
+    );
+  }
+
   const title = options.title || 'MigrationGuard — Automated Validation Assurance Report';
   const projectName = options.projectName || 'Production Database Migration';
   const org = options.organization || 'MigrationGuard Assurance Engine';
@@ -245,8 +257,9 @@ export function generateHtmlReport(
         </div>
       </div>
       <div style="text-align: right; font-size: 12px; color: #94a3b8;">
-        <div>Run ID: <code style="color: #38bdf8;">${escapeHtml(summary.validationRunId)}</code></div>
+        <div>Validation Run: <code style="color: #38bdf8;">${escapeHtml(summary.validationRunId)}</code></div>
         <div>Migration Run: <code style="color: #a78bfa;">${escapeHtml(summary.migrationRunId)}</code></div>
+        ${options.runLabel ? `<div>Run Label: <code style="color: #34d399;">${escapeHtml(options.runLabel)}</code></div>` : ''}
       </div>
     </div>
 
@@ -363,7 +376,7 @@ export function generateHtmlReport(
     </div>
 
     <div class="footer">
-      Generated automatically by MigrationGuard Assurance Engine · Cryptographically Verified Report · Deterministic Quality Guarantee
+      Generated automatically by MigrationGuard Assurance Engine · Deterministic Validation Guarantee
     </div>
   </div>
 </body>

@@ -1,0 +1,106 @@
+# MigrationGuard — Queue & Worker Daemon Evidence: MG-API-WORKER-E2E-20261121-005
+
+## 1. Process Architecture
+
+```
++-----------------------+        HTTP REST         +-----------------------+
+|  Test Orchestrator    | -----------------------> |  NestJS API Backend   |
+|  (HTTP Client)        |                          |  (Port 4002)          |
++-----------------------+                          +-----------------------+
+                                                               |
+                                                          BullMQ Job
+                                                           Dispatch
+                                                               v
+                                                   +-----------------------+
+                                                   |   Aiven Valkey Redis  |
+                                                   | 'migration-execution-e2e-005' |
+                                                   +-----------------------+
+                                                               |
+                                                          BullMQ Job
+                                                           Consumption
+                                                               v
+                                                   +-----------------------+
++-----------------------+                          |  Standalone Worker    |
+| Dedicated Destination | <----------------------- |  Daemon Process       |
+| PostgreSQL Database   |   Idempotent SQL Batch   |  PID: 18740 -> 22652  |
+| (migrationguard_destination_005)|                          |  (Vault Decryption)   |
++-----------------------+                          +-----------------------+
+```
+
+## 2. BullMQ Job Lifecycle
+
+- **Queue Target:** `valkey-137cc70c-veraastras-475e.j.aivencloud.com:15678` (Strict TLS: `rejectUnauthorized: true`, Queue: `migration-execution-e2e-005`)
+- **Job States Observed:** `waiting` $\to$ `active` $\to$ `completed`
+- **Job IDs Dispatched & Completed:**
+  - `0ebd821e-2571-4b76-84a4-20e8bd4315c1_batch_customers_0001` (Sequence: 1, Status: `COMMITTED`)
+  - `0ebd821e-2571-4b76-84a4-20e8bd4315c1_batch_customers_0002` (Sequence: 2, Status: `COMMITTED`)
+  - `0ebd821e-2571-4b76-84a4-20e8bd4315c1_batch_orders_0001` (Sequence: 3, Status: `COMMITTED`)
+  - `0ebd821e-2571-4b76-84a4-20e8bd4315c1_batch_orders_0002` (Sequence: 4, Status: `COMMITTED`)
+  - `0ebd821e-2571-4b76-84a4-20e8bd4315c1_batch_customer_attachments_0001` (Sequence: 5, Status: `COMMITTED`)
+  - `0ebd821e-2571-4b76-84a4-20e8bd4315c1_batch_customer_attachments_0002` (Sequence: 6, Status: `COMMITTED`)
+
+## 3. Worker Daemon Log Extracts
+
+```
+[Worker PID:18740] ========================================================================
+[Worker PID:18740]    MigrationGuard Data-Plane Migration Worker
+[Worker PID:18740]    Specification: 04_SYSTEM_ARCHITECTURE.md (Section 5: Worker Pools)
+[Worker PID:18740] ========================================================================
+[Worker PID:18740] [Worker] Process ID: 18740
+[Worker PID:18740] [Worker] Redis target: Cloud Valkey/Redis
+[Worker PID:18740] [Worker] Database target: postgresql://neondb_owner:***@ep-billowing-block-ao9lt8tz-pooler.c-2.ap-southeast-1.aws.neon.tech/neondb?sslmode=require
+[Worker PID:18740] [Worker] Source target: MongoDB (migrationguard_e2e_source)
+[Worker PID:18740] [Worker] Worker pools initialized:
+[Worker PID:18740]   ✔ BullMQ Queue: 'migration-execution-e2e-005' (Concurrency: 2)
+[Worker PID:18740]   ✔ PostgreSQL destination ready
+[Worker PID:18740]   ✔ Manifest & Checkpoint tracking active
+[Worker PID:18740]   ✔ Encrypted Vault credential resolution active
+[Worker PID:18740] [Worker] Worker is listening for jobs.
+[Worker PID:18740] [Worker] Received job: process-batch (Job ID: 0ebd821e-2571-4b76-84a4-20e8bd4315c1_batch_customers_0001) on queue 'migration-execution-e2e-005'
+[Worker PID:18740] [Worker] Executing run: 0ebd821e-2571-4b76-84a4-20e8bd4315c1, Batch: batch_customers_0001, Object: customers -> customers
+[Worker PID:18740 STDERR] (node:18740) Warning: SECURITY WARNING: The SSL modes 'prefer', 'require', and 'verify-ca' are treated as aliases for 'verify-full'.
+[Worker PID:18740 STDERR] In the next major version (pg-connection-string v3.0.0 and pg v9.0.0), these modes will adopt standard libpq semantics, which have weaker security guarantees.
+[Worker PID:18740 STDERR] To prepare for this change:
+[Worker PID:18740 STDERR] - If you want the current behavior, explicitly use 'sslmode=verify-full'
+[Worker PID:18740 STDERR] - If you want libpq compatibility now, use 'uselibpqcompat=true&sslmode=require'
+[Worker PID:18740 STDERR] See https://www.postgresql.org/docs/current/libpq-ssl.html for libpq SSL mode definitions.
+[Worker PID:18740 STDERR] (Use `node --trace-warnings ...` to show where the warning was created)
+[Worker PID:18740] [Worker] Received job: process-batch (Job ID: 0ebd821e-2571-4b76-84a4-20e8bd4315c1_batch_customers_0002) on queue 'migration-execution-e2e-005'
+[Worker PID:18740] [Worker] Executing run: 0ebd821e-2571-4b76-84a4-20e8bd4315c1, Batch: batch_customers_0002, Object: customers -> customers
+[Worker PID:18740] [Worker] ✔ Dynamically resolved MongoDB source connector from Vault for connection 90a78a9f-40b4-4cb7-a6ae-f7cd6c353ca4 (database: migrationguard_e2e_source)
+[Worker PID:18740] [Worker] ✔ Dynamically resolved MongoDB source connector from Vault for connection 90a78a9f-40b4-4cb7-a6ae-f7cd6c353ca4 (database: migrationguard_e2e_source)
+[Worker PID:18740] [Worker] ✔ Creating dedicated PostgreSQL destination pool for connection 83a8f86e-8d8d-44a5-bbd4-3f3b03a6d0e0 v1 (Strict TLS: true)
+[Worker PID:18740] [Worker] ✔ Reusing cached destination pool for connection 83a8f86e-8d8d-44a5-bbd4-3f3b03a6d0e0 v1
+[Worker PID:18740] [Worker] ✔ Batch batch_customers_0001 executed: Read 100, Written 100, Status: COMMITTED
+[Worker PID:18740] [Worker] Job 0ebd821e-2571-4b76-84a4-20e8bd4315c1_batch_customers_0001 marked COMPLETED.
+[Worker PID:18740] [Worker] Received job: process-batch (Job ID: 0ebd821e-2571-4b76-84a4-20e8bd4315c1_batch_orders_0001) on queue 'migration-execution-e2e-005'
+[Worker PID:18740] [Worker] Executing run: 0ebd821e-2571-4b76-84a4-20e8bd4315c1, Batch: batch_orders_0001, Object: orders -> orders
+[Worker PID:18740] [Worker] ✔ Batch batch_customers_0002 executed: Read 100, Written 100, Status: COMMITTED
+[Worker PID:18740] [Worker] ✔ Reusing cached destination pool for connection 83a8f86e-8d8d-44a5-bbd4-3f3b03a6d0e0 v1
+...
+[Worker PID:22652 STDERR] (node:22652) Warning: SECURITY WARNING: The SSL modes 'prefer', 'require', and 'verify-ca' are treated as aliases for 'verify-full'.
+[Worker PID:22652 STDERR] In the next major version (pg-connection-string v3.0.0 and pg v9.0.0), these modes will adopt standard libpq semantics, which have weaker security guarantees.
+[Worker PID:22652 STDERR] To prepare for this change:
+[Worker PID:22652 STDERR] - If you want the current behavior, explicitly use 'sslmode=verify-full'
+[Worker PID:22652 STDERR] - If you want libpq compatibility now, use 'uselibpqcompat=true&sslmode=require'
+[Worker PID:22652 STDERR] See https://www.postgresql.org/docs/current/libpq-ssl.html for libpq SSL mode definitions.
+[Worker PID:22652 STDERR] (Use `node --trace-warnings ...` to show where the warning was created)
+[Worker PID:22652] [Worker] ✔ Dynamically resolved MongoDB source connector from Vault for connection 90a78a9f-40b4-4cb7-a6ae-f7cd6c353ca4 (database: migrationguard_e2e_source)
+[Worker PID:22652] [Worker] ✔ Dynamically resolved MongoDB source connector from Vault for connection 90a78a9f-40b4-4cb7-a6ae-f7cd6c353ca4 (database: migrationguard_e2e_source)
+[Worker PID:22652] [Worker] ✔ Creating dedicated PostgreSQL destination pool for connection 83a8f86e-8d8d-44a5-bbd4-3f3b03a6d0e0 v1 (Strict TLS: true)
+[Worker PID:22652] [Worker] ✔ Reusing cached destination pool for connection 83a8f86e-8d8d-44a5-bbd4-3f3b03a6d0e0 v1
+[Worker PID:22652] [Worker] ✔ Batch batch_customer_attachments_0002 executed: Read 100, Written 100, Status: COMMITTED
+[Worker PID:22652] [Worker] Job 0ebd821e-2571-4b76-84a4-20e8bd4315c1_batch_customer_attachments_0002 marked COMPLETED.
+[Worker PID:22652] [Worker] Received job: process-batch (Job ID: 0ebd821e-2571-4b76-84a4-20e8bd4315c1_batch_orders_0001) on queue 'migration-execution-e2e-005'
+[Worker PID:22652] [Worker] Executing run: 0ebd821e-2571-4b76-84a4-20e8bd4315c1, Batch: batch_orders_0001, Object: orders -> orders
+[Worker PID:22652] [Worker] ✔ Reusing cached destination pool for connection 83a8f86e-8d8d-44a5-bbd4-3f3b03a6d0e0 v1
+[Worker PID:22652] [Worker] ✔ Batch batch_customer_attachments_0001 executed: Read 100, Written 100, Status: COMMITTED
+[Worker PID:22652] [Worker] Job 0ebd821e-2571-4b76-84a4-20e8bd4315c1_batch_customer_attachments_0001 marked COMPLETED.
+[Worker PID:22652] [Worker] Received job: process-batch (Job ID: 0ebd821e-2571-4b76-84a4-20e8bd4315c1_batch_orders_0002) on queue 'migration-execution-e2e-005'
+[Worker PID:22652] [Worker] Executing run: 0ebd821e-2571-4b76-84a4-20e8bd4315c1, Batch: batch_orders_0002, Object: orders -> orders
+[Worker PID:22652] [Worker] ✔ Reusing cached destination pool for connection 83a8f86e-8d8d-44a5-bbd4-3f3b03a6d0e0 v1
+[Worker PID:22652] [Worker] ✔ Batch batch_orders_0001 executed: Read 100, Written 100, Status: COMMITTED
+[Worker PID:22652] [Worker] Job 0ebd821e-2571-4b76-84a4-20e8bd4315c1_batch_orders_0001 marked COMPLETED.
+[Worker PID:22652] [Worker] ✔ Batch batch_orders_0002 executed: Read 100, Written 100, Status: COMMITTED
+[Worker PID:22652] [Worker] Job 0ebd821e-2571-4b76-84a4-20e8bd4315c1_batch_orders_0002 marked COMPLETED.
+```

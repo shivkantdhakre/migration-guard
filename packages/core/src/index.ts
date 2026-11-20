@@ -28,3 +28,4 @@ export {
   type ValidationRunSummary,
 } from './validator/index.js';
 export * from './reports/index.js';
+export * from './utils/sanitizer.js';

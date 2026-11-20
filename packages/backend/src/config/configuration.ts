@@ -34,17 +34,56 @@ export interface AppConfig {
 
 export const appConfig: AppConfig = {
   port: parseInt(process.env.PORT || '4000', 10),
-  databaseUrl:
-    process.env.DATABASE_URL ||
-    'postgresql://postgres:postgres_secret_password@localhost:5432/migrationguard_control?schema=public',
+  databaseUrl: (() => {
+    const url = process.env.DATABASE_URL;
+    if (process.env.NODE_ENV === 'production') {
+      if (!url || url.trim() === '' || url.includes('localhost') || url.includes('127.0.0.1')) {
+        throw new Error(
+          '[Config] In production (NODE_ENV=production), DATABASE_URL must be explicitly configured and cannot use localhost.',
+        );
+      }
+      return url;
+    }
+    return (
+      url ||
+      'postgresql://postgres:postgres_secret_password@localhost:5432/migrationguard_control?schema=public'
+    );
+  })(),
   redis: {
     host: process.env.REDIS_HOST || 'localhost',
     port: parseInt(process.env.REDIS_PORT || '6379', 10),
     password: process.env.REDIS_PASSWORD || undefined,
   },
-  jwtSecret:
-    process.env.JWT_SECRET ||
-    'migrationguard_super_secure_jwt_dev_secret_key_minimum_32_chars!',
+  jwtSecret: (() => {
+    const secret = process.env.JWT_SECRET;
+    const isProduction = process.env.NODE_ENV === 'production';
+    const isDevPlaceholder =
+      secret === 'migrationguard_super_secure_jwt_dev_secret_key_minimum_32_chars!' ||
+      secret === 'secret' ||
+      secret === 'changeme';
+
+    if (isProduction) {
+      if (!secret || secret.trim() === '' || isDevPlaceholder || secret.length < 32) {
+        throw new Error(
+          '[Config] JWT_SECRET must be explicitly set to a strong secret (at least 32 characters) in production. ' +
+            'Known development placeholders are strictly forbidden.',
+        );
+      }
+      return secret;
+    }
+
+    if (secret && !isDevPlaceholder) {
+      return secret;
+    }
+
+    if (process.env.ALLOW_DEV_JWT === 'true' || process.env.NODE_ENV !== 'production') {
+      return 'migrationguard_super_secure_jwt_dev_secret_key_minimum_32_chars!';
+    }
+
+    throw new Error(
+      '[Config] JWT_SECRET is not configured. Set JWT_SECRET in environment or set ALLOW_DEV_JWT=true for local development.',
+    );
+  })(),
   jwtExpiresIn: '7d',
   encryptionKey: (() => {
     const key = process.env.ENCRYPTION_KEY || process.env.ENCRYPTION_MASTER_KEY;

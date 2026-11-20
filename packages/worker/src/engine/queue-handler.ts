@@ -79,7 +79,10 @@ export class QueueHandler {
    * Strictly validates that the queue payload contains ONLY identifiers, cursors, and metadata.
    * Throws an error if any bulk record payload is detected.
    */
-  public static validatePayload(payload: unknown): asserts payload is MigrationJobPayload {
+  public static validatePayload(
+    payload: unknown,
+    options?: { requireConnections?: boolean },
+  ): asserts payload is MigrationJobPayload {
     if (!payload || typeof payload !== 'object') {
       throw new Error('Queue payload must be a non-null object');
     }
@@ -122,6 +125,20 @@ export class QueueHandler {
     for (const req of required) {
       if (p[req] === undefined || p[req] === null) {
         throw new Error(`Queue payload missing required property: ${req}`);
+      }
+    }
+
+    // P0.4: Require source and destination connection IDs for all production migration jobs
+    const requireConnections =
+      options?.requireConnections ??
+      (process.env.NODE_ENV === 'production' || process.env.REQUIRE_CONNECTION_IDS === 'true');
+
+    if (requireConnections) {
+      if (!p.sourceConnectionId || typeof p.sourceConnectionId !== 'string') {
+        throw new Error('Queue payload missing required property: sourceConnectionId');
+      }
+      if (!p.destinationConnectionId || typeof p.destinationConnectionId !== 'string') {
+        throw new Error('Queue payload missing required property: destinationConnectionId');
       }
     }
 

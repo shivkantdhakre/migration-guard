@@ -22,8 +22,11 @@ import { MetadataValidator } from './metadata-validator.js';
 
 export interface ValidationEngineConfig {
   migrationRunId?: string;
+  runId?: string;
   validationRunId?: string;
   workspaceId?: string;
+  sampleRate?: number;
+  maxDiscrepancies?: number;
   fieldRules?: FieldComparisonRule[];
   metadataAttributes?: string[];
   enableChecks?: {
@@ -67,7 +70,7 @@ export class ValidationEngine {
     const startedAt = new Date().toISOString();
     const startTime = Date.now();
 
-    const migrationRunId = this.config.migrationRunId || 'run-default-001';
+    const migrationRunId = this.config.migrationRunId || this.config.runId || `run-${Date.now()}`;
     const validationRunId = this.config.validationRunId || `val-${Date.now()}`;
     const workspaceId = this.config.workspaceId;
 

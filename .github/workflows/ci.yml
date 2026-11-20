@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    name: Build & Monorepo Test Suite
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 9
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck and Build packages
+        run: |
+          pnpm --filter @migrationguard/core build
+          pnpm --filter @migrationguard/worker build
+          pnpm --filter @migrationguard/backend build
+          pnpm --filter @migrationguard/frontend build
+
+      - name: Test Core
+        run: pnpm --filter @migrationguard/core test
+
+      - name: Test Worker
+        run: pnpm --filter @migrationguard/worker test
+
+      - name: Test Backend
+        run: pnpm --filter @migrationguard/backend test

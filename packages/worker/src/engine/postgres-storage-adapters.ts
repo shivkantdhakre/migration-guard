@@ -160,18 +160,42 @@ export class PostgresStorageAdapters
 
   // --- CheckpointStorageAdapter ---
 
+  /**
+   * P0.4: Atomically read-modify-write the checkpoint using a PostgreSQL transaction
+   * with SELECT ... FOR UPDATE row-level locking. This prevents the lost-update
+   * race condition when multiple concurrent workers advance the same run's checkpoint.
+   */
   async saveCheckpoint(checkpoint: MigrationCheckpoint): Promise<void> {
-    await this.pool.query(
-      `UPDATE migration_runs 
-       SET source_boundary_json = jsonb_set(
-         COALESCE(source_boundary_json, '{}'::jsonb),
-         ARRAY[$1],
-         $2::jsonb
-       ), 
-       updated_at = NOW() 
-       WHERE id = $3`,
-      [checkpoint.sourceObject, JSON.stringify(checkpoint), checkpoint.migrationRunId],
-    );
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // Lock the row for the duration of this update
+      await client.query(
+        `SELECT id FROM migration_runs WHERE id = $1 FOR UPDATE`,
+        [checkpoint.migrationRunId],
+      );
+
+      // Now apply the checkpoint update atomically
+      await client.query(
+        `UPDATE migration_runs 
+         SET source_boundary_json = jsonb_set(
+           COALESCE(source_boundary_json, '{}'::jsonb),
+           ARRAY[$1],
+           $2::jsonb
+         ), 
+         updated_at = NOW() 
+         WHERE id = $3`,
+        [checkpoint.sourceObject, JSON.stringify(checkpoint), checkpoint.migrationRunId],
+      );
+
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
   }
 
   async getCheckpoint(

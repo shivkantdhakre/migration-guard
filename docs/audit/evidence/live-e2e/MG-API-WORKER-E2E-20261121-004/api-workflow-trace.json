@@ -1,0 +1,197 @@
+[
+  {
+    "step": "Operator Registration",
+    "method": "POST",
+    "endpoint": "/api/v1/auth/register",
+    "status": 201,
+    "request": {
+      "email": "operator_e2e_004_1795212376663@migrationguard.io",
+      "name": "Release Verification Operator 004"
+    },
+    "response": {
+      "user": {
+        "id": "cbe5d24c-c1b3-4c62-b216-2d718617a226",
+        "email": "operator_e2e_004_1795212376663@migrationguard.io",
+        "name": "Release Verification Operator 004"
+      },
+      "workspace": {
+        "id": "ef31e03c-6598-48c2-8b6c-41bbbd1e7a31",
+        "name": "Release Verification Operator 004's Workspace",
+        "slug": "operator-e2e-004-1795212376663-ws"
+      },
+      "accessToken": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJjYmU1ZDI0Yy1jMWIzLTRjNjItYjIxNi0yZDcxODYxN2EyMjYiLCJpZCI6ImNiZTVkMjRjLWMxYjMtNGM2Mi1iMjE2LTJkNzE4NjE3YTIyNiIsImVtYWlsIjoib3BlcmF0b3JfZTJlXzAwNF8xNzk1MjEyMzc2NjYzQG1pZ3JhdGlvbmd1YXJkLmlvIiwibmFtZSI6IlJlbGVhc2UgVmVyaWZpY2F0aW9uIE9wZXJhdG9yIDAwNCIsImlhdCI6MTc5NTIxMjM3NywiZXhwIjoxNzk1ODE3MTc3fQ.pNtPXf8-mu5V_vkUiTlyCmGUA_xTPsZKv9qxo4KDI6w"
+    }
+  },
+  {
+    "step": "Create Project",
+    "method": "POST",
+    "endpoint": "/api/v1/workspaces/ef31e03c-6598-48c2-8b6c-41bbbd1e7a31/projects",
+    "status": 201,
+    "response": {
+      "id": "4c1c6d27-fffb-4cf7-9511-52181d322a36",
+      "workspace_id": "ef31e03c-6598-48c2-8b6c-41bbbd1e7a31",
+      "name": "API Worker Verification Project 004",
+      "description": "End-to-end verification of vault credential resolution to dedicated destination schema",
+      "status": "ACTIVE",
+      "created_by": "cbe5d24c-c1b3-4c62-b216-2d718617a226",
+      "created_at": {},
+      "updated_at": {}
+    }
+  },
+  {
+    "step": "Register Source Connection",
+    "method": "POST",
+    "endpoint": "/api/v1/workspaces/ef31e03c-6598-48c2-8b6c-41bbbd1e7a31/connections",
+    "status": 201,
+    "request": {
+      "name": "Live MongoDB Atlas Source",
+      "engine": "MONGODB",
+      "connectionRole": "SOURCE",
+      "config": {
+        "database": "migrationguard_e2e_source"
+      },
+      "credentials": {
+        "uri": "mongodb+srv://dhakreshivkant_db_user:***@migrationguard.jnsclwx.mongodb.net/?retryWrites=true&w=majority"
+      }
+    },
+    "response": {
+      "id": "a8a3a169-62be-4fd4-974e-e9c705dc9d1c",
+      "workspace_id": "ef31e03c-6598-48c2-8b6c-41bbbd1e7a31",
+      "name": "Live MongoDB Atlas Source",
+      "engine": "MONGODB",
+      "connection_role": "SOURCE",
+      "config_json": {
+        "cluster": "migrationguard.jnsclwx.mongodb.net",
+        "database": "migrationguard_e2e_source"
+      },
+      "secret_ref": "[REDACTED]",
+      "credential_version": 1,
+      "status": "UNTESTED",
+      "created_by": "cbe5d24c-c1b3-4c62-b216-2d718617a226",
+      "created_at": {},
+      "updated_at": {}
+    }
+  },
+  {
+    "step": "Register Destination Connection",
+    "method": "POST",
+    "endpoint": "/api/v1/workspaces/ef31e03c-6598-48c2-8b6c-41bbbd1e7a31/connections",
+    "status": 201,
+    "request": {
+      "name": "Dedicated Neon PostgreSQL Destination (Schema: migration_destination)",
+      "engine": "POSTGRESQL",
+      "connectionRole": "DESTINATION",
+      "config": {
+        "database": "neondb",
+        "schema": "migration_destination"
+      },
+      "credentials": {
+        "connectionString": "postgresql://neondb_owner:***@ep-billowing-block-ao9lt8tz.c-2.ap-southeast-1.aws.neon.tech/neondb?sslmode=require&options=-c%20search_path%3Dmigration_destination"
+      }
+    },
+    "response": {
+      "id": "7ebf7e42-1ee6-4069-9cc5-2af5185b7153",
+      "workspace_id": "ef31e03c-6598-48c2-8b6c-41bbbd1e7a31",
+      "name": "Dedicated Neon PostgreSQL Destination (Schema: migration_destination)",
+      "engine": "POSTGRESQL",
+      "connection_role": "DESTINATION",
+      "config_json": {
+        "schema": "migration_destination",
+        "database": "neondb"
+      },
+      "secret_ref": "[REDACTED]",
+      "credential_version": 1,
+      "status": "UNTESTED",
+      "created_by": "cbe5d24c-c1b3-4c62-b216-2d718617a226",
+      "created_at": {},
+      "updated_at": {}
+    }
+  },
+  {
+    "step": "Create Plan",
+    "method": "POST",
+    "endpoint": "/api/v1/projects/4c1c6d27-fffb-4cf7-9511-52181d322a36/plans",
+    "status": 201,
+    "response": {
+      "id": "a9687aac-8553-4a0d-a032-66292caf5236",
+      "workspace_id": "ef31e03c-6598-48c2-8b6c-41bbbd1e7a31",
+      "project_id": "4c1c6d27-fffb-4cf7-9511-52181d322a36",
+      "name": "MongoDB to PostgreSQL Cloud Plan - Run 004",
+      "status": "DRAFT",
+      "current_version": 1,
+      "created_by": "cbe5d24c-c1b3-4c62-b216-2d718617a226",
+      "created_at": {},
+      "updated_at": {}
+    }
+  },
+  {
+    "step": "Create Plan Version",
+    "method": "POST",
+    "endpoint": "/api/v1/plans/a9687aac-8553-4a0d-a032-66292caf5236/versions",
+    "status": 201,
+    "response": {
+      "id": "166965f3-93e3-452b-871b-412ac9f4428b",
+      "plan_id": "a9687aac-8553-4a0d-a032-66292caf5236",
+      "version": 1,
+      "source_connection_id": "a8a3a169-62be-4fd4-974e-e9c705dc9d1c",
+      "source_schema_snapshot_id": null,
+      "destination_connection_id": "7ebf7e42-1ee6-4069-9cc5-2af5185b7153",
+      "destination_schema_snapshot_id": null,
+      "mapping_version_id": null,
+      "scope_json": {
+        "tables": [
+          {
+            "source": "customers",
+            "destination": "customers"
+          },
+          {
+            "source": "orders",
+            "destination": "orders"
+          },
+          {
+            "source": "customer_attachments",
+            "destination": "customer_attachments"
+          }
+        ]
+      },
+      "execution_config_json": {
+        "batchSize": 100,
+        "writeMode": "upsert",
+        "batchesPerTable": 2
+      },
+      "validation_profile_json": {},
+      "plan_hash": "sha256:a01dbbe5ea41110bd37b58d50e583120d44b3ad864261e1f8555d5f8cc0f5bde",
+      "created_by": "cbe5d24c-c1b3-4c62-b216-2d718617a226",
+      "created_at": {}
+    }
+  },
+  {
+    "step": "Approve Plan Version",
+    "method": "POST",
+    "endpoint": "/api/v1/plan-versions/166965f3-93e3-452b-871b-412ac9f4428b/approvals",
+    "status": 200,
+    "response": {
+      "id": "a36bb8f2-b86a-4074-8bcc-cb25943b7d14",
+      "workspace_id": "ef31e03c-6598-48c2-8b6c-41bbbd1e7a31",
+      "resource_type": "PLAN_VERSION",
+      "resource_id": "166965f3-93e3-452b-871b-412ac9f4428b",
+      "resource_hash": "sha256:a01dbbe5ea41110bd37b58d50e583120d44b3ad864261e1f8555d5f8cc0f5bde",
+      "approval_status": "APPROVE",
+      "approver_user_id": "cbe5d24c-c1b3-4c62-b216-2d718617a226",
+      "comment": "Approved for automated Live E2E Verification Run 004",
+      "approved_at": {}
+    }
+  },
+  {
+    "step": "Start Migration Run",
+    "method": "POST",
+    "endpoint": "/api/v1/migration-runs",
+    "status": 202,
+    "response": {
+      "runId": "cd9bb033-5fdc-46a9-8e38-3303c2b08410",
+      "status": "QUEUED",
+      "planHash": "sha256:a01dbbe5ea41110bd37b58d50e583120d44b3ad864261e1f8555d5f8cc0f5bde",
+      "createdAt": {}
+    }
+  }
+]

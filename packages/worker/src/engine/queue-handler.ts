@@ -265,6 +265,16 @@ export class QueueHandler {
         recordsFailed: writeResult.recordsFailed,
       });
 
+      // Strict failure check: If any records failed to write, do NOT commit the batch.
+      // Throw an error so the failure classifier transitions the batch to FAILED_* and BullMQ retries/fails.
+      if (writeResult.recordsFailed > 0) {
+        const firstErr = writeResult.failedKeys?.[0];
+        const errMsg = firstErr ? `(Key: ${firstErr.key}, Error: ${firstErr.error})` : 'Destination write rejected records';
+        throw new Error(
+          `Destination write failed for ${writeResult.recordsFailed} of ${transformedRecords.length} records in batch ${payload.batchKey} ${errMsg}`,
+        );
+      }
+
       // 7. Advance checkpoint
       batch = (await this.manifestTracker.getBatch(payload.migrationRunId, payload.batchKey))!;
       await this.checkpointManager.advanceCheckpoint({

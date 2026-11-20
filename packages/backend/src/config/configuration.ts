@@ -46,10 +46,17 @@ export const appConfig: AppConfig = {
     process.env.JWT_SECRET ||
     'migrationguard_super_secure_jwt_dev_secret_key_minimum_32_chars!',
   jwtExpiresIn: '7d',
-  encryptionKey:
-    process.env.ENCRYPTION_KEY ||
-    process.env.ENCRYPTION_MASTER_KEY ||
-    '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+  encryptionKey: (() => {
+    const key = process.env.ENCRYPTION_KEY || process.env.ENCRYPTION_MASTER_KEY;
+    if (!key || key.trim() === '') {
+      throw new Error(
+        '[Config] ENCRYPTION_KEY (or ENCRYPTION_MASTER_KEY) is not set. ' +
+          'Generate a 64-character hex key: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))" ' +
+          'and add it to your environment before starting the backend.',
+      );
+    }
+    return key;
+  })(),
   s3: {
     endpoint:
       process.env.S3_ENDPOINT ||

@@ -106,9 +106,13 @@ const manifestTracker = new BatchManifestTracker(postgresAdapters);
 const checkpointManager = new CheckpointManager(postgresAdapters);
 const idTracker = new IdTracker(postgresAdapters);
 
-// Initialize Destination Connector (PostgreSQL)
+// Initialize Destination Connector (PostgreSQL) — control-plane pool, used ONLY as fallback
+// when no destinationConnectionId is provided in the job payload.
 const defaultDestinationConnector: DestinationConnector =
   ConnectorFactory.createPostgresDestination(dbPool);
+
+// Per-connection destination pool cache: keyed by "<connectionId>:v<credentialVersion>"
+const destPoolCache = new Map<string, { pool: pg.Pool; connector: DestinationConnector }>();
 
 // Default Source Connector (MongoDB if available, or synthetic fallback)
 let defaultSourceConnector: SourceConnector;
@@ -167,45 +171,72 @@ if (MONGO_URL && process.env.IGNORE_ENV_SOURCE_CONNECTOR !== 'true') {
 
 // Vault Credentials Resolution Cache
 const sourceConnectorCache = new Map<string, SourceConnector>();
-const destConnectorCache = new Map<string, DestinationConnector>();
+// destPoolCache is declared above near defaultDestinationConnector
 
 /**
- * Resolves connection credentials securely from the PostgreSQL encrypted vault in memory
+ * P0.2: Resolve the encryption key; throw (fail closed) if missing.
+ * Never fall back to a hardcoded value.
+ */
+function resolveEncryptionKey(): Buffer {
+  const rawKey = process.env.ENCRYPTION_KEY || process.env.ENCRYPTION_MASTER_KEY;
+  if (!rawKey || rawKey.trim() === '') {
+    throw new Error(
+      '[Worker] ENCRYPTION_KEY / ENCRYPTION_MASTER_KEY is not set. ' +
+        'Worker cannot decrypt vault credentials. Set the environment variable and restart.',
+    );
+  }
+  if (/^[0-9a-fA-F]{64}$/.test(rawKey)) {
+    return Buffer.from(rawKey, 'hex');
+  }
+  // Non-hex key: derive 32 bytes via SHA-256 (supports short passphrases in dev)
+  return crypto.createHash('sha256').update(rawKey).digest();
+}
+
+/**
+ * P0.3: Resolves connection credentials from the PostgreSQL vault, pinned to the
+ * exact credential_version recorded on the connection row (not "latest").
  */
 async function resolveConnectionFromVault(connectionId: string): Promise<{
   engine: string;
   credentials: any;
   config: any;
+  credentialVersion: number | null;
 } | null> {
   if (!connectionId || !dbPool) return null;
 
   try {
+    // Pin to c.credential_version — not ORDER BY version DESC
     const res = await dbPool.query(
-      `SELECT c.engine, c.config_json, s.encrypted_payload, s.iv, s.auth_tag
+      `SELECT c.engine, c.config_json, c.credential_version,
+              s.encrypted_payload, s.iv, s.auth_tag, s.version AS secret_version
        FROM connections c
-       LEFT JOIN connection_secrets s ON s.connection_id = c.id
-       WHERE c.id = $1
-       ORDER BY s.version DESC LIMIT 1`,
+       LEFT JOIN connection_secrets s
+         ON s.connection_id = c.id AND s.version = c.credential_version
+       WHERE c.id = $1`,
       [connectionId],
     );
 
     if (res.rows.length === 0) return null;
     const row = res.rows[0];
+
+    // If the pinned version has no vault record, that is a configuration error
+    if (row.credential_version !== null && row.credential_version !== undefined && !row.encrypted_payload) {
+      throw new Error(
+        `[Worker] Vault record missing for connection ${connectionId} at pinned version ${row.credential_version}. ` +
+          `Ensure connection_secrets contains a row for version ${row.credential_version}.`,
+      );
+    }
+
     if (!row.encrypted_payload) {
       return {
         engine: row.engine,
         credentials: null,
         config: typeof row.config_json === 'string' ? JSON.parse(row.config_json) : row.config_json || {},
+        credentialVersion: row.credential_version ?? null,
       };
     }
 
-    const rawKey =
-      process.env.ENCRYPTION_KEY ||
-      process.env.ENCRYPTION_MASTER_KEY ||
-      '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
-    const key = /^[0-9a-fA-F]{64}$/.test(rawKey)
-      ? Buffer.from(rawKey, 'hex')
-      : crypto.createHash('sha256').update(rawKey).digest();
+    const key = resolveEncryptionKey();
 
     const iv = Buffer.from(row.iv, 'hex');
     const authTag = Buffer.from(row.auth_tag, 'hex');
@@ -221,10 +252,11 @@ async function resolveConnectionFromVault(connectionId: string): Promise<{
       engine: row.engine,
       credentials,
       config,
+      credentialVersion: row.credential_version ?? null,
     };
   } catch (err: any) {
-    console.warn(`[Worker] Error resolving vault credentials for connection ${connectionId}: ${err.message}`);
-    return null;
+    // Re-throw so callers can propagate job failure rather than silently falling back
+    throw new Error(`[Worker] Vault resolution failed for connection ${connectionId}: ${err.message}`);
   }
 }
 
@@ -249,28 +281,64 @@ async function getSourceConnector(payload: MigrationJobPayload): Promise<SourceC
     }
   }
 
+  // If a connectionId was provided but resolution produced nothing usable, fail the job
+  if (connectionId) {
+    throw new Error(
+      `[Worker] Source connector resolution failed for connectionId ${connectionId}. ` +
+        `Check vault configuration and engine type.`,
+    );
+  }
+
   return defaultSourceConnector;
 }
 
+/**
+ * P0.1: Resolve the destination connector from the encrypted vault and create a
+ * dedicated pg.Pool for that connection string — never return defaultDestinationConnector
+ * when a destinationConnectionId is present in the payload.
+ *
+ * Cache key: "<connectionId>:v<credentialVersion>" (P0.3 — version-pinned).
+ */
 async function getDestinationConnector(payload: MigrationJobPayload): Promise<DestinationConnector> {
   const connectionId = payload.destinationConnectionId;
   if (!connectionId) return defaultDestinationConnector;
 
-  if (destConnectorCache.has(connectionId)) {
-    return destConnectorCache.get(connectionId)!;
-  }
-
   const vault = await resolveConnectionFromVault(connectionId);
-  if (vault && vault.credentials) {
-    const connStr = vault.credentials.connectionString || vault.credentials.uri || vault.credentials.url;
-    if (connStr && vault.engine === 'POSTGRESQL') {
-      console.log(`[Worker] ✔ Dynamically resolved PostgreSQL destination connector from Vault for connection ${connectionId}`);
-      destConnectorCache.set(connectionId, defaultDestinationConnector);
-      return defaultDestinationConnector;
-    }
+  if (!vault || !vault.credentials) {
+    throw new Error(
+      `[Worker] Destination vault resolution returned no credentials for connectionId ${connectionId}. ` +
+        `Job cannot proceed without a verified destination connection string.`,
+    );
   }
 
-  return defaultDestinationConnector;
+  const connStr = vault.credentials.connectionString || vault.credentials.uri || vault.credentials.url;
+  if (!connStr || vault.engine !== 'POSTGRESQL') {
+    throw new Error(
+      `[Worker] Destination connection ${connectionId} is not a valid POSTGRESQL connection ` +
+        `(engine=${vault.engine}, connStr=${connStr ? 'present' : 'missing'}).`,
+    );
+  }
+
+  // P0.3: Cache key includes credential_version to handle rotation correctly
+  const credVer = vault.credentialVersion ?? 'unpinned';
+  const cacheKey = `${connectionId}:v${credVer}`;
+
+  if (destPoolCache.has(cacheKey)) {
+    console.log(`[Worker] ✔ Reusing cached destination pool for connection ${connectionId} v${credVer}`);
+    return destPoolCache.get(cacheKey)!.connector;
+  }
+
+  console.log(`[Worker] ✔ Creating dedicated PostgreSQL destination pool for connection ${connectionId} v${credVer}`);
+  const pool = new pg.Pool({
+    connectionString: connStr,
+    connectionTimeoutMillis: 10000,
+    max: 10,
+    ssl: { rejectUnauthorized: false },
+  });
+
+  const connector = ConnectorFactory.createPostgresDestination(pool);
+  destPoolCache.set(cacheKey, { pool, connector });
+  return connector;
 }
 
 async function startWorker() {
@@ -467,9 +535,21 @@ async function shutdown() {
     redisClient.disconnect();
     console.log('[Worker] Redis connection disconnected.');
   }
+
+  // P0.1: Close all per-connection destination pools
+  for (const [cacheKey, entry] of destPoolCache.entries()) {
+    try {
+      await entry.pool.end();
+      console.log(`[Worker] Destination pool closed: ${cacheKey}`);
+    } catch (err: any) {
+      console.warn(`[Worker] Error closing destination pool ${cacheKey}: ${err.message}`);
+    }
+  }
+  destPoolCache.clear();
+
   if (dbPool) {
     await dbPool.end();
-    console.log('[Worker] Database pool closed.');
+    console.log('[Worker] Control-plane database pool closed.');
   }
 
   console.log('[Worker] Worker process terminated gracefully.');

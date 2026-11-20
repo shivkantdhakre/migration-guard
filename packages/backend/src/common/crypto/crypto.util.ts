@@ -10,6 +10,11 @@ export interface EncryptedPayload {
 export class CryptoUtil {
   private static getKey(): Buffer {
     const rawKey = appConfig.encryptionKey;
+    // appConfig.encryptionKey already throws if the env var is missing (P0.2).
+    // Here we additionally validate that the key is non-empty.
+    if (!rawKey || rawKey.trim() === '') {
+      throw new Error('[CryptoUtil] Encryption key is empty. Cannot derive a secure AES key.');
+    }
     if (/^[0-9a-fA-F]{64}$/.test(rawKey)) {
       return Buffer.from(rawKey, 'hex');
     }

@@ -223,4 +223,66 @@ describe('Queue Message Handler (BullMQ / Redis Constraint FR-EXEC-002)', () => 
     expect(batch?.status).toBe('FAILED_PERMANENT');
     expect(batch?.errorSummary?.classification).toBe('PERMANENT');
   });
+
+  it('ensures failed batch execution rejects so BullMQ marks job failed instead of completed', async () => {
+    const mockRecords: SourceRecordEnvelope[] = [
+      {
+        sourceObject: 'users',
+        sourceKey: 'u1',
+        payload: { id: 'u1', email: null },
+        extractedAt: new Date().toISOString(),
+      },
+    ];
+
+    const sourceConnector = new MockSourceConnector(mockRecords);
+    const destinationConnector = new MockDestinationConnector();
+    destinationConnector.failAtCall = 1;
+    destinationConnector.failError = Object.assign(
+      new Error('null value in column "email" violates not-null constraint'),
+      { code: '23502' },
+    );
+
+    const manifestTracker = new BatchManifestTracker();
+    const checkpointManager = new CheckpointManager();
+
+    const handler = new QueueHandler({
+      sourceConnector,
+      destinationConnector,
+      manifestTracker,
+      checkpointManager,
+    });
+
+    const payload: MigrationJobPayload = {
+      jobId: 'job_fail_check',
+      migrationRunId: 'run_fail',
+      batchKey: 'batch_fail',
+      sequenceNo: 1,
+      sourceObject: 'users',
+      destinationObject: 'users',
+      cursorStart: null,
+      batchSize: 10,
+      planVersionId: 'plan_v1',
+      mappingVersionId: 'map_v1',
+      writeMode: 'insert_only',
+    };
+
+    // Worker processor wrapper enforcing BullMQ rejection on uncommitted batch
+    const workerProcessor = async (jobPayload: MigrationJobPayload) => {
+      const result = await handler.processJob(jobPayload);
+      if (result.status !== 'COMMITTED') {
+        const errMessage =
+          result.error instanceof Error
+            ? result.error.message
+            : typeof result.error === 'string'
+              ? result.error
+              : `Batch ${jobPayload.batchKey} failed with status: ${result.status}`;
+        throw new Error(`Job execution failed for batch ${jobPayload.batchKey} (${result.status}): ${errMessage}`);
+      }
+      return result;
+    };
+
+    await expect(workerProcessor(payload)).rejects.toThrow(
+      /Job execution failed for batch batch_fail \(FAILED_PERMANENT\)/,
+    );
+  });
 });

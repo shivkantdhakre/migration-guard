@@ -8,6 +8,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { Worker, Job } from 'bullmq';
 import { Redis } from 'ioredis';
@@ -106,21 +107,21 @@ const checkpointManager = new CheckpointManager(postgresAdapters);
 const idTracker = new IdTracker(postgresAdapters);
 
 // Initialize Destination Connector (PostgreSQL)
-const destinationConnector: DestinationConnector =
+const defaultDestinationConnector: DestinationConnector =
   ConnectorFactory.createPostgresDestination(dbPool);
 
-// Source Connector (MongoDB if available, or synthetic fallback)
-let sourceConnector: SourceConnector;
+// Default Source Connector (MongoDB if available, or synthetic fallback)
+let defaultSourceConnector: SourceConnector;
 const MONGO_URL = process.env.MONGO_URL || process.env.MONGODB_URI;
 const MONGO_DB = process.env.MONGO_DB_NAME || 'migrationguard_e2e_source';
 
-if (MONGO_URL) {
+if (MONGO_URL && process.env.IGNORE_ENV_SOURCE_CONNECTOR !== 'true') {
   console.log(`[Worker] Source target: MongoDB (${MONGO_DB})`);
-  sourceConnector = ConnectorFactory.createMongoSource(MONGO_URL, MONGO_DB);
+  defaultSourceConnector = ConnectorFactory.createMongoSource(MONGO_URL, MONGO_DB);
 } else {
-  console.warn(`[Worker] Source target: Fallback Synthetic Generator (NO MONGO_URL)`);
+  console.log(`[Worker] Source target: Vault-driven resolution active (ENV fallback disabled)`);
   // Standalone source connector with in-memory sample records if MongoDB is not provided
-  sourceConnector = {
+  defaultSourceConnector = {
     testConnection: async () => ({
       success: true,
       message: 'Source connector active',
@@ -164,6 +165,114 @@ if (MONGO_URL) {
   };
 }
 
+// Vault Credentials Resolution Cache
+const sourceConnectorCache = new Map<string, SourceConnector>();
+const destConnectorCache = new Map<string, DestinationConnector>();
+
+/**
+ * Resolves connection credentials securely from the PostgreSQL encrypted vault in memory
+ */
+async function resolveConnectionFromVault(connectionId: string): Promise<{
+  engine: string;
+  credentials: any;
+  config: any;
+} | null> {
+  if (!connectionId || !dbPool) return null;
+
+  try {
+    const res = await dbPool.query(
+      `SELECT c.engine, c.config_json, s.encrypted_payload, s.iv, s.auth_tag
+       FROM connections c
+       LEFT JOIN connection_secrets s ON s.connection_id = c.id
+       WHERE c.id = $1
+       ORDER BY s.version DESC LIMIT 1`,
+      [connectionId],
+    );
+
+    if (res.rows.length === 0) return null;
+    const row = res.rows[0];
+    if (!row.encrypted_payload) {
+      return {
+        engine: row.engine,
+        credentials: null,
+        config: typeof row.config_json === 'string' ? JSON.parse(row.config_json) : row.config_json || {},
+      };
+    }
+
+    const rawKey =
+      process.env.ENCRYPTION_KEY ||
+      process.env.ENCRYPTION_MASTER_KEY ||
+      '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+    const key = /^[0-9a-fA-F]{64}$/.test(rawKey)
+      ? Buffer.from(rawKey, 'hex')
+      : crypto.createHash('sha256').update(rawKey).digest();
+
+    const iv = Buffer.from(row.iv, 'hex');
+    const authTag = Buffer.from(row.auth_tag, 'hex');
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+    decipher.setAuthTag(authTag);
+    let decrypted = decipher.update(row.encrypted_payload, 'hex', 'utf8');
+    decrypted += decipher.final('utf8');
+
+    const credentials = JSON.parse(decrypted);
+    const config = typeof row.config_json === 'string' ? JSON.parse(row.config_json) : row.config_json || {};
+
+    return {
+      engine: row.engine,
+      credentials,
+      config,
+    };
+  } catch (err: any) {
+    console.warn(`[Worker] Error resolving vault credentials for connection ${connectionId}: ${err.message}`);
+    return null;
+  }
+}
+
+async function getSourceConnector(payload: MigrationJobPayload): Promise<SourceConnector> {
+  const connectionId = payload.sourceConnectionId;
+  if (!connectionId) return defaultSourceConnector;
+
+  if (sourceConnectorCache.has(connectionId)) {
+    return sourceConnectorCache.get(connectionId)!;
+  }
+
+  const vault = await resolveConnectionFromVault(connectionId);
+  if (vault && vault.credentials) {
+    const uri = vault.credentials.uri || vault.credentials.connectionString || vault.credentials.url;
+    const dbName = vault.config?.database || process.env.MONGO_DB_NAME || 'migrationguard_e2e_source';
+
+    if (uri && (vault.engine === 'MONGODB' || uri.startsWith('mongodb'))) {
+      console.log(`[Worker] ✔ Dynamically resolved MongoDB source connector from Vault for connection ${connectionId} (database: ${dbName})`);
+      const connector = ConnectorFactory.createMongoSource(uri, dbName);
+      sourceConnectorCache.set(connectionId, connector);
+      return connector;
+    }
+  }
+
+  return defaultSourceConnector;
+}
+
+async function getDestinationConnector(payload: MigrationJobPayload): Promise<DestinationConnector> {
+  const connectionId = payload.destinationConnectionId;
+  if (!connectionId) return defaultDestinationConnector;
+
+  if (destConnectorCache.has(connectionId)) {
+    return destConnectorCache.get(connectionId)!;
+  }
+
+  const vault = await resolveConnectionFromVault(connectionId);
+  if (vault && vault.credentials) {
+    const connStr = vault.credentials.connectionString || vault.credentials.uri || vault.credentials.url;
+    if (connStr && vault.engine === 'POSTGRESQL') {
+      console.log(`[Worker] ✔ Dynamically resolved PostgreSQL destination connector from Vault for connection ${connectionId}`);
+      destConnectorCache.set(connectionId, defaultDestinationConnector);
+      return defaultDestinationConnector;
+    }
+  }
+
+  return defaultDestinationConnector;
+}
+
 async function startWorker() {
   try {
     if (REDIS_URL) {
@@ -183,10 +292,12 @@ async function startWorker() {
       });
     }
 
+    const QUEUE_NAME = process.env.BULLMQ_QUEUE_NAME || 'migration-execution';
+
     executionWorker = new Worker(
-      'migration-execution',
+      QUEUE_NAME,
       async (job: Job<MigrationJobPayload>) => {
-        console.log(`[Worker] Received job: ${job.name} (Job ID: ${job.id})`);
+        console.log(`[Worker] Received job: ${job.name} (Job ID: ${job.id}) on queue '${QUEUE_NAME}'`);
 
         // FR-EXEC-002: strictly validate queue message contains identifiers/cursors, NOT bulk records
         QueueHandler.validatePayload(job.data);
@@ -195,10 +306,14 @@ async function startWorker() {
           `[Worker] Executing run: ${job.data.migrationRunId}, Batch: ${job.data.batchKey}, Object: ${job.data.sourceObject} -> ${job.data.destinationObject}`,
         );
 
-        // Instantiate QueueHandler with real connectors and transformers
+        // Dynamically resolve connectors from connection vault in database
+        const activeSourceConnector = await getSourceConnector(job.data);
+        const activeDestinationConnector = await getDestinationConnector(job.data);
+
+        // Instantiate QueueHandler with dynamic connectors and transformers
         const queueHandler = new QueueHandler({
-          sourceConnector,
-          destinationConnector,
+          sourceConnector: activeSourceConnector,
+          destinationConnector: activeDestinationConnector,
           manifestTracker,
           checkpointManager,
           idTracker,
@@ -288,6 +403,20 @@ async function startWorker() {
           }
         }
 
+        // BullMQ Acknowledgement Semantics Constraint (P0 Issue #1):
+        // Prevent BullMQ from acknowledging a job as COMPLETED when its manifest is uncommitted/failed.
+        if (result.status !== 'COMMITTED') {
+          const errDetail =
+            result.error instanceof Error
+              ? result.error.message
+              : typeof result.error === 'string'
+                ? result.error
+                : `Batch ended in uncommitted status ${result.status}`;
+          throw new Error(
+            `Job failed for batch ${job.data.batchKey} (status: ${result.status}): ${errDetail}`,
+          );
+        }
+
         console.log(
           `[Worker] ✔ Batch ${job.data.batchKey} executed: Read ${result.recordsRead}, Written ${result.recordsWritten}, Status: ${result.status}`,
         );
@@ -297,8 +426,8 @@ async function startWorker() {
       {
         connection: redisClient,
         concurrency: 2,
-        stalledInterval: 5000,
-        lockDuration: 10000,
+        stalledInterval: 3000,
+        lockDuration: 8000,
       },
     );
 
@@ -315,9 +444,10 @@ async function startWorker() {
     });
 
     console.log('[Worker] Worker pools initialized:');
-    console.log('  ✔ migration-execution  (Concurrency: 2)');
+    console.log(`  ✔ BullMQ Queue: '${QUEUE_NAME}' (Concurrency: 2)`);
     console.log('  ✔ PostgreSQL destination ready');
     console.log('  ✔ Manifest & Checkpoint tracking active');
+    console.log('  ✔ Encrypted Vault credential resolution active');
     console.log('[Worker] Worker is listening for jobs.\n');
   } catch (err: any) {
     console.error(`[Worker] Error starting worker: ${err.message}`);

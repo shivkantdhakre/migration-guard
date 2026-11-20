@@ -1,0 +1,105 @@
+# MigrationGuard — Queue & Worker Daemon Evidence: MG-API-WORKER-E2E-20261120-003
+
+## 1. Process Architecture
+
+```
++-----------------------+        HTTP REST         +-----------------------+
+|  Test Orchestrator    | -----------------------> |  NestJS API Backend   |
+|  (HTTP Client)        |                          |  (PID: 26572)         |
++-----------------------+                          +-----------------------+
+                                                               |
+                                                          BullMQ Job
+                                                           Dispatch
+                                                               v
+                                                   +-----------------------+
+                                                   |   Aiven Valkey Redis  |
+                                                   | 'migration-execution-e2e' |
+                                                   +-----------------------+
+                                                               |
+                                                          BullMQ Job
+                                                          Consumption
+                                                               v
+                                                   +-----------------------+
++-----------------------+                          |  Standalone Worker    |
+|   Neon PostgreSQL     | <----------------------- |  Daemon Process       |
+|   Destination DB      |   Idempotent SQL Batch   |  PID: 19548 -> 19260  |
+|   & Encrypted Vault   |                          |  (Vault Decryption)   |
++-----------------------+                          +-----------------------+
+```
+
+## 2. BullMQ Job Lifecycle
+
+- **Queue Target:** `valkey-137cc70c-veraastras-475e.j.aivencloud.com:15678` (TLS enabled, Queue: `migration-execution-e2e`)
+- **Job States Observed:** `waiting` $\to$ `active` $\to$ `completed`
+- **Job IDs Dispatched & Completed:**
+  - `949ab122-6e73-490b-afa6-995655357cbe_batch_customers_0001` (Sequence: 1, Status: `COMMITTED`)
+  - `949ab122-6e73-490b-afa6-995655357cbe_batch_customers_0002` (Sequence: 2, Status: `COMMITTED`)
+  - `949ab122-6e73-490b-afa6-995655357cbe_batch_orders_0001` (Sequence: 3, Status: `COMMITTED`)
+  - `949ab122-6e73-490b-afa6-995655357cbe_batch_orders_0002` (Sequence: 4, Status: `COMMITTED`)
+  - `949ab122-6e73-490b-afa6-995655357cbe_batch_customer_attachments_0001` (Sequence: 5, Status: `COMMITTED`)
+  - `949ab122-6e73-490b-afa6-995655357cbe_batch_customer_attachments_0002` (Sequence: 6, Status: `COMMITTED`)
+
+## 3. Worker Daemon Log Extracts
+
+```
+========================================================================
+   MigrationGuard Data-Plane Migration Worker
+   Specification: 04_SYSTEM_ARCHITECTURE.md (Section 5: Worker Pools)
+========================================================================
+[Worker] Process ID: 19548
+[Worker] Redis target: Cloud Valkey/Redis
+[Worker] Database target: postgresql://neondb_owner:***@ep-billowing-block-ao9lt8tz-pooler.c-2.ap-southeast-1.aws.neon.tech/neondb?sslmode=require
+[Worker] Source target: Vault-driven resolution active (ENV fallback disabled)
+[Worker] Worker pools initialized:
+  ✔ BullMQ Queue: 'migration-execution-e2e' (Concurrency: 2)
+  ✔ PostgreSQL destination ready
+  ✔ Manifest & Checkpoint tracking active
+  ✔ Encrypted Vault credential resolution active
+[Worker] Worker is listening for jobs.
+[Worker] Received job: process-batch (Job ID: 949ab122-6e73-490b-afa6-995655357cbe_batch_customers_0001) on queue 'migration-execution-e2e'
+[Worker] Executing run: 949ab122-6e73-490b-afa6-995655357cbe, Batch: batch_customers_0001, Object: customers -> customers
+[Worker] Received job: process-batch (Job ID: 949ab122-6e73-490b-afa6-995655357cbe_batch_customers_0002) on queue 'migration-execution-e2e'
+[Worker] Executing run: 949ab122-6e73-490b-afa6-995655357cbe, Batch: batch_customers_0002, Object: customers -> customers
+[STDERR] (node:19548) Warning: SECURITY WARNING: The SSL modes 'prefer', 'require', and 'verify-ca' are treated as aliases for 'verify-full'.
+[STDERR] In the next major version (pg-connection-string v3.0.0 and pg v9.0.0), these modes will adopt standard libpq semantics, which have weaker security guarantees.
+[STDERR] To prepare for this change:
+[STDERR] - If you want the current behavior, explicitly use 'sslmode=verify-full'
+[STDERR] - If you want libpq compatibility now, use 'uselibpqcompat=true&sslmode=require'
+[STDERR] See https://www.postgresql.org/docs/current/libpq-ssl.html for libpq SSL mode definitions.
+[STDERR] (Use `node --trace-warnings ...` to show where the warning was created)
+[Worker] ✔ Dynamically resolved MongoDB source connector from Vault for connection b9261724-a48f-434e-926d-6a6ac39d83ad (database: migrationguard_e2e_source)
+[Worker] ✔ Dynamically resolved MongoDB source connector from Vault for connection b9261724-a48f-434e-926d-6a6ac39d83ad (database: migrationguard_e2e_source)
+[Worker] ✔ Dynamically resolved PostgreSQL destination connector from Vault for connection d76af89a-4ffa-46d3-bc3a-23d2c1b8f1f5
+[Worker] ✔ Dynamically resolved PostgreSQL destination connector from Vault for connection d76af89a-4ffa-46d3-bc3a-23d2c1b8f1f5
+[Worker] ✔ Batch batch_customers_0001 executed: Read 100, Written 100, Status: COMMITTED
+[Worker] Job 949ab122-6e73-490b-afa6-995655357cbe_batch_customers_0001 marked COMPLETED.
+[Worker] Received job: process-batch (Job ID: 949ab122-6e73-490b-afa6-995655357cbe_batch_orders_0001) on queue 'migration-execution-e2e'
+[Worker] Executing run: 949ab122-6e73-490b-afa6-995655357cbe, Batch: batch_orders_0001, Object: orders -> orders
+[Worker] ✔ Batch batch_customers_0002 executed: Read 100, Written 100, Status: COMMITTED
+[Worker] Job 949ab122-6e73-490b-afa6-995655357cbe_batch_customers_0002 marked COMPLETED.
+[Worker] Received job: process-batch (Job ID: 949ab122-6e73-490b-afa6-995655357cbe_batch_orders_0002) on queue 'migration-execution-e2e'
+[Worker] Executing run: 949ab122-6e73-490b-afa6-995655357cbe, Batch: batch_orders_0002, Object: orders -> orders
+========================================================================
+   MigrationGuard Data-Plane Migration Worker
+   Specification: 04_SYSTEM_ARCHITECTURE.md (Section 5: Worker Pools)
+========================================================================
+[Worker] Process ID: 19260
+[Worker] Redis target: Cloud Valkey/Redis
+[Worker] Database target: postgresql://neondb_owner:***@ep-billowing-block-ao9lt8tz-pooler.c-2.ap-southeast-1.aws.neon.tech/neondb?sslmode=require
+[Worker] Source target: Vault-driven resolution active (ENV fallback disabled)
+[Worker] Worker pools initialized:
+  ✔ BullMQ Queue: 'migration-execution-e2e' (Concurrency: 2)
+  ✔ PostgreSQL destination ready
+  ✔ Manifest & Checkpoint tracking active
+  ✔ Encrypted Vault credential resolution active
+[Worker] Worker is listening for jobs.
+[Worker] Received job: process-batch (Job ID: 949ab122-6e73-490b-afa6-995655357cbe_batch_customer_attachments_0001) on queue 'migration-execution-e2e'
+[Worker] Executing run: 949ab122-6e73-490b-afa6-995655357cbe, Batch: batch_customer_attachments_0001, Object: customer_attachments -> customer_attachments
+[Worker] Received job: process-batch (Job ID: 949ab122-6e73-490b-afa6-995655357cbe_batch_customer_attachments_0002) on queue 'migration-execution-e2e'
+[Worker] Executing run: 949ab122-6e73-490b-afa6-995655357cbe, Batch: batch_customer_attachments_0002, Object: customer_attachments -> customer_attachments
+[STDERR] (node:19260) Warning: SECURITY WARNING: The SSL modes 'prefer', 'require', and 'verify-ca' are treated as aliases for 'verify-full'.
+[STDERR] In the next major version (pg-connection-string v3.0.0 and pg v9.0.0), these modes will adopt standard libpq semantics, which have weaker security guarantees.
+[STDERR] To prepare for this change:
+[STDERR] - If you want the current behavior, explicitly use 'sslmode=verify-full'
+[STDERR] - If you want libpq compatibility now, use 'uselibpqcompat=true&sslmode=require'
+```

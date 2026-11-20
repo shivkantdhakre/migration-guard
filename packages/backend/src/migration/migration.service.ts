@@ -125,6 +125,8 @@ export class MigrationService {
           planVersionId,
           mappingVersionId: version.mapping_version_id || 'default-mapping',
           writeMode,
+          sourceConnectionId: version.source_connection_id,
+          destinationConnectionId: version.destination_connection_id,
         });
       }
     }

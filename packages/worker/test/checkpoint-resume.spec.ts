@@ -70,6 +70,77 @@ describe('Checkpoint Manager & Recovery Engine (FR-REC-001)', () => {
     }).rejects.toThrow(/Cannot regress checkpoint sequence/);
   });
 
+  it('handles out-of-order concurrent batch completion safely and advances contiguous high-water mark', async () => {
+    const manager = new CheckpointManager();
+
+    const batch1 = {
+      id: 'b1',
+      migrationRunId: 'run_concurrent',
+      batchKey: 'batch_customers_0001',
+      sequenceNo: 1,
+      status: 'COMMITTED' as const,
+      sourceObject: 'customers',
+      destinationObject: 'customers',
+      sourceCursorStart: null,
+      sourceCursorEnd: { offset: 100 },
+      recordsRead: 100,
+      recordsWritten: 100,
+      recordsSkipped: 0,
+      recordsFailed: 0,
+      attemptCount: 1,
+      maxAttempts: 3,
+    };
+
+    const batch2 = {
+      id: 'b2',
+      migrationRunId: 'run_concurrent',
+      batchKey: 'batch_customers_0002',
+      sequenceNo: 2,
+      status: 'COMMITTED' as const,
+      sourceObject: 'customers',
+      destinationObject: 'customers',
+      sourceCursorStart: { offset: 100 },
+      sourceCursorEnd: { offset: 200 },
+      recordsRead: 100,
+      recordsWritten: 100,
+      recordsSkipped: 0,
+      recordsFailed: 0,
+      attemptCount: 1,
+      maxAttempts: 3,
+    };
+
+    // Scenario: Batch 2 commits BEFORE Batch 1
+    const cpBatch2First = await manager.advanceCheckpoint({
+      migrationRunId: 'run_concurrent',
+      sourceObject: 'customers',
+      batch: batch2,
+      planVersionId: 'p1',
+      mappingVersionId: 'm1',
+      recordsCommittedCount: 100,
+      cursorEnd: { offset: 200 },
+    });
+
+    // Batch 2 committed, records written tracked
+    expect(cpBatch2First.totalRecordsCommitted).toBe(100);
+
+    // Now Batch 1 finishes and commits - MUST NOT THROW!
+    const cpBatch1Second = await manager.advanceCheckpoint({
+      migrationRunId: 'run_concurrent',
+      sourceObject: 'customers',
+      batch: batch1,
+      planVersionId: 'p1',
+      mappingVersionId: 'm1',
+      recordsCommittedCount: 100,
+      cursorEnd: { offset: 100 },
+    });
+
+    // Checkpoint contiguous high-water mark now advances to 2 and points to batch 2 cursor
+    expect(cpBatch1Second.lastCommittedSequenceNo).toBe(2);
+    expect(cpBatch1Second.totalRecordsCommitted).toBe(200);
+    expect(cpBatch1Second.lastCommittedBatchKey).toBe('batch_customers_0002');
+    expect(cpBatch1Second.lastCommittedCursor).toEqual({ offset: 200 });
+  });
+
   it('resumes interrupted migration from last committed checkpoint without duplicating or skipping records', async () => {
     // 100 records, batch size 20 -> 5 batches
     const records: SourceRecordEnvelope[] = Array.from({ length: 100 }, (_, i) => ({

@@ -198,6 +198,9 @@ export interface MigrationCheckpoint {
   mappingVersionId: string;
   totalRecordsCommitted: number;
   updatedAt: string;
+  baseSequenceNo?: number;
+  committedSequences?: number[];
+  committedEntries?: Record<number, { batchKey: string; cursorEnd: SourceCursor | null }>;
 }
 
 /**
@@ -220,6 +223,8 @@ export interface MigrationJobPayload {
   writeMode: WriteMode;
   conflictColumns?: string[];
   updateColumns?: string[];
+  sourceConnectionId?: string;
+  destinationConnectionId?: string;
 }
 
 export type MigrationRunStatus =

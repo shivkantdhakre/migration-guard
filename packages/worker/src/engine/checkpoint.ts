@@ -63,7 +63,8 @@ export class CheckpointManager {
 
   /**
    * Advances the checkpoint for a migration run and source object.
-   * Enforces that sequence numbers are monotonic and never regress.
+   * Enforces that sequence numbers are monotonic and never regress,
+   * while safely tracking out-of-order committed batches across concurrency.
    */
   public async advanceCheckpoint(params: {
     migrationRunId: string;
@@ -76,28 +77,89 @@ export class CheckpointManager {
   }): Promise<MigrationCheckpoint> {
     const current = await this.getCheckpoint(params.migrationRunId, params.sourceObject);
 
+    // Track committed sequence numbers
+    const committedSequences = new Set<number>(current?.committedSequences || []);
+    if (current?.lastCommittedSequenceNo && current.lastCommittedSequenceNo > 0) {
+      committedSequences.add(current.lastCommittedSequenceNo);
+    }
+
+    // Check if this is a regression on an already-committed sequence number
     if (
       current &&
       current.sourceObject === params.sourceObject &&
-      params.batch.sequenceNo < current.lastCommittedSequenceNo
+      params.batch.sequenceNo < current.lastCommittedSequenceNo &&
+      committedSequences.has(params.batch.sequenceNo)
     ) {
       throw new Error(
         `Cannot regress checkpoint sequence for ${params.sourceObject}: current is ${current.lastCommittedSequenceNo}, attempted ${params.batch.sequenceNo}`,
       );
     }
 
+    // Add this batch's sequence number to the committed set
+    committedSequences.add(params.batch.sequenceNo);
+
+    // Track entries for cursorEnd and batchKey by sequence number
+    const committedEntries: Record<number, { batchKey: string; cursorEnd: SourceCursor | null }> = {
+      ...(current?.committedEntries || {}),
+    };
+    if (current && current.lastCommittedSequenceNo > 0 && !committedEntries[current.lastCommittedSequenceNo]) {
+      committedEntries[current.lastCommittedSequenceNo] = {
+        batchKey: current.lastCommittedBatchKey,
+        cursorEnd: current.lastCommittedCursor,
+      };
+    }
+    committedEntries[params.batch.sequenceNo] = {
+      batchKey: params.batch.batchKey,
+      cursorEnd: params.cursorEnd,
+    };
+
+    // Determine baseSequenceNo for this entity
+    let baseSeq = current?.baseSequenceNo;
+    const isFirstBatch =
+      !params.batch.sourceCursorStart ||
+      (typeof params.batch.sourceCursorStart === 'object' &&
+        ((params.batch.sourceCursorStart as any).offset === 0 || !(params.batch.sourceCursorStart as any).offset));
+
+    if (isFirstBatch || baseSeq === undefined) {
+      if (isFirstBatch) {
+        baseSeq = params.batch.sequenceNo;
+      } else if (baseSeq === undefined) {
+        const sorted = Array.from(committedSequences).sort((a, b) => a - b);
+        baseSeq = sorted[0];
+      }
+    }
+
+    // Advance high-water mark across contiguous committed sequence from baseSeq
+    let highestContiguous = current?.lastCommittedSequenceNo || 0;
+    if (baseSeq !== undefined && committedSequences.has(baseSeq)) {
+      let s = baseSeq;
+      while (committedSequences.has(s)) {
+        highestContiguous = s;
+        s++;
+      }
+    }
+
+    const targetSeq = Math.max(highestContiguous, current?.lastCommittedSequenceNo || 0);
+    const targetEntry = committedEntries[targetSeq] || {
+      batchKey: params.batch.batchKey,
+      cursorEnd: params.cursorEnd,
+    };
+
     const totalRecordsCommitted = (current?.totalRecordsCommitted ?? 0) + params.recordsCommittedCount;
 
     const checkpoint: MigrationCheckpoint = {
       migrationRunId: params.migrationRunId,
       sourceObject: params.sourceObject,
-      lastCommittedSequenceNo: params.batch.sequenceNo,
-      lastCommittedBatchKey: params.batch.batchKey,
-      lastCommittedCursor: params.cursorEnd,
+      lastCommittedSequenceNo: targetSeq,
+      lastCommittedBatchKey: targetEntry.batchKey,
+      lastCommittedCursor: targetEntry.cursorEnd,
       planVersionId: params.planVersionId,
       mappingVersionId: params.mappingVersionId,
       totalRecordsCommitted,
       updatedAt: new Date().toISOString(),
+      baseSequenceNo: baseSeq,
+      committedSequences: Array.from(committedSequences).sort((a, b) => a - b),
+      committedEntries,
     };
 
     await this.adapter.saveCheckpoint(checkpoint);

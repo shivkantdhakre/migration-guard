@@ -19,6 +19,8 @@ export interface MigrationJobPayload {
   writeMode: 'insert_only' | 'upsert' | 'skip_existing';
   conflictColumns?: string[];
   updateColumns?: string[];
+  sourceConnectionId?: string;
+  destinationConnectionId?: string;
 }
 
 @Injectable()
@@ -28,7 +30,9 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
   private redisClient: Redis | null = null;
   private isConnected = false;
 
-  public static readonly QUEUE_NAME = 'migration-execution';
+  public static get QUEUE_NAME(): string {
+    return process.env.BULLMQ_QUEUE_NAME || 'migration-execution';
+  }
 
   async onModuleInit() {
     await this.initQueue();
@@ -59,12 +63,26 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
         (redisUrl && redisUrl.startsWith('rediss://'));
 
       if (redisUrl) {
-        this.redisClient = new Redis(redisUrl, {
-          maxRetriesPerRequest: null,
-          enableReadyCheck: false,
-          connectTimeout: 5000,
-          tls: isTls ? { rejectUnauthorized: false } : undefined,
-        });
+        try {
+          const parsed = new URL(redisUrl);
+          this.redisClient = new Redis({
+            host: parsed.hostname,
+            port: parseInt(parsed.port || '15678', 10),
+            username: parsed.username || 'default',
+            password: parsed.password || undefined,
+            tls: { rejectUnauthorized: false },
+            maxRetriesPerRequest: null,
+            enableReadyCheck: false,
+            connectTimeout: 3000,
+          });
+        } catch {
+          this.redisClient = new Redis(redisUrl, {
+            maxRetriesPerRequest: null,
+            enableReadyCheck: false,
+            connectTimeout: 3000,
+            tls: isTls ? { rejectUnauthorized: false } : undefined,
+          });
+        }
       } else {
         this.redisClient = new Redis({
           host: appConfig.redis.host,
@@ -73,7 +91,7 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
           tls: isTls ? { rejectUnauthorized: false } : undefined,
           maxRetriesPerRequest: null,
           enableReadyCheck: false,
-          connectTimeout: 5000,
+          connectTimeout: 3000,
         });
       }
 
@@ -82,11 +100,11 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
         this.isConnected = false;
       });
 
-      // Probe connection with short timeout to ensure queue is active
+      // Probe connection with timeout to ensure queue is active
       try {
         await Promise.race([
           this.redisClient.ping(),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('Connection timeout')), 2500)),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Connection timeout')), 3000)),
         ]);
         this.isConnected = true;
         this.queue = new Queue(QueueService.QUEUE_NAME, {

@@ -12,7 +12,10 @@ export class HealthController {
 
   @Get('liveness')
   async getLiveness() {
-    return this.healthService.checkLiveness();
+    return {
+      status: 'ALIVE',
+      timestamp: new Date().toISOString(),
+    };
   }
 
   @Get('readiness')

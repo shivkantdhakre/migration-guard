@@ -1,0 +1,71 @@
+{
+  "migrationRunId": "c4816ce2-caef-4a4d-ac86-e922b1e8807d",
+  "runLabel": "MG-API-WORKER-E2E-20261120-002",
+  "destinationTables": {
+    "customers": 200,
+    "orders": 200,
+    "customer_attachments": 200
+  },
+  "duplicates": {
+    "customers": 0,
+    "orders": 0,
+    "customer_attachments": 0
+  },
+  "recordManifestsTracked": 600,
+  "batches": [
+    {
+      "batch_key": "batch_customers_0001",
+      "sequence_no": "1",
+      "status": "FAILED_PERMANENT",
+      "records_read": "100",
+      "records_written": "100",
+      "records_skipped": "0",
+      "records_failed": "0"
+    },
+    {
+      "batch_key": "batch_customers_0002",
+      "sequence_no": "2",
+      "status": "COMMITTED",
+      "records_read": "100",
+      "records_written": "100",
+      "records_skipped": "0",
+      "records_failed": "0"
+    },
+    {
+      "batch_key": "batch_orders_0001",
+      "sequence_no": "3",
+      "status": "COMMITTED",
+      "records_read": "100",
+      "records_written": "100",
+      "records_skipped": "0",
+      "records_failed": "0"
+    },
+    {
+      "batch_key": "batch_orders_0002",
+      "sequence_no": "4",
+      "status": "COMMITTED",
+      "records_read": "100",
+      "records_written": "100",
+      "records_skipped": "0",
+      "records_failed": "0"
+    },
+    {
+      "batch_key": "batch_customer_attachments_0001",
+      "sequence_no": "5",
+      "status": "COMMITTED",
+      "records_read": "100",
+      "records_written": "100",
+      "records_skipped": "0",
+      "records_failed": "0"
+    },
+    {
+      "batch_key": "batch_customer_attachments_0002",
+      "sequence_no": "6",
+      "status": "COMMITTED",
+      "records_read": "100",
+      "records_written": "100",
+      "records_skipped": "0",
+      "records_failed": "0"
+    }
+  ]
+}

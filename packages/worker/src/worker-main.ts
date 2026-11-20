@@ -96,7 +96,8 @@ let redisClient: Redis | null = null;
 dbPool = new pg.Pool({
   connectionString: DATABASE_URL,
   connectionTimeoutMillis: 10000,
-  max: 10,
+  max: 20,
+  ssl: { rejectUnauthorized: false },
 });
 
 const postgresAdapters = new PostgresStorageAdapters(dbPool);
@@ -111,10 +112,13 @@ const destinationConnector: DestinationConnector =
 // Source Connector (MongoDB if available, or synthetic fallback)
 let sourceConnector: SourceConnector;
 const MONGO_URL = process.env.MONGO_URL || process.env.MONGODB_URI;
+const MONGO_DB = process.env.MONGO_DB_NAME || 'migrationguard_e2e_source';
 
 if (MONGO_URL) {
-  sourceConnector = ConnectorFactory.createMongoSource(MONGO_URL);
+  console.log(`[Worker] Source target: MongoDB (${MONGO_DB})`);
+  sourceConnector = ConnectorFactory.createMongoSource(MONGO_URL, MONGO_DB);
 } else {
+  console.warn(`[Worker] Source target: Fallback Synthetic Generator (NO MONGO_URL)`);
   // Standalone source connector with in-memory sample records if MongoDB is not provided
   sourceConnector = {
     testConnection: async () => ({
@@ -166,13 +170,14 @@ async function startWorker() {
       redisClient = new Redis(REDIS_URL, {
         maxRetriesPerRequest: null,
         enableReadyCheck: false,
+        tls: IS_REDIS_TLS ? { rejectUnauthorized: false } : undefined,
       });
     } else {
       redisClient = new Redis({
         host: REDIS_HOST,
         port: REDIS_PORT,
         password: REDIS_PASSWORD,
-        tls: IS_REDIS_TLS ? {} : undefined,
+        tls: IS_REDIS_TLS ? { rejectUnauthorized: false } : undefined,
         maxRetriesPerRequest: null,
         enableReadyCheck: false,
       });
@@ -199,20 +204,58 @@ async function startWorker() {
           idTracker,
           transformFn: async (envelope: SourceRecordEnvelope): Promise<TransformedRecord> => {
             const raw = ((envelope.payload || {}) as Record<string, any>);
+            const destObj = job.data.destinationObject || envelope.sourceObject;
+            let data: Record<string, any>;
+
+            if (destObj === 'orders') {
+              const amount = raw.totalAmount || raw.order_total || raw.total_amount || 0;
+              data = {
+                id: envelope.sourceKey,
+                customer_id: raw.customerId || raw.customer_id,
+                order_number: raw.orderNumber || raw.order_number || `ORD-${envelope.sourceKey}`,
+                total_amount: amount,
+                order_total: amount,
+                status: raw.status || 'PENDING',
+                items: typeof raw.items === 'object' ? JSON.stringify(raw.items) : raw.items || '[]',
+                ordered_at: raw.orderedAt || raw.ordered_at || raw.createdAt || new Date().toISOString(),
+                created_at: raw.createdAt || raw.created_at || new Date().toISOString(),
+                run_id: job.data.migrationRunId,
+              };
+            } else if (destObj === 'customer_attachments' || destObj === 'attachments') {
+              data = {
+                id: envelope.sourceKey,
+                customer_id: raw.customerId || raw.customer_id || raw.recordId,
+                file_name: raw.fileName || raw.file_name || 'attachment.bin',
+                file_size: raw.byteSize || raw.file_size || 0,
+                content_type: raw.contentType || raw.content_type || 'application/octet-stream',
+                checksum_sha256: raw.checksum || raw.sha256Checksum || raw.checksum_sha256 || null,
+                storage_path: raw.storagePath || raw.storage_path || null,
+                created_at: raw.createdAt || raw.created_at || new Date().toISOString(),
+                run_id: job.data.migrationRunId,
+                byte_size: raw.byteSize || raw.file_size || 0,
+                sha256_checksum: raw.checksum || raw.sha256Checksum || raw.checksum_sha256 || null,
+              };
+            } else {
+              data = {
+                id: envelope.sourceKey,
+                name: typeof raw.name === 'string' ? raw.name.trim() : raw.name || 'Unnamed',
+                email: typeof raw.email === 'string' ? raw.email.trim().toLowerCase() : raw.email || null,
+                phone: raw.phone || null,
+                tier: raw.tier || 'STANDARD',
+                created_at: raw.createdAt || raw.created_at || new Date().toISOString(),
+                metadata: typeof raw.metadata === 'object' ? JSON.stringify(raw.metadata) : raw.metadata || '{}',
+                run_id: job.data.migrationRunId,
+                status: raw.status || 'ACTIVE',
+                updated_at: raw.updatedAt || raw.updated_at || new Date().toISOString(),
+              };
+            }
+
             return {
               sourceObject: envelope.sourceObject,
               sourceKey: envelope.sourceKey,
-              destinationObject: job.data.destinationObject || envelope.sourceObject,
+              destinationObject: destObj,
               destinationKey: envelope.sourceKey,
-              data: {
-                id: envelope.sourceKey,
-                name: typeof raw.name === 'string' ? raw.name.trim() : raw.name,
-                email: typeof raw.email === 'string' ? raw.email.trim().toLowerCase() : raw.email,
-                phone: raw.phone || null,
-                tier: raw.tier || 'STANDARD',
-                created_at: raw.created_at || new Date().toISOString(),
-                metadata: typeof raw.metadata === 'object' ? JSON.stringify(raw.metadata) : raw.metadata || '{}',
-              },
+              data,
               contentHash: `sha256:${Buffer.from(JSON.stringify(raw)).toString('base64').substring(0, 32)}`,
             };
           },
@@ -254,6 +297,8 @@ async function startWorker() {
       {
         connection: redisClient,
         concurrency: 2,
+        stalledInterval: 5000,
+        lockDuration: 10000,
       },
     );
 

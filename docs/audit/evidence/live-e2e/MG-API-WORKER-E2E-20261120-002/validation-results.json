@@ -1,0 +1,145 @@
+{
+  "runId": "c4816ce2-caef-4a4d-ac86-e922b1e8807d",
+  "runLabel": "MG-API-WORKER-E2E-20261120-002",
+  "timestamp": "2026-11-20T09:31:36.602Z",
+  "overallState": "PASS",
+  "totalChecks": 8,
+  "passedChecks": 8,
+  "failedChecks": 0,
+  "skippedChecks": 0,
+  "checkResults": [
+    {
+      "checkId": "CHECK-COUNT-001",
+      "checkName": "Record Count Reconciliation (customers -> customers)",
+      "category": "RECORD_COUNT_MISMATCH",
+      "state": "PASS",
+      "evaluatedCount": 200,
+      "passedCount": 200,
+      "failedCount": 0,
+      "skippedCount": 0,
+      "durationMs": 0,
+      "discrepancies": [],
+      "details": {
+        "sourceCount": 200,
+        "destinationCount": 200,
+        "entityName": "customers"
+      }
+    },
+    {
+      "checkId": "CHECK-MISSING-001",
+      "checkName": "Missing Record Detection (customers)",
+      "category": "MISSING_RECORD",
+      "state": "PASS",
+      "evaluatedCount": 200,
+      "passedCount": 200,
+      "failedCount": 0,
+      "skippedCount": 0,
+      "durationMs": 0,
+      "discrepancies": [],
+      "details": {
+        "totalEvaluated": 200,
+        "missingCount": 0
+      }
+    },
+    {
+      "checkId": "CHECK-EXTRA-001",
+      "checkName": "Unexpected / Extra Record Detection (customers)",
+      "category": "EXTRA_RECORD",
+      "state": "PASS",
+      "evaluatedCount": 200,
+      "passedCount": 200,
+      "failedCount": 0,
+      "skippedCount": 0,
+      "durationMs": 0,
+      "discrepancies": [],
+      "details": {
+        "totalEvaluated": 200,
+        "extraCount": 0
+      }
+    },
+    {
+      "checkId": "CHECK-DUP-001",
+      "checkName": "Duplicate Record Detection (customers)",
+      "category": "DUPLICATE_RECORD",
+      "state": "PASS",
+      "evaluatedCount": 200,
+      "passedCount": 200,
+      "failedCount": 0,
+      "skippedCount": 0,
+      "durationMs": 0,
+      "discrepancies": [],
+      "details": {
+        "totalEvaluated": 200,
+        "uniqueCount": 200,
+        "duplicateCount": 0
+      }
+    },
+    {
+      "checkId": "CHECK-ATTACHMENT-001",
+      "checkName": "Attachment Presence & Checksum Verification (attachments)",
+      "category": "MISSING_ATTACHMENT",
+      "state": "PASS",
+      "evaluatedCount": 200,
+      "passedCount": 200,
+      "failedCount": 0,
+      "skippedCount": 0,
+      "durationMs": 0,
+      "discrepancies": [],
+      "details": {
+        "totalExpected": 200,
+        "totalFound": 200,
+        "discrepanciesCount": 0
+      }
+    },
+    {
+      "checkId": "CHECK-REL-001",
+      "checkName": "Parent-Child Relationship Integrity (orders -> customers)",
+      "category": "BROKEN_REFERENCE",
+      "state": "PASS",
+      "evaluatedCount": 200,
+      "passedCount": 200,
+      "failedCount": 0,
+      "skippedCount": 0,
+      "durationMs": 0,
+      "discrepancies": [],
+      "details": {
+        "totalChildren": 200,
+        "totalParents": 200,
+        "brokenReferences": 0
+      }
+    },
+    {
+      "checkId": "CHECK-META-001",
+      "checkName": "Metadata Comparison (customers -> customers)",
+      "category": "METADATA_MISMATCH",
+      "state": "PASS",
+      "evaluatedCount": 200,
+      "passedCount": 200,
+      "failedCount": 0,
+      "skippedCount": 0,
+      "durationMs": 3,
+      "discrepancies": [],
+      "details": {
+        "totalEvaluated": 200,
+        "metadataMismatches": 0
+      }
+    },
+    {
+      "checkId": "CHECK-HASH-001",
+      "checkName": "Canonical Content Hash Verification (customers -> customers)",
+      "category": "CONTENT_HASH_MISMATCH",
+      "state": "PASS",
+      "evaluatedCount": 200,
+      "passedCount": 200,
+      "failedCount": 0,
+      "skippedCount": 0,
+      "durationMs": 8,
+      "discrepancies": [],
+      "details": {
+        "hashAlgorithm": "SHA-256",
+        "totalEvaluated": 200,
+        "mismatchCount": 0
+      }
+    }
+  ]
+}

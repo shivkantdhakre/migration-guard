@@ -21,6 +21,7 @@ export class PostgresDestinationConnector implements DestinationConnector {
         connectionString: poolOrConnectionString,
         connectionTimeoutMillis: 10000,
         max: 10,
+        ssl: { rejectUnauthorized: false },
       });
     } else {
       this.pool = poolOrConnectionString;
@@ -66,45 +67,51 @@ export class PostgresDestinationConnector implements DestinationConnector {
     const skippedKeys: string[] = [];
     const failedKeys: Array<{ key: string; error: string; code?: string }> = [];
 
-    for (const rec of records) {
-      const data = rec.data || {};
-      const cols = Object.keys(data);
-      if (cols.length === 0) continue;
+    const CHUNK_SIZE = 25;
+    for (let idx = 0; idx < records.length; idx += CHUNK_SIZE) {
+      const chunk = records.slice(idx, idx + CHUNK_SIZE);
+      await Promise.all(
+        chunk.map(async (rec) => {
+          const data = rec.data || {};
+          const cols = Object.keys(data);
+          if (cols.length === 0) return;
 
-      const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ');
-      const colNames = cols.map((c) => `"${c}"`).join(', ');
-      const values = cols.map((c) => data[c]);
+          const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ');
+          const colNames = cols.map((c) => `"${c}"`).join(', ');
+          const values = cols.map((c) => data[c]);
 
-      let sql = `INSERT INTO "${tableName}" (${colNames}) VALUES (${placeholders})`;
+          let sql = `INSERT INTO "${tableName}" (${colNames}) VALUES (${placeholders})`;
 
-      if (options.writeMode === 'upsert') {
-        const updateCols = options.updateColumns || cols.filter((c) => c !== 'id');
-        if (updateCols.length > 0) {
-          const updateAssignments = updateCols
-            .map((c) => `"${c}" = EXCLUDED."${c}"`)
-            .join(', ');
-          sql += ` ON CONFLICT ("id") DO UPDATE SET ${updateAssignments}`;
-        } else {
-          sql += ` ON CONFLICT ("id") DO NOTHING`;
-        }
-      } else if (options.writeMode === 'skip_existing') {
-        sql += ` ON CONFLICT ("id") DO NOTHING`;
-      }
+          if (options.writeMode === 'upsert') {
+            const updateCols = options.updateColumns || cols.filter((c) => c !== 'id');
+            if (updateCols.length > 0) {
+              const updateAssignments = updateCols
+                .map((c) => `"${c}" = EXCLUDED."${c}"`)
+                .join(', ');
+              sql += ` ON CONFLICT ("id") DO UPDATE SET ${updateAssignments}`;
+            } else {
+              sql += ` ON CONFLICT ("id") DO NOTHING`;
+            }
+          } else if (options.writeMode === 'skip_existing') {
+            sql += ` ON CONFLICT ("id") DO NOTHING`;
+          }
 
-      try {
-        const res = await this.pool.query(sql, values);
-        if (res.rowCount && res.rowCount > 0) {
-          writtenKeys.push(rec.destinationKey);
-        } else {
-          skippedKeys.push(rec.destinationKey);
-        }
-      } catch (err: any) {
-        failedKeys.push({
-          key: rec.destinationKey,
-          error: err.message,
-          code: err.code,
-        });
-      }
+          try {
+            const res = await this.pool.query(sql, values);
+            if (res.rowCount && res.rowCount > 0) {
+              writtenKeys.push(rec.destinationKey);
+            } else {
+              skippedKeys.push(rec.destinationKey);
+            }
+          } catch (err: any) {
+            failedKeys.push({
+              key: rec.destinationKey,
+              error: err.message,
+              code: err.code,
+            });
+          }
+        }),
+      );
     }
 
     return {
@@ -178,11 +185,11 @@ export class MongoSourceConnector implements SourceConnector {
     }
 
     const limit = options.batchSize || 1000;
-    const docs = await coll
-      .find(filter)
-      .sort({ _id: 1 })
-      .limit(limit + 1)
-      .toArray();
+    let findQuery = coll.find(filter).sort({ _id: 1 });
+    if (cursor?.offset !== undefined && cursor.offset > 0 && !cursor.lastId) {
+      findQuery = findQuery.skip(cursor.offset);
+    }
+    const docs = await findQuery.limit(limit + 1).toArray();
 
     const hasMore = docs.length > limit;
     const batchDocs = hasMore ? docs.slice(0, limit) : docs;

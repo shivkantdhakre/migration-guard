@@ -29,10 +29,21 @@ export class TransformInterceptor<T> implements NestInterceptor<T, ApiResponse<T
       return next.handle();
     }
 
+    const isAuthRoute = req?.url && (req.url.includes('/auth/login') || req.url.includes('/auth/register'));
+
     return next.handle().pipe(
       map((data) => {
-        // Redact any accidental secret fields in data before responding
-        const sanitizedData = CryptoUtil.redactSecrets(data);
+        // Redact any accidental secret fields in data before responding (preserving accessToken on auth routes)
+        let sanitizedData: any;
+        if (isAuthRoute && data && typeof data === 'object') {
+          const originalToken = (data as any).accessToken;
+          sanitizedData = CryptoUtil.redactSecrets(data);
+          if (originalToken) {
+            sanitizedData.accessToken = originalToken;
+          }
+        } else {
+          sanitizedData = CryptoUtil.redactSecrets(data);
+        }
 
         return {
           data: sanitizedData,

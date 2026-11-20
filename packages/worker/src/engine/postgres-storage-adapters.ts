@@ -163,16 +163,20 @@ export class PostgresStorageAdapters
   async saveCheckpoint(checkpoint: MigrationCheckpoint): Promise<void> {
     await this.pool.query(
       `UPDATE migration_runs 
-       SET source_boundary_json = $1, 
-           updated_at = NOW() 
-       WHERE id = $2`,
-      [JSON.stringify(checkpoint), checkpoint.migrationRunId],
+       SET source_boundary_json = jsonb_set(
+         COALESCE(source_boundary_json, '{}'::jsonb),
+         ARRAY[$1],
+         $2::jsonb
+       ), 
+       updated_at = NOW() 
+       WHERE id = $3`,
+      [checkpoint.sourceObject, JSON.stringify(checkpoint), checkpoint.migrationRunId],
     );
   }
 
   async getCheckpoint(
     migrationRunId: string,
-    _sourceObject: string,
+    sourceObject: string,
   ): Promise<MigrationCheckpoint | null> {
     const res = await this.pool.query(
       `SELECT source_boundary_json FROM migration_runs WHERE id = $1`,
@@ -180,13 +184,20 @@ export class PostgresStorageAdapters
     );
     if (res.rows.length === 0 || !res.rows[0].source_boundary_json) return null;
     const boundary = res.rows[0].source_boundary_json;
-    return typeof boundary === 'string' ? JSON.parse(boundary) : boundary;
+    const parsed = typeof boundary === 'string' ? JSON.parse(boundary) : boundary;
+    if (parsed && typeof parsed === 'object') {
+      if (parsed[sourceObject]) return parsed[sourceObject];
+      if (parsed.sourceObject === sourceObject) return parsed;
+    }
+    return null;
   }
 
-  async deleteCheckpoint(migrationRunId: string, _sourceObject: string): Promise<void> {
+  async deleteCheckpoint(migrationRunId: string, sourceObject: string): Promise<void> {
     await this.pool.query(
-      `UPDATE migration_runs SET source_boundary_json = '{}'::jsonb WHERE id = $1`,
-      [migrationRunId],
+      `UPDATE migration_runs 
+       SET source_boundary_json = COALESCE(source_boundary_json, '{}'::jsonb) - $1
+       WHERE id = $2`,
+      [sourceObject, migrationRunId],
     );
   }
 

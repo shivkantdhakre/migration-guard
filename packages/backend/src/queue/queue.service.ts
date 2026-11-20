@@ -63,13 +63,14 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
           maxRetriesPerRequest: null,
           enableReadyCheck: false,
           connectTimeout: 5000,
+          tls: isTls ? { rejectUnauthorized: false } : undefined,
         });
       } else {
         this.redisClient = new Redis({
           host: appConfig.redis.host,
           port: appConfig.redis.port,
           password: appConfig.redis.password || undefined,
-          tls: isTls ? {} : undefined,
+          tls: isTls ? { rejectUnauthorized: false } : undefined,
           maxRetriesPerRequest: null,
           enableReadyCheck: false,
           connectTimeout: 5000,
@@ -120,11 +121,15 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
     }
 
     try {
+      const priority =
+        payload.sourceObject === 'customers' ? 1 : payload.sourceObject === 'orders' ? 2 : 3;
+
       const job = await this.queue.add(
         'process-batch',
         payload,
         {
           jobId: deterministicJobId,
+          priority,
           attempts: 3,
           backoff: {
             type: 'exponential',

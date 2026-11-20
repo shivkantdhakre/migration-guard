@@ -127,9 +127,11 @@ export class QueueHandler {
 
     // Validate writeMode
     const validModes = ['insert_only', 'upsert', 'skip_existing'];
-    if (!validModes.includes(p.writeMode as string)) {
+    const mode = typeof p.writeMode === 'string' ? p.writeMode.toLowerCase() : '';
+    if (!validModes.includes(mode)) {
       throw new Error(`Invalid writeMode in payload: ${p.writeMode}`);
     }
+    p.writeMode = mode as any;
   }
 
   /**
@@ -151,6 +153,21 @@ export class QueueHandler {
         destinationObject: payload.destinationObject,
         sourceCursorStart: payload.cursorStart,
       });
+    }
+
+    // Check if batch was already committed (idempotent resume after crash)
+    if (batch.status === 'COMMITTED') {
+      return {
+        migrationRunId: payload.migrationRunId,
+        batchKey: payload.batchKey,
+        sequenceNo: payload.sequenceNo,
+        status: 'COMMITTED',
+        recordsRead: batch.recordsRead,
+        recordsWritten: batch.recordsWritten,
+        recordsSkipped: batch.recordsSkipped,
+        recordsFailed: batch.recordsFailed,
+        hasMore: false,
+      };
     }
 
     // 3. Transition to RUNNING

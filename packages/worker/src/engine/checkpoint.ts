@@ -76,9 +76,13 @@ export class CheckpointManager {
   }): Promise<MigrationCheckpoint> {
     const current = await this.getCheckpoint(params.migrationRunId, params.sourceObject);
 
-    if (current && params.batch.sequenceNo < current.lastCommittedSequenceNo) {
+    if (
+      current &&
+      current.sourceObject === params.sourceObject &&
+      params.batch.sequenceNo < current.lastCommittedSequenceNo
+    ) {
       throw new Error(
-        `Cannot regress checkpoint sequence: current is ${current.lastCommittedSequenceNo}, attempted ${params.batch.sequenceNo}`,
+        `Cannot regress checkpoint sequence for ${params.sourceObject}: current is ${current.lastCommittedSequenceNo}, attempted ${params.batch.sequenceNo}`,
       );
     }
 

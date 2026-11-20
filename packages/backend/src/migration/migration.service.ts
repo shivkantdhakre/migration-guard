@@ -71,38 +71,62 @@ export class MigrationService {
     // Seed initial batches for worker processing
     const batchSize = version.execution_config_json?.batchSize || 1000;
     const scope = version.scope_json || {};
-    const sourceObject = scope.sourceObject || scope.tables?.[0]?.source || 'customers';
-    const destinationObject = scope.destinationObject || scope.tables?.[0]?.destination || 'customers';
-    const writeMode = version.execution_config_json?.writeMode || 'upsert';
+    const rawTables = scope.tables || scope.collections || [];
+    const tables: Array<{ source: string; destination: string }> =
+      Array.isArray(rawTables) && rawTables.length > 0
+        ? rawTables.map((t: any) =>
+            typeof t === 'string'
+              ? { source: t, destination: t }
+              : { source: t.source || t.name, destination: t.destination || t.source || t.name },
+          )
+        : [
+            {
+              source: scope.sourceObject || 'customers',
+              destination: scope.destinationObject || 'customers',
+            },
+          ];
+    const rawMode = String(version.execution_config_json?.writeMode || 'upsert').toLowerCase();
+    const writeMode: 'insert_only' | 'upsert' | 'skip_existing' =
+      rawMode === 'insert_only' || rawMode === 'skip_existing' ? (rawMode as any) : 'upsert';
 
     const payloads: MigrationJobPayload[] = [];
-    const totalBatches = 10;
+    let overallSeq = 0;
 
-    for (let i = 1; i <= totalBatches; i++) {
-      const batchKey = `batch_${String(i).padStart(4, '0')}`;
-      await this.db.query(
-        `INSERT INTO migration_batches (
-           migration_run_id, batch_key, sequence_no, status,
-           records_read, records_written, records_skipped, records_failed
-         )
-         VALUES ($1, $2, $3, 'QUEUED', 0, 0, 0, 0)`,
-        [run.id, batchKey, i],
-      );
+    for (const table of tables) {
+      const sourceObject = table.source;
+      const destinationObject = table.destination;
+      const batchesPerTable = version.execution_config_json?.batchesPerTable || (tables.length > 1 ? 5 : 10);
 
-      payloads.push({
-        jobId: `${run.id}_${batchKey}`,
-        migrationRunId: run.id,
-        batchKey,
-        sequenceNo: i,
-        sourceObject,
-        destinationObject,
-        cursorStart: i === 1 ? null : { offset: (i - 1) * batchSize },
-        cursorEnd: { offset: i * batchSize },
-        batchSize,
-        planVersionId,
-        mappingVersionId: version.mapping_version_id || 'default-mapping',
-        writeMode,
-      });
+      for (let i = 1; i <= batchesPerTable; i++) {
+        overallSeq++;
+        const batchKey =
+          tables.length > 1
+            ? `batch_${sourceObject}_${String(i).padStart(4, '0')}`
+            : `batch_${String(i).padStart(4, '0')}`;
+        await this.db.query(
+          `INSERT INTO migration_batches (
+             migration_run_id, batch_key, sequence_no, status,
+             records_read, records_written, records_skipped, records_failed
+           )
+           VALUES ($1, $2, $3, 'QUEUED', 0, 0, 0, 0)`,
+          [run.id, batchKey, overallSeq],
+        );
+
+        payloads.push({
+          jobId: `${run.id}_${batchKey}`,
+          migrationRunId: run.id,
+          batchKey,
+          sequenceNo: overallSeq,
+          sourceObject,
+          destinationObject,
+          cursorStart: i === 1 ? null : { offset: (i - 1) * batchSize },
+          cursorEnd: { offset: i * batchSize },
+          batchSize,
+          planVersionId,
+          mappingVersionId: version.mapping_version_id || 'default-mapping',
+          writeMode,
+        });
+      }
     }
 
     // Real BullMQ job dispatch (Phase 2 Remediation)

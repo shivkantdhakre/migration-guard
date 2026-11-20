@@ -230,6 +230,10 @@ export class BatchManifestTracker {
   }
 
   private validateTransition(from: BatchStatus, to: BatchStatus): void {
+    if (from === to) {
+      return;
+    }
+
     const allowedTransitions: Record<BatchStatus, BatchStatus[]> = {
       PENDING: ['QUEUED', 'RUNNING', 'FAILED_PERMANENT'],
       QUEUED: ['RUNNING', 'FAILED_PERMANENT'],

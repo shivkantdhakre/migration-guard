@@ -27,6 +27,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         connectionString: appConfig.databaseUrl,
         connectionTimeoutMillis: 10000,
         max: 10,
+        ssl: { rejectUnauthorized: false },
       });
 
       const client = await this.pool.connect();

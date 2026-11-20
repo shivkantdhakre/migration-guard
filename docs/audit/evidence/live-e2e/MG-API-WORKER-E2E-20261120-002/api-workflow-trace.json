@@ -1,0 +1,175 @@
+[
+  {
+    "step": "Operator Registration",
+    "method": "POST",
+    "endpoint": "/api/v1/auth/register",
+    "status": 201,
+    "request": {
+      "email": "e2e_lead_1795166998439@migrationguard.io",
+      "name": "E2E Verification Lead"
+    },
+    "response": {
+      "userId": "7342e337-4250-4e3a-8f83-9dcddcc670f8",
+      "workspaceId": "37397af3-8929-4265-9a16-e68e70e7c6d9"
+    }
+  },
+  {
+    "step": "Create Project",
+    "method": "POST",
+    "endpoint": "/api/v1/workspaces/37397af3-8929-4265-9a16-e68e70e7c6d9/projects",
+    "status": 201,
+    "response": {
+      "id": "daed39a7-7c8e-470a-87f4-76240bcf7b56",
+      "workspace_id": "37397af3-8929-4265-9a16-e68e70e7c6d9",
+      "name": "API Worker Verification Project",
+      "description": "End-to-end verification of independent worker daemon and authenticated API",
+      "status": "ACTIVE",
+      "created_by": "7342e337-4250-4e3a-8f83-9dcddcc670f8",
+      "created_at": {},
+      "updated_at": {}
+    }
+  },
+  {
+    "step": "Register Source Connection",
+    "method": "POST",
+    "endpoint": "/api/v1/workspaces/37397af3-8929-4265-9a16-e68e70e7c6d9/connections",
+    "status": 201,
+    "response": {
+      "id": "e19d570c-d4ab-4e1d-9f74-54903cbdcc20",
+      "workspace_id": "37397af3-8929-4265-9a16-e68e70e7c6d9",
+      "name": "Live MongoDB Atlas Source",
+      "engine": "MONGODB",
+      "connection_role": "SOURCE",
+      "config_json": {
+        "cluster": "migrationguard.jnsclwx.mongodb.net",
+        "database": "migrationguard_e2e_source"
+      },
+      "secret_ref": "[REDACTED]",
+      "credential_version": 1,
+      "status": "UNTESTED",
+      "created_by": "7342e337-4250-4e3a-8f83-9dcddcc670f8",
+      "created_at": {},
+      "updated_at": {}
+    }
+  },
+  {
+    "step": "Register Destination Connection",
+    "method": "POST",
+    "endpoint": "/api/v1/workspaces/37397af3-8929-4265-9a16-e68e70e7c6d9/connections",
+    "status": 201,
+    "response": {
+      "id": "662316e4-26e5-4adf-a161-7cef9402ead5",
+      "workspace_id": "37397af3-8929-4265-9a16-e68e70e7c6d9",
+      "name": "Neon PostgreSQL Destination",
+      "engine": "POSTGRESQL",
+      "connection_role": "DESTINATION",
+      "config_json": {
+        "schema": "public",
+        "database": "neondb"
+      },
+      "secret_ref": "[REDACTED]",
+      "credential_version": 1,
+      "status": "UNTESTED",
+      "created_by": "7342e337-4250-4e3a-8f83-9dcddcc670f8",
+      "created_at": {},
+      "updated_at": {}
+    }
+  },
+  {
+    "step": "Create Plan",
+    "method": "POST",
+    "endpoint": "/api/v1/projects/daed39a7-7c8e-470a-87f4-76240bcf7b56/plans",
+    "status": 201,
+    "response": {
+      "id": "fa5761c9-c255-4d27-910a-75866779b9e3",
+      "workspace_id": "37397af3-8929-4265-9a16-e68e70e7c6d9",
+      "project_id": "daed39a7-7c8e-470a-87f4-76240bcf7b56",
+      "name": "MongoDB to PostgreSQL Cloud Plan - Run 002",
+      "status": "DRAFT",
+      "current_version": 1,
+      "created_by": "7342e337-4250-4e3a-8f83-9dcddcc670f8",
+      "created_at": {},
+      "updated_at": {}
+    }
+  },
+  {
+    "step": "Create Plan Version",
+    "method": "POST",
+    "endpoint": "/api/v1/plans/fa5761c9-c255-4d27-910a-75866779b9e3/versions",
+    "status": 201,
+    "response": {
+      "id": "42a3288d-acfb-4218-af5e-1ba3006a10e3",
+      "plan_id": "fa5761c9-c255-4d27-910a-75866779b9e3",
+      "version": 1,
+      "source_connection_id": "e19d570c-d4ab-4e1d-9f74-54903cbdcc20",
+      "source_schema_snapshot_id": null,
+      "destination_connection_id": "662316e4-26e5-4adf-a161-7cef9402ead5",
+      "destination_schema_snapshot_id": null,
+      "mapping_version_id": null,
+      "scope_json": {
+        "tables": [
+          {
+            "source": "customers",
+            "destination": "customers"
+          },
+          {
+            "source": "orders",
+            "destination": "orders"
+          },
+          {
+            "source": "customer_attachments",
+            "destination": "customer_attachments"
+          }
+        ]
+      },
+      "execution_config_json": {
+        "batchSize": 100,
+        "writeMode": "UPSERT",
+        "concurrency": 2,
+        "batchesPerTable": 2
+      },
+      "validation_profile_json": {
+        "countCheck": true,
+        "metadataCheck": true,
+        "duplicateCheck": true,
+        "attachmentCheck": true,
+        "contentHashCheck": true,
+        "extraRecordCheck": true,
+        "relationshipCheck": true,
+        "missingRecordCheck": true
+      },
+      "plan_hash": "sha256:e7ba5be8e6ea77ec2cad5f24f3d2962a2c05840ad378ee794f0e89d1d35b2c91",
+      "created_by": "7342e337-4250-4e3a-8f83-9dcddcc670f8",
+      "created_at": {}
+    }
+  },
+  {
+    "step": "Approve Plan Version",
+    "method": "POST",
+    "endpoint": "/api/v1/plan-versions/42a3288d-acfb-4218-af5e-1ba3006a10e3/approvals",
+    "status": 200,
+    "response": {
+      "id": "2673b977-60cf-4bd9-b710-3f6349f23b4d",
+      "workspace_id": "37397af3-8929-4265-9a16-e68e70e7c6d9",
+      "resource_type": "PLAN_VERSION",
+      "resource_id": "42a3288d-acfb-4218-af5e-1ba3006a10e3",
+      "resource_hash": "sha256:e7ba5be8e6ea77ec2cad5f24f3d2962a2c05840ad378ee794f0e89d1d35b2c91",
+      "approval_status": "APPROVE",
+      "approver_user_id": "7342e337-4250-4e3a-8f83-9dcddcc670f8",
+      "comment": "Approved for automated Live E2E Verification Run 002",
+      "approved_at": {}
+    }
+  },
+  {
+    "step": "Start Migration Run",
+    "method": "POST",
+    "endpoint": "/api/v1/migration-runs",
+    "status": 202,
+    "response": {
+      "runId": "c4816ce2-caef-4a4d-ac86-e922b1e8807d",
+      "status": "QUEUED",
+      "planHash": "sha256:e7ba5be8e6ea77ec2cad5f24f3d2962a2c05840ad378ee794f0e89d1d35b2c91",
+      "createdAt": {}
+    }
+  }
+]

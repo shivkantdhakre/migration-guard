@@ -1,6 +1,6 @@
 'use client';
 
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
 import {
   Sparkles,
@@ -11,8 +11,10 @@ import {
   FolderGit2,
   Bell,
   Terminal,
+  AlertCircle,
 } from 'lucide-react';
 import { SystemHealthBadge } from './SystemHealthBadge';
+import { isDemoModeEnabled } from '../../lib/api-client';
 
 export interface TopNavbarProps {
   onOpenCopilot: () => void;
@@ -20,6 +22,12 @@ export interface TopNavbarProps {
 }
 
 export function TopNavbar({ onOpenCopilot, copilotOpen }: TopNavbarProps) {
+  const [demoActive, setDemoActive] = useState(false);
+
+  useEffect(() => {
+    setDemoActive(isDemoModeEnabled());
+  }, []);
+
   return (
     <header className="h-16 border-b border-infra-border bg-infra-surface/80 backdrop-blur-md px-6 flex items-center justify-between z-20 shrink-0">
       {/* Left: Project & Breadcrumbs */}
@@ -32,6 +40,12 @@ export function TopNavbar({ onOpenCopilot, copilotOpen }: TopNavbarProps) {
           <span className="px-1.5 py-0.5 rounded text-[10px] bg-slate-800 text-slate-300 border border-slate-700">
             git:main#7c1cda
           </span>
+          {demoActive && (
+            <span className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono bg-amber-500/10 text-amber-400 border border-amber-500/30 font-semibold">
+              <AlertCircle size={10} />
+              <span>DEMO MODE</span>
+            </span>
+          )}
         </div>
       </div>
 

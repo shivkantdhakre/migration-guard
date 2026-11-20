@@ -120,7 +120,7 @@ pnpm --recursive run test
 - Destination count verified at exactly 100 records with **0 duplicates** and **0 skipped records**.
 
 ### 4.4 Validation Proof (Criterion 4)
-- **Clean Run:** 0 discrepancies across all 9 checks.
+- **Live Cloud Run (`MG-E2E-20261120-001`):** 0 discrepancies across all 8 evaluated checks on live cloud data (8 executed, 8 passed, 0 failed, 0 skipped; 9th check, FieldValidator, omitted due to no configured fieldRules).
 - **Fault-Injection Benchmark:** 45 seeded defects across 10,000 records:
   - 15 Missing Attachments: 15 detected (100%)
   - 10 Duplicate Records: 10 detected (100%)
@@ -138,7 +138,7 @@ pnpm --recursive run test
 - Next.js 14 App Router layout converted to Server Component ([layout.tsx](file:///d:/Projects/migration-guard/packages/frontend/app/layout.tsx)) with dedicated client interactive shell ([LayoutClientShell.tsx](file:///d:/Projects/migration-guard/packages/frontend/components/layout/LayoutClientShell.tsx)).
 - Fixed deprecated `viewport` metadata warnings.
 - Server-side rendering streams Tailwind CSS dark theme cleanly.
-- `ensureAuthToken()` automatically provisions default operator session.
+- `ensureAuthToken()` strictly disabled in production mode; requires authenticated operator login (mock fallback permitted only in deliberate development/demo mode).
 - All routes (`/`, `/migrations`, `/validation`, `/connections`, `/schema`) compile cleanly and return HTTP `200 OK`.
 
 ### 4.7 Requirements Reconciliation (Criterion 7)

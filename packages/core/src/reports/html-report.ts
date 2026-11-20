@@ -356,7 +356,7 @@ export function generateHtmlReport(
             </tr>
           </thead>
           <tbody>
-            ${discrepancyRows.length > 0 ? discrepancyRows : '<tr><td colspan="9" style="text-align:center; padding: 24px; color: #16a34a; font-weight: 600;">No discrepancies detected! Full data fidelity confirmed.</td></tr>'}
+            ${discrepancyRows.length > 0 ? discrepancyRows : '<tr><td colspan="9" style="text-align:center; padding: 24px; color: #16a34a; font-weight: 600;">No discrepancies detected! All configured validation checks passed for the tested migration scope.</td></tr>'}
           </tbody>
         </table>
       </div>

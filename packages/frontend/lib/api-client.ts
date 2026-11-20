@@ -45,6 +45,26 @@ export function clearAuthToken(): void {
   }
 }
 
+export function isDemoModeEnabled(): boolean {
+  if (typeof window !== 'undefined') {
+    const override = localStorage.getItem('mg_demo_mode');
+    if (override === 'true') return true;
+    if (override === 'false') return false;
+  }
+  // In production, demo mode is strictly disabled by default unless explicitly set via NEXT_PUBLIC_DEMO_MODE=true
+  if (process.env.NODE_ENV === 'production') {
+    return process.env.NEXT_PUBLIC_DEMO_MODE === 'true';
+  }
+  // In development, demo mode is enabled unless explicitly disabled
+  return process.env.NEXT_PUBLIC_DEMO_MODE !== 'false';
+}
+
+export function setDemoMode(enabled: boolean): void {
+  if (typeof window !== 'undefined') {
+    localStorage.setItem('mg_demo_mode', enabled ? 'true' : 'false');
+  }
+}
+
 let authPromise: Promise<string | null> | null = null;
 
 export async function ensureAuthToken(): Promise<string | null> {
@@ -161,9 +181,9 @@ async function request<T>(url: string, options: RequestInit = {}, fallbackData?:
       const errText = await res.text();
       const errMsg = parseErrorMessage(errText, res.status, url);
 
-      // If fallback baseline data is available, warn in console and return fallback without throwing
-      if (fallbackData !== undefined) {
-        console.warn(`[MigrationGuard API] Non-OK status ${res.status} for ${url}, using baseline data:`, errMsg);
+      // In production, fallback to mock data is strictly forbidden unless explicitly in demo mode.
+      if (fallbackData !== undefined && isDemoModeEnabled()) {
+        console.warn(`[MigrationGuard Demo Mode] Non-OK status ${res.status} for ${url}, using baseline data:`, errMsg);
         return fallbackData;
       }
 
@@ -173,9 +193,9 @@ async function request<T>(url: string, options: RequestInit = {}, fallbackData?:
     const json = await res.json();
     return json.data !== undefined ? json.data : json;
   } catch (err: any) {
-    // If fallback baseline data is available, warn in console and return fallback without throwing
-    if (fallbackData !== undefined) {
-      console.warn(`[MigrationGuard API] Network notice for ${url}, using baseline data:`, err?.message || err);
+    // In production, fallback to mock data is strictly forbidden unless explicitly in demo mode.
+    if (fallbackData !== undefined && isDemoModeEnabled()) {
+      console.warn(`[MigrationGuard Demo Mode] Network notice for ${url}, using baseline data:`, err?.message || err);
       return fallbackData;
     }
     const message = typeof err?.message === 'string'

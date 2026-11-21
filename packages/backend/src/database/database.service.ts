@@ -30,9 +30,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       normalized === 'localhost' ||
       normalized === '127.0.0.1' ||
       normalized === '::1' ||
-      normalized === '0.0.0.0' ||
-      normalized.startsWith('127.') ||
-      normalized === '::'
+      normalized.startsWith('127.')
     );
   }
 

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
 import { QueueService, MigrationJobPayload } from '../src/queue/queue.service';
-import { resolveSafeTestRedisEndpoint } from './redis-test-utils';
+import { resolveSafeTestRedisEndpoint, snapshotEnv } from './redis-test-utils';
+import { DatabaseService } from '../src/database/database.service';
 
 describe('QueueService (BullMQ Producer)', () => {
   let queueService: QueueService;
@@ -213,11 +214,7 @@ describe('QueueService (BullMQ Producer)', () => {
   });
 
   it('rejects remote generic REDIS_URL even when ALLOW_REMOTE_TEST_REDIS is true', () => {
-    const prevUrl = process.env.REDIS_URL;
-    const prevRemote = process.env.ALLOW_REMOTE_TEST_REDIS;
-    const prevTestUrl = process.env.MIGRATIONGUARD_TEST_REDIS_URL;
-    const prevTestUrlAlt = process.env.TEST_REDIS_URL;
-    const prevNodeEnv = process.env.NODE_ENV;
+    const restoreEnv = snapshotEnv();
     try {
       process.env.NODE_ENV = 'test';
       delete process.env.MIGRATIONGUARD_TEST_REDIS_URL;
@@ -229,23 +226,97 @@ describe('QueueService (BullMQ Producer)', () => {
         resolveSafeTestRedisEndpoint();
       }).toThrow(/Generic application Redis endpoint .* cannot be used for remote testing/);
     } finally {
-      process.env.NODE_ENV = prevNodeEnv;
-      process.env.REDIS_URL = prevUrl;
-      process.env.ALLOW_REMOTE_TEST_REDIS = prevRemote;
-      if (prevTestUrl) process.env.MIGRATIONGUARD_TEST_REDIS_URL = prevTestUrl;
-      if (prevTestUrlAlt) process.env.TEST_REDIS_URL = prevTestUrlAlt;
+      restoreEnv();
     }
   });
 
   it('strictly forbids testing against production environments regardless of configuration', () => {
-    const prevNodeEnv = process.env.NODE_ENV;
+    const restoreEnv = snapshotEnv();
     try {
       process.env.NODE_ENV = 'production';
       expect(() => {
         resolveSafeTestRedisEndpoint();
       }).toThrow(/Redis tests must never run in production environment/);
     } finally {
-      process.env.NODE_ENV = prevNodeEnv;
+      restoreEnv();
     }
+  });
+
+  it('rejects designated test Redis URL matching production naming patterns even if approved and allowlisted', () => {
+    const restoreEnv = snapshotEnv();
+    try {
+      process.env.NODE_ENV = 'test';
+      process.env.MIGRATIONGUARD_TEST_REDIS_URL = 'rediss://redis-prod-01.internal.net:6379';
+      process.env.ALLOW_REMOTE_TEST_REDIS = 'true';
+      process.env.MIGRATIONGUARD_ALLOWED_TEST_REDIS_HOSTS = 'redis-prod-01.internal.net';
+
+      expect(() => {
+        resolveSafeTestRedisEndpoint();
+      }).toThrow(/matches production naming patterns/);
+    } finally {
+      restoreEnv();
+    }
+  });
+
+  it('rejects designated remote Redis host not present in MIGRATIONGUARD_ALLOWED_TEST_REDIS_HOSTS', () => {
+    const restoreEnv = snapshotEnv();
+    try {
+      process.env.NODE_ENV = 'test';
+      process.env.MIGRATIONGUARD_TEST_REDIS_URL = 'redis://staging-cache.example.net:6379';
+      process.env.ALLOW_REMOTE_TEST_REDIS = 'true';
+      process.env.MIGRATIONGUARD_ALLOWED_TEST_REDIS_HOSTS = 'other-staging.example.net';
+
+      expect(() => {
+        resolveSafeTestRedisEndpoint();
+      }).toThrow(/not present in MIGRATIONGUARD_ALLOWED_TEST_REDIS_HOSTS allowlist/);
+    } finally {
+      restoreEnv();
+    }
+  });
+
+  it('accepts designated remote Redis host when present in MIGRATIONGUARD_ALLOWED_TEST_REDIS_HOSTS and approved', () => {
+    const restoreEnv = snapshotEnv();
+    try {
+      process.env.NODE_ENV = 'test';
+      process.env.MIGRATIONGUARD_TEST_REDIS_URL = 'redis://staging-cache.example.net:6379';
+      process.env.ALLOW_REMOTE_TEST_REDIS = 'true';
+      process.env.MIGRATIONGUARD_ALLOWED_TEST_REDIS_HOSTS = 'staging-cache.example.net, test-cache.example.net';
+
+      const target = resolveSafeTestRedisEndpoint();
+      expect(target.host).toBe('staging-cache.example.net');
+      expect(target.isLoopback).toBe(false);
+      expect(target.isDesignatedTestUrl).toBe(true);
+    } finally {
+      restoreEnv();
+    }
+  });
+
+  it('strictly rejects malformed or unsupported protocol Redis URLs', () => {
+    const restoreEnv = snapshotEnv();
+    try {
+      process.env.NODE_ENV = 'test';
+      process.env.MIGRATIONGUARD_TEST_REDIS_URL = 'invalid-url';
+      expect(() => {
+        resolveSafeTestRedisEndpoint();
+      }).toThrow(/Invalid designated test Redis URL format/);
+
+      process.env.MIGRATIONGUARD_TEST_REDIS_URL = 'http://localhost:6379';
+      expect(() => {
+        resolveSafeTestRedisEndpoint();
+      }).toThrow(/Unsupported Redis protocol/);
+    } finally {
+      restoreEnv();
+    }
+  });
+
+  it('confirms DatabaseService.isLoopbackHost rejects 0.0.0.0 and :: as wildcard addresses', () => {
+    expect(DatabaseService.isLoopbackHost('0.0.0.0')).toBe(false);
+    expect(DatabaseService.isLoopbackHost('::')).toBe(false);
+    expect(DatabaseService.isLoopbackHost('[::]')).toBe(false);
+    expect(DatabaseService.isLoopbackHost('localhost')).toBe(true);
+    expect(DatabaseService.isLoopbackHost('127.0.0.1')).toBe(true);
+    expect(DatabaseService.isLoopbackHost('127.0.0.2')).toBe(true);
+    expect(DatabaseService.isLoopbackHost('::1')).toBe(true);
+    expect(DatabaseService.isLoopbackHost('[::1]')).toBe(true);
   });
 });

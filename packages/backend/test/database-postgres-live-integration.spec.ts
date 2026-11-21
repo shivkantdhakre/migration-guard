@@ -44,15 +44,46 @@ describe('Backend PostgreSQL Live Persistence Integration (Run 005.2 & Run 005.5
       return;
     }
 
-    // If target is remote, require explicit ALLOW_REMOTE_TEST_DB=true override
-    if (!isTargetLocal && process.env.ALLOW_REMOTE_TEST_DB !== 'true') {
-      const msg =
-        '[Safety Guard] Refusing to run live persistence test against remote database without explicit ALLOW_REMOTE_TEST_DB=true.';
-      if (isCi) {
-        throw new Error(`[CI Mandatory Failure] ${msg}`);
+    // If target is remote, enforce production rejection, explicit approval, and host allowlist
+    if (!isTargetLocal) {
+      let host = '';
+      try {
+        const parsed = new URL(targetDbUrl);
+        host = parsed.hostname;
+      } catch {
+        host = targetDbUrl;
       }
-      console.warn(msg);
-      return;
+
+      if (/prod/i.test(host) || /prod/i.test(targetDbUrl)) {
+        const msg = `[Safety Guard] Designated test database URL (${host}) matches production naming patterns (/prod/i). Testing against production endpoints is strictly forbidden.`;
+        if (isCi) throw new Error(`[CI Mandatory Failure] ${msg}`);
+        console.warn(msg);
+        return;
+      }
+
+      if (process.env.ALLOW_REMOTE_TEST_DB !== 'true') {
+        const msg =
+          '[Safety Guard] Refusing to run live persistence test against remote database without explicit ALLOW_REMOTE_TEST_DB=true.';
+        if (isCi) {
+          throw new Error(`[CI Mandatory Failure] ${msg}`);
+        }
+        console.warn(msg);
+        return;
+      }
+
+      const allowedDbHosts = (process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_HOSTS || '')
+        .split(',')
+        .map((h) => h.trim().toLowerCase())
+        .filter(Boolean);
+
+      if (!allowedDbHosts.includes(host.toLowerCase())) {
+        const msg = `[Safety Guard] Remote database host '${host}' is not present in MIGRATIONGUARD_ALLOWED_TEST_DATABASE_HOSTS allowlist. Refusing execution.`;
+        if (isCi) {
+          throw new Error(`[CI Mandatory Failure] ${msg}`);
+        }
+        console.warn(msg);
+        return;
+      }
     }
 
     // Explicitly enforce that in-memory fallback is disabled for this test suite

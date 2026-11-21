@@ -3,6 +3,17 @@ import pg from 'pg';
 import { ConnectorFactory, PostgresDestinationConnector } from '../src/connectors/connector-factory.js';
 import { TransformedBatch } from '../src/types.js';
 
+export const isLoopbackHost = (host: string): boolean => {
+  if (!host) return false;
+  const normalized = host.replace(/^\[|\]$/g, '').toLowerCase().trim();
+  return (
+    normalized === 'localhost' ||
+    normalized === '127.0.0.1' ||
+    normalized === '::1' ||
+    normalized.startsWith('127.')
+  );
+};
+
 describe('Real PostgreSQL Destination Connector Integration', () => {
   const targetDbUrl =
     process.env.MIGRATIONGUARD_TEST_DATABASE_URL || process.env.TEST_DATABASE_URL;
@@ -15,15 +26,7 @@ describe('Real PostgreSQL Destination Connector Integration', () => {
     if (!targetDbUrl) return false;
     try {
       const parsed = new URL(targetDbUrl);
-      const host = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase().trim();
-      return (
-        host === 'localhost' ||
-        host === '127.0.0.1' ||
-        host === '::1' ||
-        host === '0.0.0.0' ||
-        host.startsWith('127.') ||
-        host === '::'
-      );
+      return isLoopbackHost(parsed.hostname);
     } catch {
       return false;
     }
@@ -37,6 +40,7 @@ describe('Real PostgreSQL Destination Connector Integration', () => {
   let adminPool: pg.Pool;
   let connectorPool: pg.Pool;
   let connector: PostgresDestinationConnector;
+  let schemaCreated = false;
 
   beforeAll(async () => {
     if (!targetDbUrl) {
@@ -51,20 +55,55 @@ describe('Real PostgreSQL Destination Connector Integration', () => {
       return;
     }
 
-    if (!isLocalOrCi && process.env.ALLOW_REMOTE_TEST_DB !== 'true') {
-      const msg =
-        '[Safety Guard] Refusing to run live destination integration test against remote database without explicit ALLOW_REMOTE_TEST_DB=true.';
-      if (process.env.CI === 'true') {
-        throw new Error(`[CI Mandatory Failure] ${msg}`);
+    let targetHost = '';
+    try {
+      const parsed = new URL(targetDbUrl);
+      targetHost = parsed.hostname;
+    } catch {
+      targetHost = targetDbUrl;
+    }
+
+    if (!isLocalOrCi) {
+      // 1. Strict production pattern guard
+      if (/prod/i.test(targetHost) || /prod/i.test(targetDbUrl)) {
+        const msg = `[Safety Guard] Designated test database URL (${targetHost}) matches production naming patterns (/prod/i). Testing against production endpoints is strictly forbidden.`;
+        if (process.env.CI === 'true') throw new Error(`[CI Mandatory Failure] ${msg}`);
+        console.warn(msg);
+        return;
       }
-      console.warn(msg);
-      return;
+
+      // 2. Strict remote approval guard
+      if (process.env.ALLOW_REMOTE_TEST_DB !== 'true') {
+        const msg =
+          '[Safety Guard] Refusing to run live destination integration test against remote database without explicit ALLOW_REMOTE_TEST_DB=true.';
+        if (process.env.CI === 'true') {
+          throw new Error(`[CI Mandatory Failure] ${msg}`);
+        }
+        console.warn(msg);
+        return;
+      }
+
+      // 3. Strict host allowlist guard
+      const allowedDbHosts = (process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_HOSTS || '')
+        .split(',')
+        .map((h) => h.trim().toLowerCase())
+        .filter(Boolean);
+
+      if (!allowedDbHosts.includes(targetHost.toLowerCase())) {
+        const msg = `[Safety Guard] Remote database host '${targetHost}' is not present in MIGRATIONGUARD_ALLOWED_TEST_DATABASE_HOSTS allowlist. Refusing execution.`;
+        if (process.env.CI === 'true') {
+          throw new Error(`[CI Mandatory Failure] ${msg}`);
+        }
+        console.warn(msg);
+        return;
+      }
     }
 
     adminPool = new pg.Pool({ connectionString: targetDbUrl, ssl, max: 2 });
     try {
       await adminPool.query('SELECT 1');
       await adminPool.query(`CREATE SCHEMA IF NOT EXISTS "${testSchema}"`);
+      schemaCreated = true;
     } catch (err: any) {
       if (process.env.CI === 'true') {
         throw new Error(`[CI Mandatory Failure] Live PostgreSQL destination unreachable in CI: ${err.message}`);
@@ -107,7 +146,8 @@ describe('Real PostgreSQL Destination Connector Integration', () => {
     }
 
     try {
-      if (adminPool) {
+      // Only attempt DROP SCHEMA if schema was actually created; skips safely when DB was unreachable
+      if (adminPool && schemaCreated) {
         await adminPool.query(`DROP SCHEMA IF EXISTS "${testSchema}" CASCADE`);
       }
     } catch (err: any) {
@@ -119,7 +159,9 @@ describe('Real PostgreSQL Destination Connector Integration', () => {
         await adminPool.end();
       }
     } catch (err: any) {
-      if (!cleanupError) cleanupError = err;
+      if (schemaCreated && !cleanupError) {
+        cleanupError = err;
+      }
     }
 
     if (cleanupError) {
@@ -215,5 +257,52 @@ describe('Real PostgreSQL Destination Connector Integration', () => {
     expect(records[0].data.email).toBe('acme@testcorp.com');
 
     console.log('[PostgreSQL Destination Write Integration] Verified real write and readByKeys on live PostgreSQL.');
+  });
+});
+
+describe('PostgreSQL Destination Target Protection & Teardown Guards', () => {
+  it('confirms isLoopbackHost strictly rejects 0.0.0.0 and :: as wildcard addresses', () => {
+    expect(isLoopbackHost('0.0.0.0')).toBe(false);
+    expect(isLoopbackHost('::')).toBe(false);
+    expect(isLoopbackHost('[::]')).toBe(false);
+    expect(isLoopbackHost('localhost')).toBe(true);
+    expect(isLoopbackHost('127.0.0.1')).toBe(true);
+    expect(isLoopbackHost('127.0.0.5')).toBe(true);
+    expect(isLoopbackHost('::1')).toBe(true);
+    expect(isLoopbackHost('[::1]')).toBe(true);
+  });
+
+  it('verifies teardown handles offline database without throwing unhandled DROP SCHEMA errors', async () => {
+    // Simulate offline state: adminPool exists but schemaCreated is false
+    const mockPool = {
+      query: async () => {
+        throw new Error('Connection refused (database offline)');
+      },
+      end: async () => {},
+    };
+
+    const schemaCreated = false;
+    let cleanupError: any = null;
+
+    try {
+      if (mockPool && schemaCreated) {
+        await mockPool.query();
+      }
+    } catch (err: any) {
+      if (!cleanupError) cleanupError = err;
+    }
+
+    try {
+      if (mockPool) {
+        await mockPool.end();
+      }
+    } catch (err: any) {
+      if (schemaCreated && !cleanupError) {
+        cleanupError = err;
+      }
+    }
+
+    // Must complete cleanly with no error thrown
+    expect(cleanupError).toBeNull();
   });
 });

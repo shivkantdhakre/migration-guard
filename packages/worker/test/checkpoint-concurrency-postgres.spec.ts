@@ -174,19 +174,46 @@ describe('Checkpoint Concurrency & Atomic PostgreSQL Persistence (P0.1)', () => 
           host === 'localhost' ||
           host === '127.0.0.1' ||
           host === '::1' ||
-          host === '0.0.0.0' ||
-          host.startsWith('127.') ||
-          host === '::'
+          host.startsWith('127.')
         );
       } catch {
         return dbUrl.includes('localhost') || dbUrl.includes('127.0.0.1') || dbUrl.includes('::1');
       }
     })();
 
-    const isTestDbName = dbUrl.includes('test') || dbUrl.includes('dev');
-    if (!isLocalOrCi && !isTestDbName && process.env.ALLOW_REMOTE_TEST_DB !== 'true') {
-      console.warn('[Safety Guard] Refusing to run integration test against non-test/non-local database without ALLOW_REMOTE_TEST_DB=true.');
-      return;
+    if (!isLocalOrCi) {
+      let host = '';
+      try {
+        host = new URL(dbUrl).hostname;
+      } catch {
+        host = dbUrl;
+      }
+
+      if (/prod/i.test(host) || /prod/i.test(dbUrl)) {
+        const msg = `[Safety Guard] Checkpoint database URL (${host}) matches production naming patterns (/prod/i). Testing against production endpoints is strictly forbidden.`;
+        if (process.env.CI === 'true') throw new Error(`[CI Mandatory Failure] ${msg}`);
+        console.warn(msg);
+        return;
+      }
+
+      if (process.env.ALLOW_REMOTE_TEST_DB !== 'true') {
+        const msg = '[Safety Guard] Refusing to run checkpoint integration test against remote database without ALLOW_REMOTE_TEST_DB=true.';
+        if (process.env.CI === 'true') throw new Error(`[CI Mandatory Failure] ${msg}`);
+        console.warn(msg);
+        return;
+      }
+
+      const allowedDbHosts = (process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_HOSTS || '')
+        .split(',')
+        .map((h) => h.trim().toLowerCase())
+        .filter(Boolean);
+
+      if (!allowedDbHosts.includes(host.toLowerCase())) {
+        const msg = `[Safety Guard] Remote database host '${host}' is not present in MIGRATIONGUARD_ALLOWED_TEST_DATABASE_HOSTS allowlist. Refusing execution.`;
+        if (process.env.CI === 'true') throw new Error(`[CI Mandatory Failure] ${msg}`);
+        console.warn(msg);
+        return;
+      }
     }
 
     const isProduction = process.env.NODE_ENV === 'production';

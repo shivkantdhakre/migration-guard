@@ -162,6 +162,17 @@ describe('Checkpoint Concurrency & Atomic PostgreSQL Persistence (P0.1)', () => 
     const testPool = new pg.Pool({ connectionString: dbUrl, ssl: { rejectUnauthorized: false } });
     try {
       await testPool.query('SELECT 1');
+      await testPool.query(`
+        CREATE TABLE IF NOT EXISTS migration_runs (
+          id TEXT PRIMARY KEY,
+          plan_version_id TEXT,
+          status TEXT,
+          source_boundary_json JSONB DEFAULT '{}'::jsonb,
+          progress_json JSONB DEFAULT '{}'::jsonb,
+          created_at TIMESTAMPTZ DEFAULT NOW(),
+          updated_at TIMESTAMPTZ DEFAULT NOW()
+        )
+      `);
     } catch {
       console.warn('[Notice] Live database unreachable in sandbox, skipping live PostgreSQL test.');
       await testPool.end();

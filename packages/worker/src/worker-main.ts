@@ -53,7 +53,7 @@ function loadEnv() {
             if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
               v = v.substring(1, v.length - 1);
             }
-            if (!process.env[k]) {
+            if (process.env[k] === undefined) {
               process.env[k] = v;
             }
           }
@@ -76,9 +76,29 @@ const IS_REDIS_TLS =
   REDIS_PORT === 15678 ||
   (REDIS_URL && REDIS_URL.startsWith('rediss://'));
 
-const DATABASE_URL =
-  process.env.DATABASE_URL ||
-  'postgresql://postgres:postgres_password@localhost:5432/migrationguard_control?schema=public';
+const DATABASE_URL = (() => {
+  const url = process.env.DATABASE_URL;
+  if (process.env.NODE_ENV === 'production') {
+    if (!url || url.trim() === '' || url.includes('localhost') || url.includes('127.0.0.1')) {
+      throw new Error(
+        '[Worker Config] In production (NODE_ENV=production), DATABASE_URL must be explicitly configured and cannot use localhost.',
+      );
+    }
+    return url;
+  }
+  return (
+    url ||
+    'postgresql://postgres:postgres_password@localhost:5432/migrationguard_control?schema=public'
+  );
+})();
+
+if (process.env.NODE_ENV === 'production') {
+  if (!REDIS_URL && (!process.env.REDIS_HOST || process.env.REDIS_HOST === 'localhost' || process.env.REDIS_HOST === '127.0.0.1')) {
+    throw new Error(
+      '[Worker Config] In production (NODE_ENV=production), REDIS_URL or remote REDIS_HOST must be explicitly configured.',
+    );
+  }
+}
 
 console.log('========================================================================');
 console.log('   MigrationGuard Data-Plane Migration Worker');

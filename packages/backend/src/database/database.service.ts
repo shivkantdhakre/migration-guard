@@ -18,16 +18,50 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   // In-memory relational store fallback for unit testing or explicitly enabled offline dev
   private memoryStore: Map<string, Map<string, any>> = new Map();
 
+  public static isLoopbackHost(host: string): boolean {
+    if (!host) return false;
+    const normalized = host.replace(/^\[|\]$/g, '').toLowerCase().trim();
+    return (
+      normalized === 'localhost' ||
+      normalized === '127.0.0.1' ||
+      normalized === '::1' ||
+      normalized === '0.0.0.0' ||
+      normalized.startsWith('127.') ||
+      normalized === '::'
+    );
+  }
+
   async onModuleInit() {
     this.initMemoryTables();
     const isInMemoryAllowed = process.env.ALLOW_IN_MEMORY_DB === 'true';
+
+    // In unit test mode with in-memory explicitly allowed and not forced to use PostgreSQL,
+    // use in-memory store for unit test speed and data isolation
+    if (isInMemoryAllowed && process.env.NODE_ENV === 'test' && process.env.FORCE_POSTGRES_DB !== 'true') {
+      this.isConnected = false;
+      return;
+    }
+
+    const isLocal = (() => {
+      try {
+        const parsed = new URL(appConfig.databaseUrl);
+        return DatabaseService.isLoopbackHost(parsed.hostname);
+      } catch {
+        const match = /@([^:/]+|\[[^\]]+\])/.exec(appConfig.databaseUrl);
+        return match ? DatabaseService.isLoopbackHost(match[1]) : false;
+      }
+    })();
+
+    const allowInsecureTls = process.env.ALLOW_INSECURE_TLS === 'true';
+    const isProduction = process.env.NODE_ENV === 'production';
+    const ssl = isLocal && !isProduction ? false : { rejectUnauthorized: !allowInsecureTls };
 
     try {
       this.pool = new pg.Pool({
         connectionString: appConfig.databaseUrl,
         connectionTimeoutMillis: 10000,
         max: 10,
-        ssl: { rejectUnauthorized: false },
+        ssl,
       });
 
       const client = await this.pool.connect();
@@ -37,7 +71,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       await this.runMigrations();
     } catch (err: any) {
       this.isConnected = false;
-      if (process.env.NODE_ENV === 'production' || !isInMemoryAllowed) {
+      if (isProduction || !isInMemoryAllowed) {
         console.error(`[DatabaseService] CRITICAL: Failed to connect to mandatory PostgreSQL (${err.message}).`);
         // If in-memory is not explicitly permitted, throw fatal error
         if (!isInMemoryAllowed) {
@@ -116,8 +150,14 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   public async runMigrations() {
     if (!this.isConnected || !this.pool) return;
     try {
-      const sqlPath = path.join(__dirname, 'schema.sql');
-      if (fs.existsSync(sqlPath)) {
+      const candidates = [
+        path.join(__dirname, 'schema.sql'),
+        path.join(__dirname, '..', 'src', 'database', 'schema.sql'),
+        path.resolve(process.cwd(), 'packages/backend/src/database/schema.sql'),
+        path.resolve(process.cwd(), 'src/database/schema.sql'),
+      ];
+      const sqlPath = candidates.find((p) => fs.existsSync(p));
+      if (sqlPath) {
         const sql = fs.readFileSync(sqlPath, 'utf8');
         await this.pool.query(sql);
         console.log('[DatabaseService] Migrations executed successfully.');

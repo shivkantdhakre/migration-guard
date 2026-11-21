@@ -12,6 +12,40 @@ import {
   ReadBatchOptions,
 } from '../types.js';
 
+const isLoopbackHost = (host: string): boolean => {
+  if (!host) return false;
+  const normalized = host.replace(/^\[|\]$/g, '').toLowerCase().trim();
+  return (
+    normalized === 'localhost' ||
+    normalized === '127.0.0.1' ||
+    normalized === '::1' ||
+    normalized === '0.0.0.0' ||
+    normalized.startsWith('127.') ||
+    normalized === '::'
+  );
+};
+
+const resolvePostgresSsl = (connectionString: string): boolean | { rejectUnauthorized: boolean } => {
+  let isLocal = false;
+  try {
+    const parsed = new URL(connectionString);
+    isLocal = isLoopbackHost(parsed.hostname);
+  } catch {
+    const match = /@([^:/]+|\[[^\]]+\])/.exec(connectionString);
+    if (match) {
+      isLocal = isLoopbackHost(match[1]);
+    }
+  }
+
+  const allowInsecureTls = process.env.ALLOW_INSECURE_TLS === 'true';
+  const isProduction = process.env.NODE_ENV === 'production';
+
+  if (isLocal && !isProduction) {
+    return false;
+  }
+  return { rejectUnauthorized: !allowInsecureTls };
+};
+
 export class PostgresDestinationConnector implements DestinationConnector {
   private pool: pg.Pool;
 
@@ -21,11 +55,15 @@ export class PostgresDestinationConnector implements DestinationConnector {
         connectionString: poolOrConnectionString,
         connectionTimeoutMillis: 10000,
         max: 10,
-        ssl: { rejectUnauthorized: false },
+        ssl: resolvePostgresSsl(poolOrConnectionString),
       });
     } else {
       this.pool = poolOrConnectionString;
     }
+  }
+
+  async query<T extends pg.QueryResultRow = any>(text: string, params?: any[]): Promise<pg.QueryResult<T>> {
+    return this.pool.query<T>(text, params);
   }
 
   async testConnection(): Promise<{ success: boolean; latencyMs: number; message?: string }> {

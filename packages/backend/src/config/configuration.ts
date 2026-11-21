@@ -37,9 +37,30 @@ export const appConfig: AppConfig = {
   databaseUrl: (() => {
     const url = process.env.DATABASE_URL;
     if (process.env.NODE_ENV === 'production') {
-      if (!url || url.trim() === '' || url.includes('localhost') || url.includes('127.0.0.1')) {
+      if (!url || url.trim() === '') {
         throw new Error(
           '[Config] In production (NODE_ENV=production), DATABASE_URL must be explicitly configured and cannot use localhost.',
+        );
+      }
+      let hostname = '';
+      try {
+        const parsed = new URL(url);
+        hostname = parsed.hostname;
+      } catch (err: any) {
+        throw new Error(`[Config] In production (NODE_ENV=production), DATABASE_URL is invalid: ${err.message}`);
+      }
+      const normalizedHost = hostname.replace(/^\[|\]$/g, '').toLowerCase().trim();
+      const isLoopback =
+        normalizedHost === 'localhost' ||
+        normalizedHost === '127.0.0.1' ||
+        normalizedHost === '::1' ||
+        normalizedHost === '0.0.0.0' ||
+        normalizedHost.startsWith('127.') ||
+        normalizedHost === '::';
+
+      if (isLoopback) {
+        throw new Error(
+          `[Config] In production (NODE_ENV=production), DATABASE_URL must be explicitly configured and cannot use localhost or loopback (${hostname}).`,
         );
       }
       return url;

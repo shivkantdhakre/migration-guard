@@ -27,7 +27,14 @@ describe('Worker Configuration Fail-Closed Security (P1 & Run 005.1)', { timeout
     const cmd = `node -e "process.env.NODE_ENV='production'; process.env.DATABASE_URL='postgresql://postgres:pass@localhost:5432/db'; process.env.REDIS_URL='rediss://remote:15678'; require('./packages/worker/dist/worker-main.js');"`;
     const { failed, errorMessage } = runNodeCmd(cmd);
     expect(failed).toBe(true);
-    expect(errorMessage).toMatch(/DATABASE_URL must be explicitly configured and cannot use localhost/);
+    expect(errorMessage).toMatch(/DATABASE_URL must be explicitly configured and cannot use localhost or loopback/);
+  });
+
+  it('fails startup in production when DATABASE_URL points to IPv6 loopback [::1]', () => {
+    const cmd = `node -e "process.env.NODE_ENV='production'; process.env.DATABASE_URL='postgresql://postgres:pass@[::1]:5432/db'; process.env.REDIS_URL='rediss://remote:15678'; require('./packages/worker/dist/worker-main.js');"`;
+    const { failed, errorMessage } = runNodeCmd(cmd);
+    expect(failed).toBe(true);
+    expect(errorMessage).toMatch(/DATABASE_URL must be explicitly configured and cannot use localhost or loopback/);
   });
 
   it('fails startup in production when ALLOW_SYNTHETIC_SOURCE is true', () => {

@@ -68,14 +68,15 @@ function loadEnv() {
 loadEnv();
 
 const isLoopbackHost = (host: string): boolean => {
-  const normalized = host.toLowerCase().trim();
+  if (!host) return false;
+  const normalized = host.replace(/^\[|\]$/g, '').toLowerCase().trim();
   return (
     normalized === 'localhost' ||
     normalized === '127.0.0.1' ||
     normalized === '::1' ||
     normalized === '0.0.0.0' ||
     normalized.startsWith('127.') ||
-    normalized === '[::1]'
+    normalized === '::'
   );
 };
 
@@ -100,9 +101,21 @@ const IS_REDIS_TLS =
 const DATABASE_URL = (() => {
   const url = process.env.DATABASE_URL;
   if (process.env.NODE_ENV === 'production') {
-    if (!url || url.trim() === '' || isLoopbackHost(url.replace(/^.*@/, '').split(':')[0].split('/')[0])) {
+    if (!url || url.trim() === '') {
       throw new Error(
-        '[Worker Config] In production (NODE_ENV=production), DATABASE_URL must be explicitly configured and cannot use localhost.',
+        '[Worker Config] In production (NODE_ENV=production), DATABASE_URL must be explicitly configured and cannot use localhost or loopback.',
+      );
+    }
+    let hostname = '';
+    try {
+      const parsed = new URL(url);
+      hostname = parsed.hostname;
+    } catch (err: any) {
+      throw new Error(`[Worker Config] In production (NODE_ENV=production), DATABASE_URL is invalid: ${err.message}`);
+    }
+    if (isLoopbackHost(hostname)) {
+      throw new Error(
+        `[Worker Config] In production (NODE_ENV=production), DATABASE_URL must be explicitly configured and cannot use localhost or loopback (${hostname}).`,
       );
     }
     return url;
@@ -159,17 +172,23 @@ let dbPool: pg.Pool | null = null;
 let redisClient: Redis | null = null;
 
 // Initialize persistent PostgreSQL connection pool and adapters
-const isLocalDb =
-  DATABASE_URL.includes('localhost') ||
-  DATABASE_URL.includes('127.0.0.1') ||
-  DATABASE_URL.includes('::1') ||
-  DATABASE_URL.includes('migrationguard_test');
+const isLocalDb = (() => {
+  try {
+    const parsed = new URL(DATABASE_URL);
+    return isLoopbackHost(parsed.hostname);
+  } catch {
+    const match = /@([^:/]+|\[[^\]]+\])/.exec(DATABASE_URL);
+    return match ? isLoopbackHost(match[1]) : false;
+  }
+})();
+
+const isProduction = process.env.NODE_ENV === 'production';
 
 dbPool = new pg.Pool({
   connectionString: DATABASE_URL,
   connectionTimeoutMillis: 10000,
   max: 20,
-  ssl: isLocalDb ? false : { rejectUnauthorized: !allowInsecureTls },
+  ssl: isLocalDb && !isProduction ? false : { rejectUnauthorized: !allowInsecureTls },
 });
 
 const postgresAdapters = new PostgresStorageAdapters(dbPool);

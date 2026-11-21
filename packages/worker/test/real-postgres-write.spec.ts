@@ -1,5 +1,5 @@
-import { describe, it, expect, afterAll } from 'vitest';
-import { ConnectorFactory } from '../src/connectors/connector-factory.js';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { ConnectorFactory, PostgresDestinationConnector } from '../src/connectors/connector-factory.js';
 import { TransformedBatch } from '../src/types.js';
 
 describe('Real PostgreSQL Destination Connector Integration', () => {
@@ -7,16 +7,46 @@ describe('Real PostgreSQL Destination Connector Integration', () => {
     process.env.DATABASE_URL ||
     'postgresql://postgres:postgres_password@localhost:5432/migrationguard_control?schema=public';
 
-  const connector = ConnectorFactory.createPostgresDestination(dbUrl);
-  const testKey = `test_cust_${Date.now()}`;
+  const connector = ConnectorFactory.createPostgresDestination(dbUrl) as PostgresDestinationConnector;
+  const testKey = `test_cust_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+
+  beforeAll(async () => {
+    const check = await connector.testConnection();
+    if (!check.success) {
+      if (process.env.CI === 'true') {
+        throw new Error(`[CI Mandatory Failure] Live PostgreSQL destination unreachable in CI: ${check.message}`);
+      }
+      console.warn(`[Notice] Live database offline in sandbox: ${check.message}`);
+      return;
+    }
+
+    // Ensure destination table exists for the live write test
+    await connector.query(`
+      CREATE TABLE IF NOT EXISTS customers (
+        id TEXT PRIMARY KEY,
+        name TEXT,
+        email TEXT,
+        phone TEXT,
+        tier TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        metadata JSONB
+      )
+    `);
+  });
 
   afterAll(async () => {
+    try {
+      await connector.query(`DELETE FROM customers WHERE id = $1`, [testKey]);
+    } catch {}
     await connector.close();
   });
 
   it('should verify live PostgreSQL connectivity', async () => {
     const res = await connector.testConnection();
     if (!res.success) {
+      if (process.env.CI === 'true') {
+        throw new Error(`[CI Mandatory Failure] Live PostgreSQL connection failed in CI: ${res.message}`);
+      }
       console.warn(`[Notice] Live database offline in sandbox: ${res.message}`);
       return;
     }
@@ -27,6 +57,9 @@ describe('Real PostgreSQL Destination Connector Integration', () => {
   it('should write real transformed batch into destination PostgreSQL', async () => {
     const check = await connector.testConnection();
     if (!check.success) {
+      if (process.env.CI === 'true') {
+        throw new Error(`[CI Mandatory Failure] Live PostgreSQL destination write failed in CI: ${check.message}`);
+      }
       console.warn(`[Notice] Live database offline in sandbox, skipping write`);
       return;
     }
@@ -67,6 +100,9 @@ describe('Real PostgreSQL Destination Connector Integration', () => {
   it('should read written records back from destination PostgreSQL using readByKeys', async () => {
     const check = await connector.testConnection();
     if (!check.success) {
+      if (process.env.CI === 'true') {
+        throw new Error(`[CI Mandatory Failure] Live PostgreSQL destination read failed in CI: ${check.message}`);
+      }
       console.warn(`[Notice] Live database offline in sandbox, skipping read`);
       return;
     }
@@ -76,5 +112,7 @@ describe('Real PostgreSQL Destination Connector Integration', () => {
     expect(records[0].destinationKey).toBe(testKey);
     expect(records[0].data.name).toBe('Acme Test Corp');
     expect(records[0].data.email).toBe('acme@testcorp.com');
+
+    console.log('[PostgreSQL Destination Write Integration] Verified real write and readByKeys on live PostgreSQL.');
   });
 });

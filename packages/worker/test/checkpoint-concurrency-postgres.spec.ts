@@ -161,12 +161,24 @@ describe('Checkpoint Concurrency & Atomic PostgreSQL Persistence (P0.1)', () => 
       return;
     }
 
-    const isLocalOrCi =
-      dbUrl.includes('localhost') ||
-      dbUrl.includes('127.0.0.1') ||
-      dbUrl.includes('postgres:') ||
-      dbUrl.includes('migrationguard_test');
-    const ssl = isLocalOrCi ? false : { rejectUnauthorized: true };
+    const isLocalOrCi = (() => {
+      try {
+        const parsed = new URL(dbUrl);
+        const host = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase().trim();
+        return (
+          host === 'localhost' ||
+          host === '127.0.0.1' ||
+          host === '::1' ||
+          host === '0.0.0.0' ||
+          host.startsWith('127.') ||
+          host === '::'
+        );
+      } catch {
+        return dbUrl.includes('localhost') || dbUrl.includes('127.0.0.1') || dbUrl.includes('::1');
+      }
+    })();
+    const isProduction = process.env.NODE_ENV === 'production';
+    const ssl = isLocalOrCi && !isProduction ? false : { rejectUnauthorized: true };
 
     // Attempt live connection
     const testPool = new pg.Pool({ connectionString: dbUrl, ssl, max: 5 });

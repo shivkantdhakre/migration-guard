@@ -8,16 +8,34 @@ describe('Backend QueueService Live Redis Integration (Run 005.4 & Run 005.5)', 
   let testWorker: Worker | null = null;
   let testRedisClient: Redis | null = null;
   const isCi = process.env.CI === 'true';
+  const initialEnv = { ...process.env };
 
   // Isolated queue name to ensure zero state collision with other test suites or default queues
   const uniqueQueueName = `test-live-queue-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
-  const prevQueueName = process.env.BULLMQ_QUEUE_NAME;
 
   const redisUrl =
+    process.env.MIGRATIONGUARD_TEST_REDIS_URL ||
+    process.env.TEST_REDIS_URL ||
     process.env.REDIS_URL ||
     (process.env.REDIS_HOST
       ? `redis://${process.env.REDIS_HOST}:${process.env.REDIS_PORT || 6379}`
       : 'redis://localhost:6379');
+
+  const isRediss = redisUrl.startsWith('rediss://');
+  const isTls = isRediss || process.env.REDIS_TLS === 'true';
+  const allowInsecureTls = process.env.ALLOW_INSECURE_TLS === 'true';
+  const isProduction = process.env.NODE_ENV === 'production';
+  const sharedTlsConfig = isTls
+    ? { rejectUnauthorized: isProduction ? true : !allowInsecureTls }
+    : undefined;
+
+  function createSharedRedisClient(options: Record<string, any> = {}): Redis {
+    return new Redis(redisUrl, {
+      maxRetriesPerRequest: null,
+      tls: sharedTlsConfig,
+      ...options,
+    });
+  }
 
   beforeAll(async () => {
     delete process.env.ALLOW_SIMULATED_DISPATCH;
@@ -25,9 +43,8 @@ describe('Backend QueueService Live Redis Integration (Run 005.4 & Run 005.5)', 
 
     // Probe Redis connectivity first with lazy connect
     try {
-      testRedisClient = new Redis(redisUrl, {
+      testRedisClient = createSharedRedisClient({
         connectTimeout: 4000,
-        maxRetriesPerRequest: null,
         lazyConnect: true,
         retryStrategy: () => null,
       });
@@ -56,11 +73,9 @@ describe('Backend QueueService Live Redis Integration (Run 005.4 & Run 005.5)', 
     }
     if (queueService) {
       const q = queueService.getQueue();
-      if (q) {
-        try {
-          await q.drain();
-          await q.obliterate({ force: true });
-        } catch {}
+      if (q && queueService.isQueueConnected) {
+        await q.drain();
+        await q.obliterate({ force: true });
       }
       await queueService.onModuleDestroy();
     }
@@ -68,10 +83,14 @@ describe('Backend QueueService Live Redis Integration (Run 005.4 & Run 005.5)', 
       testRedisClient.disconnect();
       testRedisClient = null;
     }
-    if (prevQueueName) {
-      process.env.BULLMQ_QUEUE_NAME = prevQueueName;
-    } else {
-      delete process.env.BULLMQ_QUEUE_NAME;
+    // Restore process environment
+    for (const key of Object.keys(process.env)) {
+      if (!(key in initialEnv)) {
+        delete process.env[key];
+      }
+    }
+    for (const [key, value] of Object.entries(initialEnv)) {
+      process.env[key] = value;
     }
   });
 
@@ -155,8 +174,7 @@ describe('Backend QueueService Live Redis Integration (Run 005.4 & Run 005.5)', 
       writeMode: 'upsert',
     };
 
-    const recoveryWorkerConnection = new Redis(redisUrl, {
-      maxRetriesPerRequest: null,
+    const recoveryWorkerConnection = createSharedRedisClient({
       enableReadyCheck: false,
       lazyConnect: false,
     });
@@ -206,7 +224,7 @@ describe('Backend QueueService Live Redis Integration (Run 005.4 & Run 005.5)', 
 
     // Drain the test queue to ensure test 2 jobs do not spill into test 3
     const q = queueService.getQueue();
-    if (q) {
+    if (q && queueService.isQueueConnected) {
       await q.drain();
     }
   });
@@ -216,7 +234,7 @@ describe('Backend QueueService Live Redis Integration (Run 005.4 & Run 005.5)', 
 
     // Ensure queue is clean before dispatching test 3 job
     const q = queueService.getQueue();
-    if (q) {
+    if (q && queueService.isQueueConnected) {
       await q.drain();
     }
 
@@ -240,8 +258,7 @@ describe('Backend QueueService Live Redis Integration (Run 005.4 & Run 005.5)', 
     let consumedData: MigrationJobPayload | null = null;
 
     const jobPromise = new Promise<{ id: string; data: MigrationJobPayload }>((resolve, reject) => {
-      const workerConnection = new Redis(redisUrl, {
-        maxRetriesPerRequest: null,
+      const workerConnection = createSharedRedisClient({
         enableReadyCheck: false,
         lazyConnect: false,
       });

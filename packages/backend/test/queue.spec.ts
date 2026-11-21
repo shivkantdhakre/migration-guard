@@ -1,72 +1,127 @@
 import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
 import { QueueService, MigrationJobPayload } from '../src/queue/queue.service';
 import { DatabaseService } from '../src/database/database.service';
+import { appConfig } from '../src/config/configuration';
 
 describe('QueueService (BullMQ Producer)', () => {
   let queueService: QueueService;
+  const initialEnv = { ...process.env };
   const unitTestQueue = `test-unit-queue-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
-  let prevQueueName: string | undefined;
 
-  // Strict safety guards: Queue unit tests must never connect to production Redis
-  if (
-    process.env.NODE_ENV === 'production' ||
-    (process.env.REDIS_URL && /prod/i.test(process.env.REDIS_URL))
-  ) {
-    throw new Error('[Safety Guard] Queue unit tests must never run against production Redis.');
-  }
-
-  const redisUrl = process.env.REDIS_URL;
-  if (redisUrl) {
-    let isLoopback = false;
-    try {
-      const parsed = new URL(redisUrl);
-      isLoopback = DatabaseService.isLoopbackHost(parsed.hostname);
-    } catch {
-      isLoopback =
-        redisUrl.includes('localhost') ||
-        redisUrl.includes('127.0.0.1') ||
-        redisUrl.includes('::1');
-    }
-    if (!isLoopback && process.env.ALLOW_REMOTE_TEST_REDIS !== 'true') {
-      if (process.env.CI === 'true') {
-        throw new Error(
-          '[Safety Guard] Refusing to run queue unit tests against remote Redis in CI without explicit ALLOW_REMOTE_TEST_REDIS=true.',
-        );
+  // Resolve and validate the effective Redis endpoint (checking designated test URL, REDIS_URL, REDIS_HOST, and appConfig.redis)
+  const effectiveTarget = (() => {
+    const designatedTestUrl =
+      process.env.MIGRATIONGUARD_TEST_REDIS_URL || process.env.TEST_REDIS_URL;
+    if (designatedTestUrl) {
+      try {
+        const parsed = new URL(designatedTestUrl);
+        return {
+          host: parsed.hostname,
+          port: parsed.port || '6379',
+          source: 'MIGRATIONGUARD_TEST_REDIS_URL',
+          url: designatedTestUrl,
+        };
+      } catch {
+        return {
+          host: designatedTestUrl,
+          port: '6379',
+          source: 'MIGRATIONGUARD_TEST_REDIS_URL',
+          url: designatedTestUrl,
+        };
       }
-      // In local dev with remote REDIS_URL in .env, isolate unit tests to protect remote instance
-      delete process.env.REDIS_URL;
-      delete process.env.REDIS_HOST;
+    }
+    if (process.env.REDIS_URL) {
+      try {
+        const parsed = new URL(process.env.REDIS_URL);
+        return {
+          host: parsed.hostname,
+          port: parsed.port || '6379',
+          source: 'REDIS_URL',
+          url: process.env.REDIS_URL,
+        };
+      } catch {
+        return {
+          host: process.env.REDIS_URL,
+          port: '6379',
+          source: 'REDIS_URL',
+          url: process.env.REDIS_URL,
+        };
+      }
+    }
+    const host = process.env.REDIS_HOST || appConfig.redis.host || 'localhost';
+    const port = String(process.env.REDIS_PORT || appConfig.redis.port || '6379');
+    return {
+      host,
+      port,
+      source: process.env.REDIS_HOST ? 'REDIS_HOST' : 'appConfig.redis.host',
+      url: undefined,
+    };
+  })();
+
+  // 1. Strict production guard: Queue unit tests must never connect to production Redis
+  const isProductionTarget =
+    process.env.NODE_ENV === 'production' ||
+    process.env.REDIS_ENV === 'production' ||
+    /prod/i.test(effectiveTarget.host) ||
+    (effectiveTarget.url ? /prod/i.test(effectiveTarget.url) : false);
+
+  if (isProductionTarget) {
+    throw new Error(
+      `[Safety Guard] Queue unit tests must never connect to production Redis (${effectiveTarget.host} via ${effectiveTarget.source}).`,
+    );
+  }
+
+  // 2. Strict remote guard: Remote endpoints strictly require ALLOW_REMOTE_TEST_REDIS=true
+  const isTargetLoopback = DatabaseService.isLoopbackHost(effectiveTarget.host);
+  if (!isTargetLoopback && process.env.ALLOW_REMOTE_TEST_REDIS !== 'true') {
+    if (process.env.CI === 'true') {
+      throw new Error(
+        `[Safety Guard] Refusing to run queue unit tests against remote Redis (${effectiveTarget.host} via ${effectiveTarget.source}) in CI without explicit ALLOW_REMOTE_TEST_REDIS=true.`,
+      );
     }
   }
+
+  // Determine explicit isolated test Redis URL:
+  // In loopback or explicitly authorized environments, use the target; otherwise route to local loopback
+  const effectiveTestRedisUrl = (() => {
+    if (effectiveTarget.url && (isTargetLoopback || process.env.ALLOW_REMOTE_TEST_REDIS === 'true')) {
+      return effectiveTarget.url;
+    }
+    if (isTargetLoopback) {
+      return `redis://${effectiveTarget.host}:${effectiveTarget.port}`;
+    }
+    // Protect remote development Redis instance from unit test execution
+    return 'redis://127.0.0.1:6379';
+  })();
 
   beforeAll(() => {
-    prevQueueName = process.env.BULLMQ_QUEUE_NAME;
     process.env.BULLMQ_QUEUE_NAME = unitTestQueue;
     process.env.ALLOW_SIMULATED_DISPATCH = 'true';
   });
 
   afterAll(async () => {
-    delete process.env.ALLOW_SIMULATED_DISPATCH;
-    if (prevQueueName) {
-      process.env.BULLMQ_QUEUE_NAME = prevQueueName;
-    } else {
-      delete process.env.BULLMQ_QUEUE_NAME;
+    // Restore all process environment variables to their original snapshot
+    for (const key of Object.keys(process.env)) {
+      if (!(key in initialEnv)) {
+        delete process.env[key];
+      }
+    }
+    for (const [key, value] of Object.entries(initialEnv)) {
+      process.env[key] = value;
     }
   });
 
   beforeEach(async () => {
-    queueService = new QueueService();
+    queueService = new QueueService(effectiveTestRedisUrl);
     await queueService.onModuleInit();
   });
 
   afterEach(async () => {
     if (queueService) {
       const q = queueService.getQueue();
-      if (q) {
-        try {
-          await q.drain();
-          await q.obliterate({ force: true });
-        } catch {}
+      if (q && queueService.isQueueConnected) {
+        await q.drain();
+        await q.obliterate({ force: true });
       }
       await queueService.onModuleDestroy();
     }
@@ -140,7 +195,7 @@ describe('QueueService (BullMQ Producer)', () => {
     }
   });
 
-  it('recovers connected state and queue functionality when Redis reconnects after a transient outage', async () => {
+  it('unit: transitions isConnected flag and updates queue state on close, error, and ready lifecycle events', async () => {
     const testService = new QueueService('redis://127.0.0.1:59999');
     await testService.onModuleInit();
     const redis = testService.getRedisClient();

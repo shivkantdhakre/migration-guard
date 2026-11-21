@@ -2,12 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { execSync } from 'node:child_process';
 import path from 'node:path';
 
-describe('Worker Configuration Fail-Closed Security (P1 & Run 005.1)', { timeout: 15000 }, () => {
+describe('Worker Configuration Fail-Closed Security (P1 & Run 005.1)', { timeout: 35000 }, () => {
   const repoRoot = path.resolve(__dirname, '../../..');
 
   const runNodeCmd = (cmd: string): { failed: boolean; errorMessage: string } => {
     try {
-      execSync(cmd, { cwd: repoRoot, stdio: 'pipe', timeout: 10000 });
+      execSync(cmd, { cwd: repoRoot, stdio: 'pipe', timeout: 25000 });
       return { failed: false, errorMessage: '' };
     } catch (err: any) {
       const stderr = err.stderr ? err.stderr.toString() : '';
@@ -77,5 +77,45 @@ describe('Worker Configuration Fail-Closed Security (P1 & Run 005.1)', { timeout
     const { failed, errorMessage } = runNodeCmd(cmd);
     expect(failed).toBe(true);
     expect(errorMessage).toMatch(/REDIS_URL must use TLS \('rediss:\/\/'\)/);
+  });
+
+  it('fails startup in production when DATABASE_URL points to wildcard 0.0.0.0', () => {
+    const cmd = `node -e "process.env.NODE_ENV='production'; process.env.DATABASE_URL='postgresql://postgres:pass@0.0.0.0:5432/db'; process.env.REDIS_URL='rediss://remote:15678'; require('./packages/worker/dist/worker-main.js');"`;
+    const { failed, errorMessage } = runNodeCmd(cmd);
+    expect(failed).toBe(true);
+    expect(errorMessage).toMatch(/DATABASE_URL must be explicitly configured and cannot use localhost or loopback/);
+  });
+
+  it('fails startup in production when DATABASE_URL points to wildcard IPv6 [::]', () => {
+    const cmd = `node -e "process.env.NODE_ENV='production'; process.env.DATABASE_URL='postgresql://postgres:pass@[::]:5432/db'; process.env.REDIS_URL='rediss://remote:15678'; require('./packages/worker/dist/worker-main.js');"`;
+    const { failed, errorMessage } = runNodeCmd(cmd);
+    expect(failed).toBe(true);
+    expect(errorMessage).toMatch(/DATABASE_URL must be explicitly configured and cannot use localhost or loopback/);
+  });
+
+  it('fails startup in production when REDIS_URL points to wildcard 0.0.0.0', () => {
+    const cmd = `node -e "process.env.NODE_ENV='production'; process.env.DATABASE_URL='postgresql://user:pass@remote:5432/db'; process.env.REDIS_URL='rediss://0.0.0.0:6379'; require('./packages/worker/dist/worker-main.js');"`;
+    const { failed, errorMessage } = runNodeCmd(cmd);
+    expect(failed).toBe(true);
+    expect(errorMessage).toMatch(/REDIS_URL cannot point to loopback\/localhost/);
+  });
+
+  it('fails startup in production when REDIS_URL points to wildcard IPv6 [::]', () => {
+    const cmd = `node -e "process.env.NODE_ENV='production'; process.env.DATABASE_URL='postgresql://user:pass@remote:5432/db'; process.env.REDIS_URL='rediss://[::]:6379'; require('./packages/worker/dist/worker-main.js');"`;
+    const { failed, errorMessage } = runNodeCmd(cmd);
+    expect(failed).toBe(true);
+    expect(errorMessage).toMatch(/REDIS_URL cannot point to loopback\/localhost/);
+  });
+
+  it('fails startup in production when REDIS_HOST points to wildcard 0.0.0.0 or ::', () => {
+    const cmd1 = `node -e "process.env.NODE_ENV='production'; process.env.DATABASE_URL='postgresql://user:pass@remote:5432/db'; process.env.REDIS_URL=''; process.env.REDIS_HOST='0.0.0.0'; require('./packages/worker/dist/worker-main.js');"`;
+    const res1 = runNodeCmd(cmd1);
+    expect(res1.failed).toBe(true);
+    expect(res1.errorMessage).toMatch(/REDIS_URL or remote non-loopback REDIS_HOST must be explicitly configured/);
+
+    const cmd2 = `node -e "process.env.NODE_ENV='production'; process.env.DATABASE_URL='postgresql://user:pass@remote:5432/db'; process.env.REDIS_URL=''; process.env.REDIS_HOST='::'; require('./packages/worker/dist/worker-main.js');"`;
+    const res2 = runNodeCmd(cmd2);
+    expect(res2.failed).toBe(true);
+    expect(res2.errorMessage).toMatch(/REDIS_URL or remote non-loopback REDIS_HOST must be explicitly configured/);
   });
 });

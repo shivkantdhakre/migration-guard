@@ -318,5 +318,18 @@ describe('QueueService (BullMQ Producer)', () => {
     expect(DatabaseService.isLoopbackHost('127.0.0.2')).toBe(true);
     expect(DatabaseService.isLoopbackHost('::1')).toBe(true);
     expect(DatabaseService.isLoopbackHost('[::1]')).toBe(true);
+
+    expect(DatabaseService.isUnspecifiedHost('0.0.0.0')).toBe(true);
+    expect(DatabaseService.isUnspecifiedHost('::')).toBe(true);
+    expect(DatabaseService.isUnspecifiedHost('[::]')).toBe(true);
+    expect(DatabaseService.isUnspecifiedHost('127.0.0.1')).toBe(false);
+    expect(DatabaseService.isUnspecifiedHost('localhost')).toBe(false);
+
+    expect(DatabaseService.isUnsafeProductionHost('0.0.0.0')).toBe(true);
+    expect(DatabaseService.isUnsafeProductionHost('::')).toBe(true);
+    expect(DatabaseService.isUnsafeProductionHost('[::]')).toBe(true);
+    expect(DatabaseService.isUnsafeProductionHost('localhost')).toBe(true);
+    expect(DatabaseService.isUnsafeProductionHost('127.0.0.1')).toBe(true);
+    expect(DatabaseService.isUnsafeProductionHost('db-staging.internal.net')).toBe(false);
   });
 });

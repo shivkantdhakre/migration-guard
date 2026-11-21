@@ -12,7 +12,7 @@ import {
   ReadBatchOptions,
 } from '../types.js';
 
-const isLoopbackHost = (host: string): boolean => {
+export const isLoopbackHost = (host: string): boolean => {
   if (!host) return false;
   const normalized = host.replace(/^\[|\]$/g, '').toLowerCase().trim();
   return (
@@ -21,6 +21,16 @@ const isLoopbackHost = (host: string): boolean => {
     normalized === '::1' ||
     normalized.startsWith('127.')
   );
+};
+
+export const isUnspecifiedHost = (host: string): boolean => {
+  if (!host) return false;
+  const normalized = host.replace(/^\[|\]$/g, '').toLowerCase().trim();
+  return normalized === '0.0.0.0' || normalized === '::';
+};
+
+export const isUnsafeProductionHost = (host: string): boolean => {
+  return isLoopbackHost(host) || isUnspecifiedHost(host);
 };
 
 const resolvePostgresSsl = (connectionString: string): boolean | { rejectUnauthorized: boolean } => {

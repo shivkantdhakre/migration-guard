@@ -34,6 +34,16 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
+  public static isUnspecifiedHost(host: string): boolean {
+    if (!host) return false;
+    const normalized = host.replace(/^\[|\]$/g, '').toLowerCase().trim();
+    return normalized === '0.0.0.0' || normalized === '::';
+  }
+
+  public static isUnsafeProductionHost(host: string): boolean {
+    return DatabaseService.isLoopbackHost(host) || DatabaseService.isUnspecifiedHost(host);
+  }
+
   async onModuleInit() {
     this.initMemoryTables();
     const isInMemoryAllowed = process.env.ALLOW_IN_MEMORY_DB === 'true';

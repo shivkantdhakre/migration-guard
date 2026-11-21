@@ -1,6 +1,12 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import pg from 'pg';
-import { ConnectorFactory, PostgresDestinationConnector } from '../src/connectors/connector-factory.js';
+import {
+  ConnectorFactory,
+  PostgresDestinationConnector,
+  isLoopbackHost as connectorLoopback,
+  isUnspecifiedHost as connectorUnspecified,
+  isUnsafeProductionHost as connectorUnsafe,
+} from '../src/connectors/connector-factory.js';
 import { TransformedBatch } from '../src/types.js';
 
 export const isLoopbackHost = (host: string): boolean => {
@@ -56,17 +62,21 @@ describe('Real PostgreSQL Destination Connector Integration', () => {
     }
 
     let targetHost = '';
+    let targetPort = '5432';
+    let targetDbName = '';
     try {
       const parsed = new URL(targetDbUrl);
       targetHost = parsed.hostname;
+      targetPort = parsed.port || '5432';
+      targetDbName = (parsed.pathname || '').replace(/^\//, '').split('?')[0];
     } catch {
       targetHost = targetDbUrl;
     }
 
     if (!isLocalOrCi) {
       // 1. Strict production pattern guard
-      if (/prod/i.test(targetHost) || /prod/i.test(targetDbUrl)) {
-        const msg = `[Safety Guard] Designated test database URL (${targetHost}) matches production naming patterns (/prod/i). Testing against production endpoints is strictly forbidden.`;
+      if (/prod/i.test(targetHost) || /prod/i.test(targetDbUrl) || (targetDbName && /prod/i.test(targetDbName))) {
+        const msg = `[Safety Guard] Designated test database (${targetHost}/${targetDbName}) matches production naming patterns (/prod/i). Testing against production endpoints is strictly forbidden.`;
         if (process.env.CI === 'true') throw new Error(`[CI Mandatory Failure] ${msg}`);
         console.warn(msg);
         return;
@@ -91,6 +101,21 @@ describe('Real PostgreSQL Destination Connector Integration', () => {
 
       if (!allowedDbHosts.includes(targetHost.toLowerCase())) {
         const msg = `[Safety Guard] Remote database host '${targetHost}' is not present in MIGRATIONGUARD_ALLOWED_TEST_DATABASE_HOSTS allowlist. Refusing execution.`;
+        if (process.env.CI === 'true') {
+          throw new Error(`[CI Mandatory Failure] ${msg}`);
+        }
+        console.warn(msg);
+        return;
+      }
+
+      // 4. Strict database name allowlist guard (if configured)
+      const allowedDbNames = (process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_NAMES || '')
+        .split(',')
+        .map((n) => n.trim().toLowerCase())
+        .filter(Boolean);
+
+      if (allowedDbNames.length > 0 && targetDbName && !allowedDbNames.includes(targetDbName.toLowerCase())) {
+        const msg = `[Safety Guard] Remote database name '${targetDbName}' is not present in MIGRATIONGUARD_ALLOWED_TEST_DATABASE_NAMES allowlist. Refusing execution.`;
         if (process.env.CI === 'true') {
           throw new Error(`[CI Mandatory Failure] ${msg}`);
         }
@@ -270,6 +295,24 @@ describe('PostgreSQL Destination Target Protection & Teardown Guards', () => {
     expect(isLoopbackHost('127.0.0.5')).toBe(true);
     expect(isLoopbackHost('::1')).toBe(true);
     expect(isLoopbackHost('[::1]')).toBe(true);
+  });
+
+  it('confirms connector-factory host classifiers match strict security boundaries', () => {
+    expect(connectorLoopback('0.0.0.0')).toBe(false);
+    expect(connectorLoopback('::')).toBe(false);
+    expect(connectorLoopback('localhost')).toBe(true);
+    expect(connectorLoopback('127.0.0.1')).toBe(true);
+    expect(connectorLoopback('::1')).toBe(true);
+
+    expect(connectorUnspecified('0.0.0.0')).toBe(true);
+    expect(connectorUnspecified('::')).toBe(true);
+    expect(connectorUnspecified('[::]')).toBe(true);
+    expect(connectorUnspecified('127.0.0.1')).toBe(false);
+
+    expect(connectorUnsafe('0.0.0.0')).toBe(true);
+    expect(connectorUnsafe('::')).toBe(true);
+    expect(connectorUnsafe('localhost')).toBe(true);
+    expect(connectorUnsafe('db-prod.internal.net')).toBe(false);
   });
 
   it('verifies teardown handles offline database without throwing unhandled DROP SCHEMA errors', async () => {

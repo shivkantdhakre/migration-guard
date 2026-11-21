@@ -6,7 +6,8 @@ import { PostgresStorageAdapters } from '../src/engine/postgres-storage-adapters
 import { MigrationBatch, SourceCursor } from '../src/types.js';
 
 describe('Checkpoint Concurrency & Atomic PostgreSQL Persistence (P0.1)', () => {
-  const dbUrl = process.env.DATABASE_URL;
+  const dbUrl =
+    process.env.MIGRATIONGUARD_TEST_DATABASE_URL || process.env.TEST_DATABASE_URL;
 
   const createBatch = (sequenceNo: number, batchKey: string, offset: number): MigrationBatch => ({
     id: `batch_id_${sequenceNo}`,
@@ -153,56 +154,61 @@ describe('Checkpoint Concurrency & Atomic PostgreSQL Persistence (P0.1)', () => 
     expect(preKillCheckpoint.committedSequences.length).toBe(committedBatches.length);
   });
 
-  it('runs concurrent PostgreSQL transactions with SELECT ... FOR UPDATE when DB is reachable', async () => {
+  it('runs concurrent PostgreSQL transactions with SELECT ... FOR UPDATE when DB is reachable', async (ctx) => {
     if (process.env.NODE_ENV === 'production') {
       throw new Error('[Safety Guard] Live integration tests must never run in production environment.');
     }
 
     if (!dbUrl) {
       if (process.env.CI === 'true') {
-        throw new Error('[CI Mandatory Failure] DATABASE_URL must be configured in CI environment.');
+        throw new Error('[CI Mandatory Failure] MIGRATIONGUARD_TEST_DATABASE_URL or TEST_DATABASE_URL must be configured in CI environment.');
       }
-      console.warn('[Notice] DATABASE_URL not set, skipping live PostgreSQL concurrency test.');
+      console.warn('[Notice] Designated test database URL not set, skipping live PostgreSQL concurrency test.');
+      ctx.skip();
       return;
     }
 
+    let parsed: URL;
+    try {
+      parsed = new URL(dbUrl);
+    } catch (err: any) {
+      throw new Error(`[Safety Guard] Invalid designated test database URL format: '${dbUrl}'.`);
+    }
+
+    const host = parsed.hostname;
+    const port = parsed.port || '5432';
+    const dbName = (parsed.pathname || '').replace(/^\//, '').split('?')[0];
+
     const isLocalOrCi = (() => {
-      try {
-        const parsed = new URL(dbUrl);
-        const host = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase().trim();
-        return (
-          host === 'localhost' ||
-          host === '127.0.0.1' ||
-          host === '::1' ||
-          host.startsWith('127.')
-        );
-      } catch {
-        return dbUrl.includes('localhost') || dbUrl.includes('127.0.0.1') || dbUrl.includes('::1');
-      }
+      const normalizedHost = host.replace(/^\[|\]$/g, '').toLowerCase().trim();
+      return (
+        normalizedHost === 'localhost' ||
+        normalizedHost === '127.0.0.1' ||
+        normalizedHost === '::1' ||
+        normalizedHost.startsWith('127.')
+      );
     })();
 
     if (!isLocalOrCi) {
-      let host = '';
-      try {
-        host = new URL(dbUrl).hostname;
-      } catch {
-        host = dbUrl;
-      }
-
-      if (/prod/i.test(host) || /prod/i.test(dbUrl)) {
-        const msg = `[Safety Guard] Checkpoint database URL (${host}) matches production naming patterns (/prod/i). Testing against production endpoints is strictly forbidden.`;
+      // 1. Strict production pattern guard
+      if (/prod/i.test(host) || /prod/i.test(dbUrl) || (dbName && /prod/i.test(dbName))) {
+        const msg = `[Safety Guard] Checkpoint database (${host}/${dbName}) matches production naming patterns (/prod/i). Testing against production endpoints is strictly forbidden.`;
         if (process.env.CI === 'true') throw new Error(`[CI Mandatory Failure] ${msg}`);
         console.warn(msg);
+        ctx.skip();
         return;
       }
 
+      // 2. Strict remote approval guard
       if (process.env.ALLOW_REMOTE_TEST_DB !== 'true') {
         const msg = '[Safety Guard] Refusing to run checkpoint integration test against remote database without ALLOW_REMOTE_TEST_DB=true.';
         if (process.env.CI === 'true') throw new Error(`[CI Mandatory Failure] ${msg}`);
         console.warn(msg);
+        ctx.skip();
         return;
       }
 
+      // 3. Strict host allowlist guard
       const allowedDbHosts = (process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_HOSTS || '')
         .split(',')
         .map((h) => h.trim().toLowerCase())
@@ -212,6 +218,21 @@ describe('Checkpoint Concurrency & Atomic PostgreSQL Persistence (P0.1)', () => 
         const msg = `[Safety Guard] Remote database host '${host}' is not present in MIGRATIONGUARD_ALLOWED_TEST_DATABASE_HOSTS allowlist. Refusing execution.`;
         if (process.env.CI === 'true') throw new Error(`[CI Mandatory Failure] ${msg}`);
         console.warn(msg);
+        ctx.skip();
+        return;
+      }
+
+      // 4. Strict database name allowlist guard (if configured)
+      const allowedDbNames = (process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_NAMES || '')
+        .split(',')
+        .map((n) => n.trim().toLowerCase())
+        .filter(Boolean);
+
+      if (allowedDbNames.length > 0 && dbName && !allowedDbNames.includes(dbName.toLowerCase())) {
+        const msg = `[Safety Guard] Remote database name '${dbName}' is not present in MIGRATIONGUARD_ALLOWED_TEST_DATABASE_NAMES allowlist. Refusing execution.`;
+        if (process.env.CI === 'true') throw new Error(`[CI Mandatory Failure] ${msg}`);
+        console.warn(msg);
+        ctx.skip();
         return;
       }
     }
@@ -220,6 +241,7 @@ describe('Checkpoint Concurrency & Atomic PostgreSQL Persistence (P0.1)', () => 
     const ssl = isLocalOrCi && !isProduction ? false : { rejectUnauthorized: true };
 
     const testSchema = `test_chk_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    let schemaCreated = false;
 
     // Attempt live connection and create dedicated test schema
     const testPool = new pg.Pool({ connectionString: dbUrl, ssl, max: 5 });
@@ -237,13 +259,14 @@ describe('Checkpoint Concurrency & Atomic PostgreSQL Persistence (P0.1)', () => 
           updated_at TIMESTAMPTZ DEFAULT NOW()
         )
       `);
+      schemaCreated = true;
     } catch (err: any) {
+      await testPool.end().catch(() => {});
       if (process.env.CI === 'true') {
-        await testPool.end().catch(() => {});
         throw new Error(`[CI Mandatory Failure] Live PostgreSQL is unreachable in CI: ${err.message}`);
       }
       console.warn('[Notice] Live database unreachable in sandbox, skipping live PostgreSQL test.');
-      await testPool.end().catch(() => {});
+      ctx.skip();
       return;
     }
 
@@ -301,16 +324,38 @@ describe('Checkpoint Concurrency & Atomic PostgreSQL Persistence (P0.1)', () => 
 
       console.log('[PostgreSQL Concurrency Integration] Verified atomic row-level locking with 2 independent pools on live PostgreSQL.');
     } finally {
-      // Safely drop ONLY the isolated test schema, never shared application tables
+      // Robust teardown capturing errors without swallowing
+      let cleanupError: any = null;
+      if (schemaCreated) {
+        try {
+          await testPool.query(`SET search_path TO public`);
+          await testPool.query(`DROP SCHEMA IF EXISTS "${testSchema}" CASCADE`);
+        } catch (err: any) {
+          cleanupError = err;
+        }
+      }
+
       try {
-        await testPool.query(`SET search_path TO public`);
-        await testPool.query(`DROP SCHEMA IF EXISTS "${testSchema}" CASCADE`);
-      } catch {}
-      await Promise.all([
-        pool1.end().catch(() => {}),
-        pool2.end().catch(() => {}),
-        testPool.end().catch(() => {}),
-      ]);
+        await pool1.end();
+      } catch (err: any) {
+        if (!cleanupError) cleanupError = err;
+      }
+
+      try {
+        await pool2.end();
+      } catch (err: any) {
+        if (!cleanupError) cleanupError = err;
+      }
+
+      try {
+        await testPool.end();
+      } catch (err: any) {
+        if (schemaCreated && !cleanupError) cleanupError = err;
+      }
+
+      if (cleanupError) {
+        throw cleanupError;
+      }
     }
   });
 });

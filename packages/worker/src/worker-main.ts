@@ -67,7 +67,7 @@ function loadEnv() {
 }
 loadEnv();
 
-const isLoopbackHost = (host: string): boolean => {
+export const isLoopbackHost = (host: string): boolean => {
   if (!host) return false;
   const normalized = host.replace(/^\[|\]$/g, '').toLowerCase().trim();
   return (
@@ -76,6 +76,16 @@ const isLoopbackHost = (host: string): boolean => {
     normalized === '::1' ||
     normalized.startsWith('127.')
   );
+};
+
+export const isUnspecifiedHost = (host: string): boolean => {
+  if (!host) return false;
+  const normalized = host.replace(/^\[|\]$/g, '').toLowerCase().trim();
+  return normalized === '0.0.0.0' || normalized === '::';
+};
+
+export const isUnsafeProductionHost = (host: string): boolean => {
+  return isLoopbackHost(host) || isUnspecifiedHost(host);
 };
 
 const allowInsecureTls = process.env.ALLOW_INSECURE_TLS === 'true';
@@ -111,7 +121,7 @@ const DATABASE_URL = (() => {
     } catch (err: any) {
       throw new Error(`[Worker Config] In production (NODE_ENV=production), DATABASE_URL is invalid: ${err.message}`);
     }
-    if (isLoopbackHost(hostname)) {
+    if (isUnsafeProductionHost(hostname)) {
       throw new Error(
         `[Worker Config] In production (NODE_ENV=production), DATABASE_URL must be explicitly configured and cannot use localhost or loopback (${hostname}).`,
       );
@@ -132,7 +142,7 @@ if (process.env.NODE_ENV === 'production') {
     } catch (err: any) {
       throw new Error(`[Worker Config] In production (NODE_ENV=production), REDIS_URL is invalid: ${err.message}`);
     }
-    if (isLoopbackHost(parsed.hostname)) {
+    if (isUnsafeProductionHost(parsed.hostname)) {
       throw new Error(
         `[Worker Config] In production (NODE_ENV=production), REDIS_URL cannot point to loopback/localhost (${parsed.hostname}).`,
       );
@@ -143,7 +153,7 @@ if (process.env.NODE_ENV === 'production') {
       );
     }
   } else {
-    if (!process.env.REDIS_HOST || isLoopbackHost(process.env.REDIS_HOST)) {
+    if (!process.env.REDIS_HOST || isUnsafeProductionHost(process.env.REDIS_HOST)) {
       throw new Error(
         `[Worker Config] In production (NODE_ENV=production), REDIS_URL or remote non-loopback REDIS_HOST must be explicitly configured.`,
       );

@@ -44,18 +44,22 @@ describe('Backend PostgreSQL Live Persistence Integration (Run 005.2 & Run 005.5
       return;
     }
 
-    // If target is remote, enforce production rejection, explicit approval, and host allowlist
+    // If target is remote, enforce production rejection, explicit approval, and database identity allowlists
     if (!isTargetLocal) {
       let host = '';
+      let port = '5432';
+      let dbName = '';
       try {
         const parsed = new URL(targetDbUrl);
         host = parsed.hostname;
+        port = parsed.port || '5432';
+        dbName = (parsed.pathname || '').replace(/^\//, '').split('?')[0];
       } catch {
         host = targetDbUrl;
       }
 
-      if (/prod/i.test(host) || /prod/i.test(targetDbUrl)) {
-        const msg = `[Safety Guard] Designated test database URL (${host}) matches production naming patterns (/prod/i). Testing against production endpoints is strictly forbidden.`;
+      if (/prod/i.test(host) || /prod/i.test(targetDbUrl) || (dbName && /prod/i.test(dbName))) {
+        const msg = `[Safety Guard] Designated test database (${host}/${dbName}) matches production naming patterns (/prod/i). Testing against production endpoints is strictly forbidden.`;
         if (isCi) throw new Error(`[CI Mandatory Failure] ${msg}`);
         console.warn(msg);
         return;
@@ -78,6 +82,20 @@ describe('Backend PostgreSQL Live Persistence Integration (Run 005.2 & Run 005.5
 
       if (!allowedDbHosts.includes(host.toLowerCase())) {
         const msg = `[Safety Guard] Remote database host '${host}' is not present in MIGRATIONGUARD_ALLOWED_TEST_DATABASE_HOSTS allowlist. Refusing execution.`;
+        if (isCi) {
+          throw new Error(`[CI Mandatory Failure] ${msg}`);
+        }
+        console.warn(msg);
+        return;
+      }
+
+      const allowedDbNames = (process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_NAMES || '')
+        .split(',')
+        .map((n) => n.trim().toLowerCase())
+        .filter(Boolean);
+
+      if (allowedDbNames.length > 0 && dbName && !allowedDbNames.includes(dbName.toLowerCase())) {
+        const msg = `[Safety Guard] Remote database name '${dbName}' is not present in MIGRATIONGUARD_ALLOWED_TEST_DATABASE_NAMES allowlist. Refusing execution.`;
         if (isCi) {
           throw new Error(`[CI Mandatory Failure] ${msg}`);
         }
@@ -133,12 +151,12 @@ describe('Backend PostgreSQL Live Persistence Integration (Run 005.2 & Run 005.5
     }
   });
 
-  it('connects to real PostgreSQL without in-memory fallback', async () => {
+  it('connects to real PostgreSQL without in-memory fallback', async (ctx) => {
     if (!dbService?.isDbConnected) {
       if (isCi) {
         throw new Error('[CI Mandatory Failure] Expected DatabaseService to be connected to live PostgreSQL in CI.');
       }
-      console.warn('[Notice] Skipping PostgreSQL live persistence test (DB offline).');
+      ctx.skip();
       return;
     }
 
@@ -147,8 +165,11 @@ describe('Backend PostgreSQL Live Persistence Integration (Run 005.2 & Run 005.5
     expect(isAlive).toBe(true);
   });
 
-  it('performs live schema migrations and table verification', async () => {
-    if (!dbService?.isDbConnected) return;
+  it('performs live schema migrations and table verification', async (ctx) => {
+    if (!dbService?.isDbConnected) {
+      ctx.skip();
+      return;
+    }
 
     // Verify critical tables exist in PostgreSQL
     const res = await dbService.query(
@@ -161,8 +182,11 @@ describe('Backend PostgreSQL Live Persistence Integration (Run 005.2 & Run 005.5
     expect(tableNames).toContain('connections');
   });
 
-  it('executes real transactional persistence and rollback on PostgreSQL', async () => {
-    if (!dbService?.isDbConnected) return;
+  it('executes real transactional persistence and rollback on PostgreSQL', async (ctx) => {
+    if (!dbService?.isDbConnected) {
+      ctx.skip();
+      return;
+    }
 
     // 1. Transactional Insert
     await dbService.transaction(async (client) => {

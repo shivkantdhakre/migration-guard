@@ -67,6 +67,11 @@ function loadEnv() {
 }
 loadEnv();
 
+const allowInsecureTls = process.env.ALLOW_INSECURE_TLS === 'true';
+if (allowInsecureTls && process.env.NODE_ENV === 'production') {
+  throw new Error('[Security] Insecure TLS (ALLOW_INSECURE_TLS=true) is strictly forbidden in production.');
+}
+
 const REDIS_URL = process.env.REDIS_URL;
 const REDIS_HOST = process.env.REDIS_HOST || 'localhost';
 const REDIS_PORT = parseInt(process.env.REDIS_PORT || '6379', 10);
@@ -112,11 +117,6 @@ let executionWorker: Worker | null = null;
 let isShuttingDown = false;
 let dbPool: pg.Pool | null = null;
 let redisClient: Redis | null = null;
-
-const allowInsecureTls = process.env.ALLOW_INSECURE_TLS === 'true';
-if (allowInsecureTls && process.env.NODE_ENV === 'production') {
-  throw new Error('[Security] Insecure TLS (ALLOW_INSECURE_TLS=true) is strictly forbidden in production.');
-}
 
 // Initialize persistent PostgreSQL connection pool and adapters
 dbPool = new pg.Pool({

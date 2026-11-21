@@ -6,7 +6,7 @@ describe('Strict TLS Verification Guard (P1.5)', () => {
   const repoRoot = path.resolve(__dirname, '../../..');
 
   it('strictly disallows ALLOW_INSECURE_TLS=true in production', () => {
-    const cmd = `node -e "process.env.NODE_ENV='production'; process.env.ALLOW_INSECURE_TLS='true'; require('./packages/worker/dist/worker-main.js');"`;
+    const cmd = `node -e "process.env.NODE_ENV='production'; process.env.ALLOW_INSECURE_TLS='true'; process.env.DATABASE_URL='postgresql://user:pass@remote:5432/db'; process.env.REDIS_URL='rediss://remote:15678'; require('./packages/worker/dist/worker-main.js');"`;
 
     let failed = false;
     let errorMessage = '';

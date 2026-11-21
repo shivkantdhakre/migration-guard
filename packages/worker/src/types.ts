@@ -167,6 +167,7 @@ export interface MigrationBatch {
 export interface RecordManifest {
   id: string;
   migrationRunId: string;
+  migrationBatchId?: string;
   batchKey: string;
   sourceObject: string;
   sourceKey: string;

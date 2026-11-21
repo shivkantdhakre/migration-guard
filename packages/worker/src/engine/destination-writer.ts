@@ -30,6 +30,7 @@ export interface DestinationWriterConfig {
 
 export interface ExecuteWriteOptions extends WriteOptions {
   migrationRunId: string;
+  migrationBatchId?: string;
   sourceObject: string;
 }
 
@@ -140,6 +141,7 @@ export class DestinationWriter {
 
         return {
           migrationRunId: options.migrationRunId,
+          migrationBatchId: options.migrationBatchId,
           batchKey: batch.batchKey,
           sourceObject: options.sourceObject,
           sourceKey: r.sourceKey,

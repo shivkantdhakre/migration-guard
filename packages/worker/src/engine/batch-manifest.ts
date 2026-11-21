@@ -56,6 +56,13 @@ export class InMemoryBatchManifestStorage implements BatchManifestStorageAdapter
 
   public async saveRecordManifests(manifests: RecordManifest[]): Promise<void> {
     for (const m of manifests) {
+      if (!m.destinationObject || m.destinationObject.trim() === '') {
+        throw new Error(`Record manifest for source key '${m.sourceKey}' is missing destinationObject.`);
+      }
+      if (!m.destinationKey || m.destinationKey.trim() === '') {
+        throw new Error(`Record manifest for source key '${m.sourceKey}' is missing destinationKey.`);
+      }
+
       // Deduplicate on (migrationRunId, sourceObject, sourceKey) across all batches in this run
       for (const [key, existingList] of this.recordManifests.entries()) {
         if (key.startsWith(`${m.migrationRunId}:`)) {
@@ -76,14 +83,23 @@ export class InMemoryBatchManifestStorage implements BatchManifestStorageAdapter
   }
 
   public async listRecordManifests(migrationRunId: string, batchKey?: string): Promise<RecordManifest[]> {
+    const sanitize = (m: RecordManifest): RecordManifest => {
+      if (!m.destinationObject || !m.destinationKey) {
+        throw new Error(
+          `[RecordManifest Integrity] Incomplete record manifest detected (id=${m.id}): destination_object or destination_key is null.`,
+        );
+      }
+      return { ...m };
+    };
+
     if (batchKey) {
       const key = `${migrationRunId}:${batchKey}`;
-      return (this.recordManifests.get(key) || []).map((m) => ({ ...m }));
+      return (this.recordManifests.get(key) || []).map(sanitize);
     }
     const all: RecordManifest[] = [];
     for (const [key, manifests] of this.recordManifests.entries()) {
       if (key.startsWith(`${migrationRunId}:`)) {
-        all.push(...manifests.map((m) => ({ ...m })));
+        all.push(...manifests.map(sanitize));
       }
     }
     return all;

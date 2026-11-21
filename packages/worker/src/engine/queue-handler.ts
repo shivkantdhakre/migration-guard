@@ -270,6 +270,7 @@ export class QueueHandler {
 
       const writeResult: WriteResult = await this.destinationWriter.write(transformedBatch, {
         migrationRunId: payload.migrationRunId,
+        migrationBatchId: batch.id,
         sourceObject: payload.sourceObject,
         writeMode: payload.writeMode,
         conflictColumns: payload.conflictColumns,
@@ -303,6 +304,13 @@ export class QueueHandler {
         recordsCommittedCount: writeResult.recordsWritten,
         cursorEnd,
       });
+
+      if (process.env.FAULT_INJECTION_EXIT_AFTER === 'CHECKPOINT_ADVANCED') {
+        console.error(
+          `[Fault Injection] Triggering abrupt simulated worker crash after CHECKPOINT_ADVANCED (batch: ${payload.batchKey})`,
+        );
+        process.exit(137);
+      }
 
       // 8. Commit batch manifest
       await this.manifestTracker.transitionState(

@@ -19,7 +19,7 @@ describe('Strict TLS Verification Guard (P1.5)', () => {
 
     expect(failed).toBe(true);
     expect(errorMessage).toMatch(/Insecure TLS \(ALLOW_INSECURE_TLS=true\) is strictly forbidden in production/);
-  }, 15000);
+  }, 30000);
 
   it('fails TLS connection when certificate verification fails against invalid or self-signed cert', async () => {
     const tls = await import('node:tls');

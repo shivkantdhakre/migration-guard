@@ -37,10 +37,12 @@ export class PostgresStorageAdapters
   async saveBatch(batch: MigrationBatch): Promise<void> {
     const query = `
       INSERT INTO migration_batches (
-        migration_run_id, batch_key, sequence_no, status,
+        id, migration_run_id, batch_key, sequence_no, status,
         records_read, records_written, records_skipped, records_failed,
         source_cursor_start, source_cursor_end, error_summary, started_at, completed_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+      ) VALUES (
+        COALESCE($1::uuid, gen_random_uuid()), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
+      )
       ON CONFLICT (migration_run_id, batch_key) DO UPDATE SET
         status = EXCLUDED.status,
         records_read = EXCLUDED.records_read,
@@ -49,10 +51,12 @@ export class PostgresStorageAdapters
         records_failed = EXCLUDED.records_failed,
         source_cursor_end = EXCLUDED.source_cursor_end,
         error_summary = EXCLUDED.error_summary,
-        completed_at = EXCLUDED.completed_at;
+        completed_at = EXCLUDED.completed_at
+      RETURNING id;
     `;
 
-    await this.pool.query(query, [
+    const res = await this.pool.query(query, [
+      batch.id || null,
       batch.migrationRunId,
       batch.batchKey,
       batch.sequenceNo,
@@ -67,6 +71,10 @@ export class PostgresStorageAdapters
       batch.startedAt ? new Date(batch.startedAt) : null,
       batch.completedAt ? new Date(batch.completedAt) : null,
     ]);
+
+    if (res?.rows?.length > 0 && res.rows[0].id) {
+      batch.id = res.rows[0].id;
+    }
   }
 
   async getBatch(migrationRunId: string, batchKey: string): Promise<MigrationBatch | null> {
@@ -126,26 +134,59 @@ export class PostgresStorageAdapters
   async saveRecordManifests(manifests: RecordManifest[]): Promise<void> {
     if (manifests.length === 0) return;
 
+    // Enforce non-null destination object and destination key
+    for (const m of manifests) {
+      if (!m.destinationObject || m.destinationObject.trim() === '') {
+        throw new Error(`Record manifest for source key '${m.sourceKey}' is missing destinationObject.`);
+      }
+      if (!m.destinationKey || m.destinationKey.trim() === '') {
+        throw new Error(`Record manifest for source key '${m.sourceKey}' is missing destinationKey.`);
+      }
+    }
+
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
+
+      // Pre-resolve batch IDs for manifests by batchKey
+      const batchKeyToId = new Map<string, string>();
+      const batchKeysToLookup = Array.from(
+        new Set(manifests.filter((m) => m.batchKey).map((m) => m.batchKey)),
+      );
+      if (batchKeysToLookup.length > 0) {
+        const batchRes = await client.query(
+          `SELECT id, batch_key FROM migration_batches WHERE migration_run_id = $1 AND batch_key = ANY($2::text[])`,
+          [manifests[0].migrationRunId, batchKeysToLookup],
+        );
+        for (const r of batchRes.rows) {
+          batchKeyToId.set(r.batch_key, r.id);
+        }
+      }
+
       const query = `
         INSERT INTO record_manifests (
-          migration_run_id, batch_key, source_object, source_key,
+          id, migration_run_id, migration_batch_id, batch_key, source_object, source_key,
           destination_object, destination_key, content_hash, status, error_details, created_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+        ) VALUES (
+          COALESCE($1::uuid, gen_random_uuid()), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW()
+        )
         ON CONFLICT (migration_run_id, source_object, source_key) DO UPDATE SET
+          migration_batch_id = COALESCE(EXCLUDED.migration_batch_id, record_manifests.migration_batch_id),
           batch_key = EXCLUDED.batch_key,
           destination_object = EXCLUDED.destination_object,
           destination_key = EXCLUDED.destination_key,
           content_hash = EXCLUDED.content_hash,
           status = EXCLUDED.status,
-          error_details = EXCLUDED.error_details;
+          error_details = EXCLUDED.error_details,
+          created_at = NOW();
       `;
 
       for (const m of manifests) {
+        const batchId = (m.batchKey ? batchKeyToId.get(m.batchKey) : null) || m.migrationBatchId || null;
         await client.query(query, [
+          m.id || null,
           m.migrationRunId,
+          batchId,
           m.batchKey || '',
           m.sourceObject,
           m.sourceKey,
@@ -178,19 +219,29 @@ export class PostgresStorageAdapters
     query += ` ORDER BY created_at ASC`;
     const res = await this.pool.query(query, params);
 
-    return res.rows.map((r) => ({
-      id: r.id,
-      migrationRunId: r.migration_run_id,
-      batchKey: r.batch_key || '',
-      sourceObject: r.source_object,
-      sourceKey: r.source_key,
-      destinationObject: r.destination_object || r.source_object,
-      destinationKey: r.destination_key || r.source_key,
-      contentHash: r.content_hash || undefined,
-      status: (r.status as 'WRITTEN' | 'SKIPPED' | 'FAILED') || 'WRITTEN',
-      error: r.error_details || undefined,
-      createdAt: r.created_at ? new Date(r.created_at).toISOString() : new Date().toISOString(),
-    }));
+    return res.rows.map((r) => {
+      // Reject or explicitly surface incomplete legacy records without fallback substitution
+      if (!r.destination_object || !r.destination_key) {
+        throw new Error(
+          `[RecordManifest Integrity] Incomplete record manifest detected (id=${r.id}): destination_object or destination_key is null. Source fallbacks are strictly prohibited.`,
+        );
+      }
+
+      return {
+        id: r.id,
+        migrationRunId: r.migration_run_id,
+        migrationBatchId: r.migration_batch_id || undefined,
+        batchKey: r.batch_key || '',
+        sourceObject: r.source_object,
+        sourceKey: r.source_key,
+        destinationObject: r.destination_object,
+        destinationKey: r.destination_key,
+        contentHash: r.content_hash || undefined,
+        status: (r.status as 'WRITTEN' | 'SKIPPED' | 'FAILED') || 'WRITTEN',
+        error: r.error_details || undefined,
+        createdAt: r.created_at ? new Date(r.created_at).toISOString() : new Date().toISOString(),
+      };
+    });
   }
 
   // --- CheckpointStorageAdapter ---

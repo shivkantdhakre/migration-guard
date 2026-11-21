@@ -698,13 +698,18 @@ async function startWorker() {
       {
         connection: redisClient,
         concurrency: 2,
-        stalledInterval: 3000,
-        lockDuration: 8000,
+        stalledInterval: parseInt(process.env.BULLMQ_STALLED_INTERVAL || '2000', 10),
+        lockDuration: parseInt(process.env.BULLMQ_LOCK_DURATION || '4000', 10),
+        maxStalledCount: 3,
       },
     );
 
     // 3. Wait until BullMQ Worker is ready
     await executionWorker.waitUntilReady();
+
+    executionWorker.on('stalled', (jobId) => {
+      console.log(`[Worker] BullMQ detected stalled job and recovered it for execution: ${jobId}`);
+    });
 
     executionWorker.on('completed', (job) => {
       console.log(`[Worker] Job ${job.id} marked COMPLETED.`);

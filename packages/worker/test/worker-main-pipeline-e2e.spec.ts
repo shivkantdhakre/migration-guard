@@ -20,7 +20,7 @@ const candidateSchemaPaths = [
 ];
 const schemaSqlPath = candidateSchemaPaths.find((p) => fs.existsSync(p));
 
-describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.14)', { timeout: 60000 }, () => {
+describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.15)', { timeout: 180000 }, () => {
   const dbUrl =
     process.env.MIGRATIONGUARD_TEST_DATABASE_URL ||
     process.env.TEST_DATABASE_URL ||
@@ -160,6 +160,8 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.14)', { t
     let workerChild2: ChildProcess | null = null;
     let workerChild3: ChildProcess | null = null;
     let workerChild4: ChildProcess | null = null;
+    let workerChild5: ChildProcess | null = null;
+    let workerChild6: ChildProcess | null = null;
     let queue: Queue | null = null;
 
     try {
@@ -186,19 +188,22 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.14)', { t
       expect(existingTables.has('id_mappings')).toBe(true);
 
       const manifestColsCheck = await testPool.query(`
-        SELECT column_name, column_default 
+        SELECT column_name, is_nullable 
         FROM information_schema.columns 
         WHERE table_name = 'record_manifests'
       `);
-      const manifestColNames = new Set(manifestColsCheck.rows.map((r) => r.column_name));
-      expect(manifestColNames.has('migration_run_id')).toBe(true);
-      expect(manifestColNames.has('batch_key')).toBe(true);
-      expect(manifestColNames.has('source_object')).toBe(true);
-      expect(manifestColNames.has('source_key')).toBe(true);
-      expect(manifestColNames.has('destination_object')).toBe(true);
-      expect(manifestColNames.has('destination_key')).toBe(true);
-      expect(manifestColNames.has('content_hash')).toBe(true);
-      expect(manifestColNames.has('status')).toBe(true);
+      const manifestColMap = new Map(manifestColsCheck.rows.map((r) => [r.column_name, r.is_nullable]));
+      expect(manifestColMap.has('migration_run_id')).toBe(true);
+      expect(manifestColMap.has('migration_batch_id')).toBe(true);
+      expect(manifestColMap.has('batch_key')).toBe(true);
+      expect(manifestColMap.has('source_object')).toBe(true);
+      expect(manifestColMap.has('source_key')).toBe(true);
+      expect(manifestColMap.has('destination_object')).toBe(true);
+      expect(manifestColMap.get('destination_object')).toBe('NO'); // NOT NULL
+      expect(manifestColMap.has('destination_key')).toBe(true);
+      expect(manifestColMap.get('destination_key')).toBe('NO'); // NOT NULL
+      expect(manifestColMap.has('content_hash')).toBe(true);
+      expect(manifestColMap.has('status')).toBe(true);
 
       // Create test-specific destination table matching canonical schema
       await testPool.query(`
@@ -216,7 +221,7 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.14)', { t
         );
       `);
 
-      // 5. Seed Deterministic MongoDB Source Collection (Section 3)
+      // 5. Seed Deterministic MongoDB Source Collection (Section 3) - 20 Documents
       const seedCustomers = Array.from({ length: 20 }, (_, idx) => {
         const num = idx + 1;
         const id = `cust_mongo_${String(num).padStart(4, '0')}`;
@@ -307,7 +312,7 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.14)', { t
         },
       });
 
-      // 8. Robust Standalone Worker Process Launcher with Confirmed Readiness (Section 5)
+      // 8. Robust Standalone Worker Process Launcher with Confirmed Readiness
       const startWorkerProcess = (extraEnv: Record<string, string> = {}): Promise<{ child: ChildProcess }> => {
         return new Promise((resolve, reject) => {
           const child = spawn(process.execPath, [workerMainPath], {
@@ -317,6 +322,8 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.14)', { t
               REDIS_URL: redisUrl,
               BULLMQ_QUEUE_NAME: testQueue,
               ENCRYPTION_KEY: encryptionKeyHex,
+              BULLMQ_LOCK_DURATION: '3500',
+              BULLMQ_STALLED_INTERVAL: '1500',
               RUN_STANDALONE_WORKER: 'true',
               NODE_ENV: 'test',
               ...extraEnv,
@@ -368,9 +375,10 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.14)', { t
       };
 
       // =========================================================================
-      // FAULT INJECTION PHASE 1: Abrupt Crash after DESTINATION_WRITTEN (Section 4)
+      // FAULT INJECTION PHASE 1: Abrupt Crash after DESTINATION_WRITTEN
+      // Genuine BullMQ Stalled-Job Recovery (Preserving original Job ID)
       // =========================================================================
-      console.log('\n--- PHASE 1: Fault Injection after DESTINATION_WRITTEN ---');
+      console.log('\n--- PHASE 1: Fault Injection after DESTINATION_WRITTEN & BullMQ Stalled Recovery ---');
 
       // Launch Worker 1 with simulated fault injection crash after destination write
       const w1 = await startWorkerProcess({
@@ -400,7 +408,7 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.14)', { t
 
       await queue.add('execute-batch', batch1Payload, {
         jobId: batch1Payload.jobId,
-        removeOnComplete: true,
+        removeOnComplete: false,
       });
 
       // Worker 1 must crash abruptly mid-flight while the job is active
@@ -419,33 +427,37 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.14)', { t
       );
       expect(midManifests1.rows[0].count).toBe(0);
 
+      // Wait for BullMQ lock duration to expire so the job can be recognized as stalled
+      console.log('[Worker E2E] Awaiting BullMQ lock expiration for stalled-job detection...');
+      await new Promise((r) => setTimeout(r, 4000));
+
       // Launch replacement Worker 2 (clean execution, no fault injection)
+      // DO NOT call queue.add() — let BullMQ stalled-job detector pick up original job!
       const w2 = await startWorkerProcess();
       workerChild2 = w2.child;
 
-      // Re-dispatch Batch 1 to simulate BullMQ redelivery after worker crash
-      await queue.add('execute-batch', batch1Payload, {
-        jobId: `job_${runId}_batch_0001_recovery`,
-        removeOnComplete: true,
-      });
-
-      // Poll for Batch 1 COMMITTED state
-      let batch1Committed = false;
+      // Poll until original job completes via BullMQ stalled-job recovery
+      let job1 = await queue.getJob(batch1Payload.jobId);
       const startWait1 = Date.now();
-      while (Date.now() - startWait1 < 15000) {
-        const bRes = await testPool.query(
-          `SELECT status, records_written FROM migration_batches WHERE migration_run_id = $1 AND batch_key = $2`,
-          [runId, 'batch_customers_0001'],
-        );
-        if (bRes.rows.length > 0 && bRes.rows[0].status === 'COMMITTED') {
-          batch1Committed = true;
+      while (Date.now() - startWait1 < 25000) {
+        if (job1 && (await job1.isCompleted())) {
           break;
         }
-        await new Promise((r) => setTimeout(r, 250));
+        await new Promise((r) => setTimeout(r, 400));
+        job1 = await queue.getJob(batch1Payload.jobId);
       }
-      expect(batch1Committed).toBe(true);
+      expect(job1).toBeDefined();
+      expect(await job1!.isCompleted()).toBe(true);
 
-      // Independent Assertions (Section 1):
+      // Verify Batch 1 reached COMMITTED in PostgreSQL database
+      const b1Res = await testPool.query(
+        `SELECT status, records_written FROM migration_batches WHERE migration_run_id = $1 AND batch_key = $2`,
+        [runId, 'batch_customers_0001'],
+      );
+      expect(b1Res.rows.length).toBe(1);
+      expect(b1Res.rows[0].status).toBe('COMMITTED');
+
+      // Independent Assertions (Phase 1):
       // Destination count: exactly 10 (idempotent upsert ensured ZERO duplicate records)
       const destCount1 = await testPool.query(`SELECT COUNT(*)::int as count FROM "${destTable}"`);
       expect(destCount1.rows[0].count).toBe(10);
@@ -474,23 +486,16 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.14)', { t
       expect(cp1.lastCommittedSequenceNo).toBe(1);
       expect(cp1.committedSequences).toEqual([1]);
 
-      // Verify genuine MongoDB data was extracted and written
-      const sampleDestRow = await testPool.query(
-        `SELECT id, name, email, tier FROM "${destTable}" WHERE id = 'cust_mongo_0001'`,
-      );
-      expect(sampleDestRow.rows.length).toBe(1);
-      expect(sampleDestRow.rows[0].name).toBe('Customer 1');
-      expect(sampleDestRow.rows[0].email).toBe('customer_1@example.com');
-
       // Stop Worker 2 before Phase 2
       workerChild2.kill('SIGTERM');
       await new Promise((r) => setTimeout(r, 1000));
       workerChild2 = null;
 
       // =========================================================================
-      // FAULT INJECTION PHASE 2: Abrupt Crash after MANIFEST_COMMITTED (Section 4)
+      // FAULT INJECTION PHASE 2: Abrupt Crash after MANIFEST_COMMITTED
+      // Genuine BullMQ Stalled-Job Recovery (Preserving original Job ID)
       // =========================================================================
-      console.log('\n--- PHASE 2: Fault Injection after MANIFEST_COMMITTED ---');
+      console.log('\n--- PHASE 2: Fault Injection after MANIFEST_COMMITTED & BullMQ Stalled Recovery ---');
 
       // Launch Worker 3 with simulated fault injection crash after manifest persistence
       const w3 = await startWorkerProcess({
@@ -502,7 +507,7 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.14)', { t
         workerChild3!.on('exit', (code) => resolve({ code }));
       });
 
-      // Dispatch Batch 2 (documents 11-20 from MongoDB)
+      // Dispatch Batch 2 (documents 11-15 from MongoDB)
       const batch2Payload = {
         jobId: `job_${runId}_batch_0002`,
         migrationRunId: runId,
@@ -512,7 +517,7 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.14)', { t
         destinationConnectionId: destConnId,
         sourceObject: sourceCollection,
         destinationObject: destTable,
-        batchSize: 10,
+        batchSize: 5,
         cursorStart: { lastId: 'cust_mongo_0010' },
         planVersionId: planVersionId,
         mappingVersionId: 'map-v1',
@@ -521,7 +526,7 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.14)', { t
 
       await queue.add('execute-batch', batch2Payload, {
         jobId: batch2Payload.jobId,
-        removeOnComplete: true,
+        removeOnComplete: false,
       });
 
       // Worker 3 must crash abruptly mid-flight after writing manifests but before checkpoint commit
@@ -530,33 +535,170 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.14)', { t
       workerChild3 = null;
       console.log('[Worker E2E] Confirmed Worker 3 terminated abruptly after MANIFEST_COMMITTED (exit code 137).');
 
+      // Verify intermediate crash state: records written (15 total), manifests written (15 total), checkpoint still 1
+      const midDest2 = await testPool.query(`SELECT COUNT(*)::int as count FROM "${destTable}"`);
+      expect(midDest2.rows[0].count).toBe(15);
+
+      const midCpRow2 = await testPool.query(
+        `SELECT source_boundary_json FROM migration_runs WHERE id = $1`,
+        [runId],
+      );
+      const midCp2 = midCpRow2.rows[0]?.source_boundary_json?.[sourceCollection];
+      expect(midCp2?.lastCommittedSequenceNo).toBe(1);
+
+      // Wait for BullMQ lock duration to expire so the job can be recognized as stalled
+      console.log('[Worker E2E] Awaiting BullMQ lock expiration for Phase 2 stalled-job detection...');
+      await new Promise((r) => setTimeout(r, 4000));
+
       // Launch replacement Worker 4 (clean execution)
+      // DO NOT call queue.add() — let BullMQ stalled-job detector pick up original job!
       const w4 = await startWorkerProcess();
       workerChild4 = w4.child;
 
-      // Redeliver Batch 2 to Worker 4
-      await queue.add('execute-batch', batch2Payload, {
-        jobId: `job_${runId}_batch_0002_recovery`,
-        removeOnComplete: true,
-      });
-
-      // Poll for Batch 2 COMMITTED state
-      let batch2Committed = false;
+      // Poll until original job 2 completes via BullMQ stalled-job recovery
+      let job2 = await queue.getJob(batch2Payload.jobId);
       const startWait2 = Date.now();
-      while (Date.now() - startWait2 < 15000) {
-        const bRes = await testPool.query(
-          `SELECT status, records_written FROM migration_batches WHERE migration_run_id = $1 AND batch_key = $2`,
-          [runId, 'batch_customers_0002'],
-        );
-        if (bRes.rows.length > 0 && bRes.rows[0].status === 'COMMITTED') {
-          batch2Committed = true;
+      while (Date.now() - startWait2 < 25000) {
+        if (job2 && (await job2.isCompleted())) {
           break;
         }
-        await new Promise((r) => setTimeout(r, 250));
+        await new Promise((r) => setTimeout(r, 400));
+        job2 = await queue.getJob(batch2Payload.jobId);
       }
-      expect(batch2Committed).toBe(true);
+      expect(job2).toBeDefined();
+      expect(await job2!.isCompleted()).toBe(true);
 
-      // Independent Assertions (Section 1):
+      // Verify Batch 2 reached COMMITTED in database
+      const b2Res = await testPool.query(
+        `SELECT status, records_written FROM migration_batches WHERE migration_run_id = $1 AND batch_key = $2`,
+        [runId, 'batch_customers_0002'],
+      );
+      expect(b2Res.rows.length).toBe(1);
+      expect(b2Res.rows[0].status).toBe('COMMITTED');
+
+      // Independent Assertions (Phase 2):
+      const destCount2 = await testPool.query(`SELECT COUNT(*)::int as count FROM "${destTable}"`);
+      expect(destCount2.rows[0].count).toBe(15);
+
+      const writtenManifestCount2 = await testPool.query(
+        `SELECT COUNT(*)::int as count FROM record_manifests WHERE migration_run_id = $1 AND status = 'WRITTEN'`,
+        [runId],
+      );
+      expect(writtenManifestCount2.rows[0].count).toBe(15);
+
+      const failedManifestCount2 = await testPool.query(
+        `SELECT COUNT(*)::int as count FROM record_manifests WHERE migration_run_id = $1 AND status = 'FAILED'`,
+        [runId],
+      );
+      expect(failedManifestCount2.rows[0].count).toBe(0);
+
+      // Checkpoint state: sequence 2 committed
+      const cpRow2 = await testPool.query(
+        `SELECT source_boundary_json FROM migration_runs WHERE id = $1`,
+        [runId],
+      );
+      const cp2 = cpRow2.rows[0]?.source_boundary_json?.[sourceCollection];
+      expect(cp2).toBeDefined();
+      expect(cp2.lastCommittedSequenceNo).toBe(2);
+      expect(cp2.committedSequences).toEqual([1, 2]);
+
+      // Stop Worker 4 before Phase 3
+      workerChild4.kill('SIGTERM');
+      await new Promise((r) => setTimeout(r, 1000));
+      workerChild4 = null;
+
+      // =========================================================================
+      // FAULT INJECTION PHASE 3: Abrupt Crash after CHECKPOINT_ADVANCED
+      // Boundary between checkpoint advancement and batch state commit
+      // Genuine BullMQ Stalled-Job Recovery
+      // =========================================================================
+      console.log('\n--- PHASE 3: Fault Injection after CHECKPOINT_ADVANCED & BullMQ Stalled Recovery ---');
+
+      // Launch Worker 5 with simulated fault injection crash after checkpoint advance
+      const w5 = await startWorkerProcess({
+        FAULT_INJECTION_EXIT_AFTER: 'CHECKPOINT_ADVANCED',
+      });
+      workerChild5 = w5.child;
+
+      const worker5ExitedPromise = new Promise<{ code: number | null }>((resolve) => {
+        workerChild5!.on('exit', (code) => resolve({ code }));
+      });
+
+      // Dispatch Batch 3 (documents 16-20 from MongoDB)
+      const batch3Payload = {
+        jobId: `job_${runId}_batch_0003`,
+        migrationRunId: runId,
+        batchKey: 'batch_customers_0003',
+        sequenceNo: 3,
+        sourceConnectionId: sourceConnId,
+        destinationConnectionId: destConnId,
+        sourceObject: sourceCollection,
+        destinationObject: destTable,
+        batchSize: 5,
+        cursorStart: { lastId: 'cust_mongo_0015' },
+        planVersionId: planVersionId,
+        mappingVersionId: 'map-v1',
+        writeMode: 'upsert',
+      };
+
+      await queue.add('execute-batch', batch3Payload, {
+        jobId: batch3Payload.jobId,
+        removeOnComplete: false,
+      });
+
+      // Worker 5 must crash abruptly after checkpoint advanced, before batch COMMITTED
+      const w5Exit = await worker5ExitedPromise;
+      expect(w5Exit.code).toBe(137);
+      workerChild5 = null;
+      console.log('[Worker E2E] Confirmed Worker 5 terminated abruptly after CHECKPOINT_ADVANCED (exit code 137).');
+
+      // Verify intermediate crash state:
+      // Checkpoint is already advanced to 3, but migration_batches status is still RUNNING
+      const midCpRow3 = await testPool.query(
+        `SELECT source_boundary_json FROM migration_runs WHERE id = $1`,
+        [runId],
+      );
+      const midCp3 = midCpRow3.rows[0]?.source_boundary_json?.[sourceCollection];
+      expect(midCp3).toBeDefined();
+      expect(midCp3.lastCommittedSequenceNo).toBe(3);
+
+      const midBatch3 = await testPool.query(
+        `SELECT status FROM migration_batches WHERE migration_run_id = $1 AND batch_key = $2`,
+        [runId, 'batch_customers_0003'],
+      );
+      expect(midBatch3.rows.length).toBe(1);
+      expect(midBatch3.rows[0].status).toBe('RUNNING'); // Not committed yet!
+
+      // Wait for BullMQ lock duration to expire so the job can be recognized as stalled
+      console.log('[Worker E2E] Awaiting BullMQ lock expiration for Phase 3 stalled-job detection...');
+      await new Promise((r) => setTimeout(r, 4000));
+
+      // Launch replacement Worker 6 (clean execution)
+      // DO NOT call queue.add() — let BullMQ stalled-job detector pick up original job!
+      const w6 = await startWorkerProcess();
+      workerChild6 = w6.child;
+
+      // Poll until original job 3 completes via BullMQ stalled-job recovery
+      let job3 = await queue.getJob(batch3Payload.jobId);
+      const startWait3 = Date.now();
+      while (Date.now() - startWait3 < 25000) {
+        if (job3 && (await job3.isCompleted())) {
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 400));
+        job3 = await queue.getJob(batch3Payload.jobId);
+      }
+      expect(job3).toBeDefined();
+      expect(await job3!.isCompleted()).toBe(true);
+
+      // Verify Batch 3 reached COMMITTED in database
+      const b3Res = await testPool.query(
+        `SELECT status, records_written FROM migration_batches WHERE migration_run_id = $1 AND batch_key = $2`,
+        [runId, 'batch_customers_0003'],
+      );
+      expect(b3Res.rows.length).toBe(1);
+      expect(b3Res.rows[0].status).toBe('COMMITTED');
+
       // Total destination count: exactly 20 records (ZERO duplicate records, ZERO lost records)
       const totalDestCount = await testPool.query(`SELECT COUNT(*)::int as count FROM "${destTable}"`);
       expect(totalDestCount.rows[0].count).toBe(20);
@@ -575,20 +717,20 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.14)', { t
       );
       expect(totalFailedManifests.rows[0].count).toBe(0);
 
-      // Checkpoint state: sequence 2 committed
-      const cpRow2 = await testPool.query(
+      // Checkpoint state: sequence 3 committed, total sequences [1, 2, 3]
+      const cpRow3 = await testPool.query(
         `SELECT source_boundary_json FROM migration_runs WHERE id = $1`,
         [runId],
       );
-      const cp2 = cpRow2.rows[0]?.source_boundary_json?.[sourceCollection];
-      expect(cp2).toBeDefined();
-      expect(cp2.lastCommittedSequenceNo).toBe(2);
-      expect(cp2.committedSequences).toEqual([1, 2]);
+      const cp3 = cpRow3.rows[0]?.source_boundary_json?.[sourceCollection];
+      expect(cp3).toBeDefined();
+      expect(cp3.lastCommittedSequenceNo).toBe(3);
+      expect(cp3.committedSequences).toEqual([1, 2, 3]);
 
       // =========================================================================
-      // PHASE 3: Committed-Batch Redelivery Idempotency Test (Section 4)
+      // PHASE 4: Committed-Batch Redelivery Idempotency Test
       // =========================================================================
-      console.log('\n--- PHASE 3: Committed-Batch Redelivery Idempotency Test ---');
+      console.log('\n--- PHASE 4: Committed-Batch Redelivery Idempotency Test ---');
 
       await queue.add('execute-batch', batch1Payload, {
         jobId: `job_${runId}_batch_0001_idempotency_check`,
@@ -612,15 +754,96 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.14)', { t
         [runId],
       );
       const cpFinal = cpRowFinal.rows[0]?.source_boundary_json?.[sourceCollection];
-      expect(cpFinal.lastCommittedSequenceNo).toBe(2);
+      expect(cpFinal.lastCommittedSequenceNo).toBe(3);
 
-      console.log('[Worker Main E2E] Pipeline verified with genuine MongoDB source, real PostgreSQL destination, mid-flight fault injection, and zero duplicate records.');
+      // =========================================================================
+      // PHASE 5: Deep Data-Level Validation (Requirement 5)
+      // 1-to-1 comparison of every seeded MongoDB document against PostgreSQL
+      // =========================================================================
+      console.log('\n--- PHASE 5: Deep Data-Level Validation (MongoDB -> PostgreSQL 1-to-1) ---');
+
+      // 1. Fetch all 20 rows from PostgreSQL destination table
+      const destResult = await testPool.query(
+        `SELECT id, name, email, phone, tier, status, metadata FROM "${destTable}" ORDER BY id ASC`,
+      );
+      expect(destResult.rows.length).toBe(20);
+
+      const destMap = new Map(destResult.rows.map((r) => [r.id, r]));
+
+      // Verify every single seeded MongoDB customer document exists exactly once and matches data fields
+      for (const seed of seedCustomers) {
+        const destRow = destMap.get(seed._id);
+        expect(destRow).toBeDefined();
+        expect(destRow.id).toBe(seed._id);
+        expect(destRow.name).toBe(seed.name);
+        expect(destRow.email).toBe(seed.email);
+        expect(destRow.phone).toBe(seed.phone);
+        expect(destRow.tier).toBe(seed.tier);
+        expect(destRow.status).toBe(seed.status);
+
+        const rowMeta = typeof destRow.metadata === 'string' ? JSON.parse(destRow.metadata) : destRow.metadata;
+        expect(rowMeta).toBeDefined();
+        expect(rowMeta.seededBy).toBe(seed.metadata.seededBy);
+        expect(rowMeta.sequence).toBe(seed.metadata.sequence);
+      }
+
+      // 2. Verify id_mappings table: all 20 records mapped with correct source & destination coordinates
+      const idMapResult = await testPool.query(
+        `SELECT source_key, destination_key, source_object, destination_object 
+         FROM id_mappings 
+         WHERE migration_run_id = $1 
+         ORDER BY source_key ASC`,
+        [runId],
+      );
+      expect(idMapResult.rows.length).toBe(20);
+      const idMapKeys = new Set(idMapResult.rows.map((r) => r.source_key));
+      expect(idMapKeys.size).toBe(20);
+
+      for (const mapRow of idMapResult.rows) {
+        expect(mapRow.source_object).toBe(sourceCollection);
+        expect(mapRow.destination_object).toBe(destTable);
+        expect(mapRow.destination_key).toBe(mapRow.source_key);
+        expect(mapRow.source_key.startsWith('cust_mongo_')).toBe(true);
+      }
+
+      // 3. Verify record_manifests table: all 20 manifests are WRITTEN, have SHA256 content hashes,
+      // non-null destination coordinates, and valid migration_batch_id foreign keys
+      const manifestResult = await testPool.query(
+        `SELECT m.source_key, m.destination_key, m.source_object, m.destination_object, 
+                m.status, m.content_hash, m.migration_batch_id, b.batch_key
+         FROM record_manifests m
+         JOIN migration_batches b ON b.id = m.migration_batch_id
+         WHERE m.migration_run_id = $1 
+         ORDER BY m.source_key ASC`,
+        [runId],
+      );
+      expect(manifestResult.rows.length).toBe(20);
+
+      for (const mRow of manifestResult.rows) {
+        expect(mRow.status).toBe('WRITTEN');
+        expect(mRow.source_object).toBe(sourceCollection);
+        expect(mRow.destination_object).toBe(destTable);
+        expect(mRow.destination_key).toBe(mRow.source_key);
+        expect(mRow.migration_batch_id).toBeDefined();
+        expect(typeof mRow.migration_batch_id).toBe('string');
+        expect(mRow.batch_key).toMatch(/^batch_customers_000[123]$/);
+        expect(mRow.content_hash).toMatch(/^sha256:.+$/);
+      }
+
+      // 4. Verify Final Checkpoint Progression
+      expect(cpFinal.lastCommittedSequenceNo).toBe(3);
+      expect(cpFinal.committedSequences).toEqual([1, 2, 3]);
+      expect(cpFinal.totalRecordsCommitted).toBe(20);
+
+      console.log('[Worker Main E2E] Pipeline fully verified: genuine BullMQ stalled-job recovery, crash boundary at CHECKPOINT_ADVANCED, and 1-to-1 data fidelity.');
     } finally {
       // Teardown: terminate all workers, drain queue, clean up database and mongo
       if (workerChild1) workerChild1.kill('SIGKILL');
       if (workerChild2) workerChild2.kill('SIGKILL');
       if (workerChild3) workerChild3.kill('SIGKILL');
       if (workerChild4) workerChild4.kill('SIGKILL');
+      if (workerChild5) workerChild5.kill('SIGKILL');
+      if (workerChild6) workerChild6.kill('SIGKILL');
 
       if (queue) {
         await queue.drain().catch(() => {});
@@ -638,8 +861,8 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.14)', { t
       }
       if (testPool) {
         await testPool.query(`DROP TABLE IF EXISTS "${destTable}" CASCADE`).catch(() => {});
-        await testPool.query(`DELETE FROM migration_batches WHERE migration_run_id = $1`, [runId]).catch(() => {});
         await testPool.query(`DELETE FROM record_manifests WHERE migration_run_id = $1`, [runId]).catch(() => {});
+        await testPool.query(`DELETE FROM migration_batches WHERE migration_run_id = $1`, [runId]).catch(() => {});
         await testPool.query(`DELETE FROM id_mappings WHERE migration_run_id = $1`, [runId]).catch(() => {});
         await testPool.query(`DELETE FROM migration_runs WHERE id = $1`, [runId]).catch(() => {});
         await testPool.query(`DELETE FROM migration_plan_versions WHERE id = $1`, [planVersionId]).catch(() => {});

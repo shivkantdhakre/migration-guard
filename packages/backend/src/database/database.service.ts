@@ -185,6 +185,8 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       'migration_batches',
       'id_mappings',
       'record_manifests',
+      'record_manifest_historical_archive',
+      'manifest_reconciliation_reports',
       'validation_runs',
       'validation_check_results',
       'discrepancies',
@@ -224,6 +226,134 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       console.error('[DatabaseService] Migration failed:', err.message);
       throw err;
     }
+  }
+
+  /**
+   * Run 005.15: Safe Manifest Uniqueness Upgrade & Historical Reconciliation (PRESERVE_LATEST_AND_ARCHIVE_SUPERSEDED)
+   * Detects duplicate (migration_run_id, source_object, source_key) manifest identities,
+   * generates an explicit reconciliation report, archives historical evidence without data loss,
+   * and ensures constraint safety.
+   */
+  public async reconcileManifestDuplicates(migrationRunId?: string): Promise<{
+    duplicatesDetected: number;
+    distinctIdentitiesAffected: number;
+    archivedCount: number;
+    reportId?: string;
+    details: any[];
+  }> {
+    if (!this.isConnected || !this.pool) {
+      return {
+        duplicatesDetected: 0,
+        distinctIdentitiesAffected: 0,
+        archivedCount: 0,
+        details: [],
+      };
+    }
+
+    return this.transaction(async (client) => {
+      // 1. Detect existing duplicate identities
+      let findDupsQuery = `
+        SELECT migration_run_id, source_object, source_key, COUNT(*) as dup_count
+        FROM record_manifests
+      `;
+      const queryParams: any[] = [];
+      if (migrationRunId) {
+        findDupsQuery += ` WHERE migration_run_id = $1`;
+        queryParams.push(migrationRunId);
+      }
+      findDupsQuery += `
+        GROUP BY migration_run_id, source_object, source_key
+        HAVING COUNT(*) > 1
+      `;
+
+      const dupsRes = await client.query(findDupsQuery, queryParams);
+      const distinctIdentitiesAffected = dupsRes.rows.length;
+      if (distinctIdentitiesAffected === 0) {
+        return {
+          duplicatesDetected: 0,
+          distinctIdentitiesAffected: 0,
+          archivedCount: 0,
+          details: [],
+        };
+      }
+
+      const totalDuplicates = dupsRes.rows.reduce(
+        (acc: number, row: any) => acc + (parseInt(row.dup_count, 10) - 1),
+        0,
+      );
+
+      // 2. Archive superseded duplicates into record_manifest_historical_archive
+      const archiveQuery = `
+        WITH ranked_manifests AS (
+          SELECT 
+            rm.*,
+            ROW_NUMBER() OVER (
+              PARTITION BY migration_run_id, source_object, source_key
+              ORDER BY 
+                CASE status WHEN 'WRITTEN' THEN 1 WHEN 'SKIPPED' THEN 2 ELSE 3 END,
+                created_at DESC,
+                id DESC
+            ) as rank_order
+          FROM record_manifests rm
+          WHERE (migration_run_id, source_object, source_key) IN (
+            SELECT migration_run_id, source_object, source_key
+            FROM record_manifests
+            ${migrationRunId ? 'WHERE migration_run_id = $1' : ''}
+            GROUP BY migration_run_id, source_object, source_key
+            HAVING COUNT(*) > 1
+          )
+        ),
+        archived_rows AS (
+          INSERT INTO record_manifest_historical_archive (
+            original_manifest_id, migration_run_id, migration_batch_id, batch_key,
+            source_object, source_key, destination_object, destination_key,
+            content_hash, status, error_details, reconciliation_reason, original_created_at
+          )
+          SELECT 
+            id, migration_run_id, migration_batch_id, batch_key,
+            source_object, source_key, destination_object, destination_key,
+            content_hash, status, error_details, 'DUPLICATE_SUPERSEDED_HISTORICAL_EVIDENCE', created_at
+          FROM ranked_manifests
+          WHERE rank_order > 1
+          RETURNING original_manifest_id, migration_run_id, source_object, source_key
+        )
+        DELETE FROM record_manifests
+        WHERE id IN (SELECT original_manifest_id FROM archived_rows)
+        RETURNING id, migration_run_id, source_object, source_key;
+      `;
+
+      const archiveRes = await client.query(archiveQuery, queryParams);
+      const archivedCount = archiveRes.rows.length;
+
+      // 3. Record explicit reconciliation report in manifest_reconciliation_reports
+      const reportRes = await client.query(
+        `INSERT INTO manifest_reconciliation_reports (
+           migration_run_id, total_duplicates_detected, distinct_identities_affected,
+           archived_record_count, reconciliation_policy, report_json, status
+         ) VALUES ($1, $2, $3, $4, 'PRESERVE_LATEST_AND_ARCHIVE_SUPERSEDED', $5, 'COMPLETED')
+         RETURNING id`,
+        [
+          migrationRunId || null,
+          totalDuplicates,
+          distinctIdentitiesAffected,
+          archivedCount,
+          JSON.stringify({
+            timestamp: new Date().toISOString(),
+            distinctIdentitiesCount: distinctIdentitiesAffected,
+            reconciledRecords: archiveRes.rows,
+            policy: 'PRESERVE_LATEST_AND_ARCHIVE_SUPERSEDED',
+          }),
+        ],
+      );
+
+      return {
+        duplicatesDetected: totalDuplicates,
+        distinctIdentitiesAffected,
+        archivedCount,
+        reportId: reportRes.rows[0]?.id,
+        details: archiveRes.rows,
+      };
+    });
   }
 
   /**

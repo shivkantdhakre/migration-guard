@@ -1,4 +1,8 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi, beforeAll, afterAll } from 'vitest';
+import pg from 'pg';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import { BatchManifestTracker, InMemoryBatchManifestStorage } from '../src/engine/batch-manifest.js';
 import { PostgresStorageAdapters } from '../src/engine/postgres-storage-adapters.js';
 import { BatchStatus, RecordManifest } from '../src/types.js';
@@ -265,8 +269,10 @@ describe('Batch Manifest & State Machine (FR-EXEC-003)', () => {
     ]);
 
     expect(executedQueries[0].text).toBe('BEGIN');
-    expect(executedQueries[1].text).toContain('ON CONFLICT (migration_run_id, source_object, source_key) DO UPDATE SET');
-    expect(executedQueries[2].text).toBe('COMMIT');
+    const insertQuery = executedQueries.find((q) => q.text.includes('INSERT INTO record_manifests'));
+    expect(insertQuery).toBeDefined();
+    expect(insertQuery!.text).toContain('ON CONFLICT (migration_run_id, source_object, source_key) DO UPDATE SET');
+    expect(executedQueries[executedQueries.length - 1].text).toBe('COMMIT');
     expect(isReleased).toBe(true);
 
     // 2. Failed transactional save (triggers ROLLBACK)
@@ -332,5 +338,255 @@ describe('Batch Manifest & State Machine (FR-EXEC-003)', () => {
     expect(manifests[0].destinationKey).toBe('cust_999');
     expect(manifests[0].contentHash).toBe('sha256:abc1234');
     expect(manifests[0].status).toBe('WRITTEN');
+  });
+});
+
+describe('PostgresStorageAdapters Real PostgreSQL Integration (Run 005.15)', () => {
+  const dbUrl =
+    process.env.MIGRATIONGUARD_TEST_DATABASE_URL ||
+    process.env.TEST_DATABASE_URL ||
+    (process.env.CI === 'true' ? process.env.DATABASE_URL : undefined);
+
+  let pool: pg.Pool | null = null;
+  const isCi = process.env.CI === 'true';
+
+  const testSuffix = `${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+  const workspaceId = crypto.randomUUID();
+  const projectId = crypto.randomUUID();
+  const planId = crypto.randomUUID();
+  const planVersionId = crypto.randomUUID();
+  const runId = crypto.randomUUID();
+  const batch1Id = crypto.randomUUID();
+  const batch2Id = crypto.randomUUID();
+  const sourceConnId = crypto.randomUUID();
+  const destConnId = crypto.randomUUID();
+
+  beforeAll(async () => {
+    if (!dbUrl) {
+      if (isCi) throw new Error('[CI Mandatory Failure] Test database URL required in CI.');
+      console.warn('[Notice] Test database URL not configured, skipping live manifest integration.');
+      return;
+    }
+
+    pool = new pg.Pool({ connectionString: dbUrl, max: 5 });
+    try {
+      await pool.query('SELECT 1');
+    } catch (err: any) {
+      if (isCi) throw new Error(`[CI Mandatory Failure] PostgreSQL unreachable in CI: ${err.message}`);
+      pool = null;
+      return;
+    }
+
+    // Apply schema
+    const candidatePaths = [
+      path.resolve(__dirname, '../../backend/src/database/schema.sql'),
+      path.resolve(__dirname, '../../../packages/backend/src/database/schema.sql'),
+      path.resolve(process.cwd(), 'packages/backend/src/database/schema.sql'),
+    ];
+    const schemaPath = candidatePaths.find((p) => fs.existsSync(p));
+    if (schemaPath) {
+      const sql = fs.readFileSync(schemaPath, 'utf8');
+      await pool.query(sql);
+    }
+
+    // Seed fixtures
+    await pool.query(`INSERT INTO workspaces (id, name, slug) VALUES ($1, $2, $3)`, [
+      workspaceId,
+      `Manifest Rel WS ${testSuffix}`,
+      `ws-mrel-${testSuffix}`,
+    ]);
+    await pool.query(`INSERT INTO projects (id, workspace_id, name) VALUES ($1, $2, 'Proj')`, [
+      projectId,
+      workspaceId,
+    ]);
+    await pool.query(
+      `INSERT INTO connections (id, workspace_id, name, engine, connection_role, status)
+       VALUES ($1, $2, 'Src', 'MONGODB', 'SOURCE', 'HEALTHY'),
+              ($3, $2, 'Dst', 'POSTGRESQL', 'DESTINATION', 'HEALTHY')`,
+      [sourceConnId, workspaceId, destConnId],
+    );
+    await pool.query(
+      `INSERT INTO migration_plans (id, workspace_id, project_id, name) VALUES ($1, $2, $3, 'Plan')`,
+      [planId, workspaceId, projectId],
+    );
+    await pool.query(
+      `INSERT INTO migration_plan_versions (id, plan_id, source_connection_id, destination_connection_id, plan_hash)
+       VALUES ($1, $2, $3, $4, 'hash_mrel')`,
+      [planVersionId, planId, sourceConnId, destConnId],
+    );
+    await pool.query(
+      `INSERT INTO migration_runs (id, workspace_id, project_id, plan_version_id, status)
+       VALUES ($1, $2, $3, $4, 'RUNNING')`,
+      [runId, workspaceId, projectId, planVersionId],
+    );
+    await pool.query(
+      `INSERT INTO migration_batches (id, migration_run_id, batch_key, sequence_no, status)
+       VALUES ($1, $2, 'batch_rel_001', 1, 'COMMITTED'),
+              ($3, $2, 'batch_rel_002', 2, 'COMMITTED')`,
+      [batch1Id, runId, batch2Id],
+    );
+  });
+
+  afterAll(async () => {
+    if (pool) {
+      await pool.query(`DELETE FROM record_manifests WHERE migration_run_id = $1`, [runId]).catch(() => {});
+      await pool.query(`DELETE FROM migration_batches WHERE migration_run_id = $1`, [runId]).catch(() => {});
+      await pool.query(`DELETE FROM migration_runs WHERE id = $1`, [runId]).catch(() => {});
+      await pool.query(`DELETE FROM migration_plan_versions WHERE id = $1`, [planVersionId]).catch(() => {});
+      await pool.query(`DELETE FROM migration_plans WHERE id = $1`, [planId]).catch(() => {});
+      await pool.query(`DELETE FROM connections WHERE id IN ($1, $2)`, [sourceConnId, destConnId]).catch(() => {});
+      await pool.query(`DELETE FROM projects WHERE id = $1`, [projectId]).catch(() => {});
+      await pool.query(`DELETE FROM workspaces WHERE id = $1`, [workspaceId]).catch(() => {});
+      await pool.end().catch(() => {});
+    }
+  });
+
+  it('enforces foreign key constraint when saving manifest with non-existent migration_batch_id', async (ctx) => {
+    if (!pool) return ctx.skip();
+    const adapter = new PostgresStorageAdapters(pool);
+
+    const nonExistentBatchId = '00000000-0000-0000-0000-000000000099';
+    await expect(
+      adapter.saveRecordManifests([
+        {
+          id: crypto.randomUUID(),
+          migrationRunId: runId,
+          migrationBatchId: nonExistentBatchId,
+          batchKey: 'batch_invalid',
+          sourceObject: 'customers',
+          sourceKey: 'c_fk_fail',
+          destinationObject: 'customers_dest',
+          destinationKey: 'c_fk_fail',
+          status: 'WRITTEN',
+          createdAt: new Date().toISOString(),
+        },
+      ]),
+    ).rejects.toThrow(/violates foreign key constraint/);
+  });
+
+  it('persists migration_batch_id relationship, preserves batch-key filtering, and round-trips all fields', async (ctx) => {
+    if (!pool) return ctx.skip();
+    const adapter = new PostgresStorageAdapters(pool);
+
+    await adapter.saveRecordManifests([
+      {
+        id: crypto.randomUUID(),
+        migrationRunId: runId,
+        migrationBatchId: batch1Id,
+        batchKey: 'batch_rel_001',
+        sourceObject: 'customers',
+        sourceKey: 'cust_rel_1',
+        destinationObject: 'customers_dest',
+        destinationKey: 'cust_rel_1',
+        contentHash: 'hash_rel_1',
+        status: 'WRITTEN',
+        createdAt: new Date().toISOString(),
+      },
+      {
+        id: crypto.randomUUID(),
+        migrationRunId: runId,
+        migrationBatchId: batch2Id,
+        batchKey: 'batch_rel_002',
+        sourceObject: 'customers',
+        sourceKey: 'cust_rel_2',
+        destinationObject: 'customers_dest',
+        destinationKey: 'cust_rel_2',
+        contentHash: 'hash_rel_2',
+        status: 'WRITTEN',
+        createdAt: new Date().toISOString(),
+      },
+    ]);
+
+    // Batch filtering check
+    const batch1Manifests = await adapter.listRecordManifests(runId, 'batch_rel_001');
+    expect(batch1Manifests.length).toBe(1);
+    expect(batch1Manifests[0].sourceKey).toBe('cust_rel_1');
+    expect(batch1Manifests[0].migrationBatchId).toBe(batch1Id);
+    expect(batch1Manifests[0].destinationObject).toBe('customers_dest');
+
+    const allManifests = await adapter.listRecordManifests(runId);
+    expect(allManifests.length).toBe(2);
+
+    // Upsert relationship maintenance check: update without specifying migrationBatchId preserves existing batchId
+    await adapter.saveRecordManifests([
+      {
+        id: crypto.randomUUID(),
+        migrationRunId: runId,
+        batchKey: 'batch_rel_001',
+        sourceObject: 'customers',
+        sourceKey: 'cust_rel_1',
+        destinationObject: 'customers_dest',
+        destinationKey: 'cust_rel_1',
+        contentHash: 'hash_rel_1_updated',
+        status: 'WRITTEN',
+        createdAt: new Date().toISOString(),
+      },
+    ]);
+
+    const updatedManifests = await adapter.listRecordManifests(runId, 'batch_rel_001');
+    expect(updatedManifests.length).toBe(1);
+    expect(updatedManifests[0].contentHash).toBe('hash_rel_1_updated');
+    expect(updatedManifests[0].migrationBatchId).toBe(batch1Id); // Preserved!
+  });
+
+  it('rejects manifests with null or missing destinationObject or destinationKey', async (ctx) => {
+    if (!pool) return ctx.skip();
+    const adapter = new PostgresStorageAdapters(pool);
+
+    await expect(
+      adapter.saveRecordManifests([
+        {
+          id: crypto.randomUUID(),
+          migrationRunId: runId,
+          batchKey: 'batch_rel_001',
+          sourceObject: 'customers',
+          sourceKey: 'cust_null_dest_obj',
+          destinationObject: '', // Invalid empty
+          destinationKey: 'valid_key',
+          status: 'WRITTEN',
+          createdAt: new Date().toISOString(),
+        },
+      ]),
+    ).rejects.toThrow(/missing destinationObject/);
+
+    await expect(
+      adapter.saveRecordManifests([
+        {
+          id: crypto.randomUUID(),
+          migrationRunId: runId,
+          batchKey: 'batch_rel_001',
+          sourceObject: 'customers',
+          sourceKey: 'cust_null_dest_key',
+          destinationObject: 'valid_obj',
+          destinationKey: '', // Invalid empty
+          status: 'WRITTEN',
+          createdAt: new Date().toISOString(),
+        },
+      ]),
+    ).rejects.toThrow(/missing destinationKey/);
+  });
+
+  it('rejects incomplete legacy records in listRecordManifests without fallback substitution', async (ctx) => {
+    if (!pool) return ctx.skip();
+    const adapter = new PostgresStorageAdapters(pool);
+
+    // Temporarily allow null by raw query to simulate an incomplete legacy row
+    const corruptId = crypto.randomUUID();
+    await pool.query(`ALTER TABLE record_manifests ALTER COLUMN destination_object DROP NOT NULL`);
+    await pool.query(
+      `INSERT INTO record_manifests (
+         id, migration_run_id, migration_batch_id, batch_key, source_object, source_key,
+         destination_object, destination_key, status
+       ) VALUES ($1, $2, $3, 'batch_corrupt', 'customers', 'c_corrupt', NULL, 'cust_corrupt', 'WRITTEN')`,
+      [corruptId, runId, batch1Id],
+    );
+
+    await expect(adapter.listRecordManifests(runId, 'batch_corrupt')).rejects.toThrow(
+      /Incomplete record manifest detected/,
+    );
+
+    // Cleanup corrupt row and restore NOT NULL constraint
+    await pool.query(`DELETE FROM record_manifests WHERE id = $1`, [corruptId]);
+    await pool.query(`ALTER TABLE record_manifests ALTER COLUMN destination_object SET NOT NULL`);
   });
 });

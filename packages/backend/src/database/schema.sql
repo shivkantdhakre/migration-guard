@@ -206,23 +206,157 @@ CREATE TABLE IF NOT EXISTS record_manifests (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     migration_run_id UUID NOT NULL REFERENCES migration_runs(id) ON DELETE CASCADE,
     migration_batch_id UUID REFERENCES migration_batches(id) ON DELETE CASCADE,
+    batch_key TEXT NOT NULL,
+    source_object TEXT NOT NULL,
+    source_key TEXT NOT NULL,
+    destination_object TEXT NOT NULL,
+    destination_key TEXT NOT NULL,
+    content_hash TEXT,
+    status TEXT NOT NULL DEFAULT 'WRITTEN', -- 'WRITTEN', 'SKIPPED', 'FAILED'
+    error_details TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Historical Archive for Reconciled Manifest Duplicates (Preserves historical evidence without data loss)
+CREATE TABLE IF NOT EXISTS record_manifest_historical_archive (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    original_manifest_id UUID,
+    migration_run_id UUID NOT NULL,
+    migration_batch_id UUID,
     batch_key TEXT,
     source_object TEXT NOT NULL,
     source_key TEXT NOT NULL,
     destination_object TEXT,
     destination_key TEXT,
     content_hash TEXT,
-    status TEXT NOT NULL DEFAULT 'WRITTEN', -- 'WRITTEN', 'SKIPPED', 'FAILED'
+    status TEXT,
     error_details TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT uq_record_manifests_run_source UNIQUE (migration_run_id, source_object, source_key)
+    reconciliation_reason TEXT NOT NULL DEFAULT 'DUPLICATE_SUPERSEDED_HISTORICAL_EVIDENCE',
+    reconciliation_policy TEXT NOT NULL DEFAULT 'PRESERVE_LATEST_AND_ARCHIVE_SUPERSEDED',
+    reconciliation_timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    reconciled_by TEXT NOT NULL DEFAULT 'SYSTEM_SCHEMA_UPGRADE',
+    original_created_at TIMESTAMPTZ
 );
 
-ALTER TABLE record_manifests ADD COLUMN IF NOT EXISTS batch_key TEXT;
-ALTER TABLE record_manifests ADD COLUMN IF NOT EXISTS destination_object TEXT;
-ALTER TABLE record_manifests ADD COLUMN IF NOT EXISTS error_details TEXT;
+-- Explicit Manifest Reconciliation Reports Table (FR-AUDIT-004)
+CREATE TABLE IF NOT EXISTS manifest_reconciliation_reports (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    migration_run_id UUID,
+    total_duplicates_detected INTEGER NOT NULL DEFAULT 0,
+    distinct_identities_affected INTEGER NOT NULL DEFAULT 0,
+    archived_record_count INTEGER NOT NULL DEFAULT 0,
+    reconciliation_policy TEXT NOT NULL DEFAULT 'PRESERVE_LATEST_AND_ARCHIVE_SUPERSEDED',
+    report_json JSONB NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'COMPLETED',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Safe Schema Upgrade, Legacy Backfill, and Constraint Enforcement Block
 DO $$ 
+DECLARE
+  dup_count INTEGER := 0;
+  distinct_dup_count INTEGER := 0;
 BEGIN 
+  -- 1. Ensure required columns exist for legacy databases
+  ALTER TABLE record_manifests ADD COLUMN IF NOT EXISTS batch_key TEXT;
+  ALTER TABLE record_manifests ADD COLUMN IF NOT EXISTS destination_object TEXT;
+  ALTER TABLE record_manifests ADD COLUMN IF NOT EXISTS error_details TEXT;
+
+  -- 2. Backfill legacy destination_object and destination_key if missing
+  UPDATE record_manifests
+  SET destination_object = source_object
+  WHERE destination_object IS NULL;
+
+  UPDATE record_manifests
+  SET destination_key = source_key
+  WHERE destination_key IS NULL;
+
+  -- 3. Backfill legacy migration_batch_id from migration_batches if batch_key matches
+  UPDATE record_manifests rm
+  SET migration_batch_id = mb.id
+  FROM migration_batches mb
+  WHERE rm.migration_batch_id IS NULL
+    AND rm.batch_key IS NOT NULL
+    AND rm.migration_run_id = mb.migration_run_id
+    AND rm.batch_key = mb.batch_key;
+
+  -- 4. Detect existing duplicate (migration_run_id, source_object, source_key) identities
+  SELECT COALESCE(SUM(c - 1), 0), COUNT(*)
+  INTO dup_count, distinct_dup_count
+  FROM (
+    SELECT COUNT(*) as c
+    FROM record_manifests
+    GROUP BY migration_run_id, source_object, source_key
+    HAVING COUNT(*) > 1
+  ) dups;
+
+  -- 5. If duplicates exist, execute reconciliation policy PRESERVE_LATEST_AND_ARCHIVE_SUPERSEDED
+  IF dup_count > 0 THEN
+    -- Archive all superseded duplicates into record_manifest_historical_archive
+    -- Authoritative rank: 'WRITTEN' > 'SKIPPED' > 'FAILED', then created_at DESC, id DESC
+    WITH ranked_manifests AS (
+      SELECT 
+        rm.*,
+        ROW_NUMBER() OVER (
+          PARTITION BY migration_run_id, source_object, source_key
+          ORDER BY 
+            CASE status WHEN 'WRITTEN' THEN 1 WHEN 'SKIPPED' THEN 2 ELSE 3 END,
+            created_at DESC,
+            id DESC
+        ) as rank_order
+      FROM record_manifests rm
+      WHERE (migration_run_id, source_object, source_key) IN (
+        SELECT migration_run_id, source_object, source_key
+        FROM record_manifests
+        GROUP BY migration_run_id, source_object, source_key
+        HAVING COUNT(*) > 1
+      )
+    ),
+    archived_rows AS (
+      INSERT INTO record_manifest_historical_archive (
+        original_manifest_id, migration_run_id, migration_batch_id, batch_key,
+        source_object, source_key, destination_object, destination_key,
+        content_hash, status, error_details, reconciliation_reason, original_created_at
+      )
+      SELECT 
+        id, migration_run_id, migration_batch_id, batch_key,
+        source_object, source_key, destination_object, destination_key,
+        content_hash, status, error_details, 'DUPLICATE_SUPERSEDED_HISTORICAL_EVIDENCE', created_at
+      FROM ranked_manifests
+      WHERE rank_order > 1
+      RETURNING original_manifest_id
+    )
+    -- Remove superseded records from active table now that historical evidence is securely preserved
+    DELETE FROM record_manifests
+    WHERE id IN (SELECT original_manifest_id FROM archived_rows);
+
+    -- Record explicit reconciliation audit report
+    INSERT INTO manifest_reconciliation_reports (
+      total_duplicates_detected,
+      distinct_identities_affected,
+      archived_record_count,
+      reconciliation_policy,
+      report_json,
+      status
+    ) VALUES (
+      dup_count,
+      distinct_dup_count,
+      dup_count,
+      'PRESERVE_LATEST_AND_ARCHIVE_SUPERSEDED',
+      jsonb_build_object(
+        'timestamp', NOW(),
+        'duplicateIdentitiesCount', distinct_dup_count,
+        'action', 'Archived superseded historical evidence to record_manifest_historical_archive'
+      ),
+      'COMPLETED'
+    );
+  END IF;
+
+  -- 6. Enforce NOT NULL constraints on destination_object and destination_key
+  ALTER TABLE record_manifests ALTER COLUMN destination_object SET NOT NULL;
+  ALTER TABLE record_manifests ALTER COLUMN destination_key SET NOT NULL;
+
+  -- 7. Add uniqueness constraint only after reconciliation succeeds
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint WHERE conname = 'uq_record_manifests_run_source'
   ) THEN 

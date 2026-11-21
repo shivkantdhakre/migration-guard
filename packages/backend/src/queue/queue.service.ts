@@ -29,6 +29,7 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
   private queue: Queue | null = null;
   private redisClient: Redis | null = null;
   private isConnected = false;
+  private isDestroyed = false;
   private customRedisUrl?: string;
 
   constructor(customRedisUrl?: string) {
@@ -44,6 +45,7 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleDestroy() {
+    this.isDestroyed = true;
     if (this.queue) {
       await this.queue.close();
       this.queue = null;
@@ -85,10 +87,16 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
 
       const connectionOptions = {
         maxRetriesPerRequest: null,
-        enableReadyCheck: false,
+        enableReadyCheck: true,
         connectTimeout: 4000,
         lazyConnect: true,
-        retryStrategy: () => null,
+        retryStrategy: (times: number) => {
+          if (this.isDestroyed) {
+            return null;
+          }
+          // Exponential backoff capped at 2 seconds for responsive automatic recovery
+          return Math.min(times * 100, 2000);
+        },
       };
 
       if (redisUrl) {
@@ -105,6 +113,21 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
           ...connectionOptions,
         });
       }
+
+      this.redisClient.on('ready', () => {
+        this.isConnected = true;
+        if (!this.queue && this.redisClient) {
+          this.queue = new Queue(QueueService.QUEUE_NAME, {
+            connection: this.redisClient,
+          });
+        }
+        this.logger.log(`[QueueService] Redis connection ready. Queue '${QueueService.QUEUE_NAME}' active.`);
+      });
+
+      this.redisClient.on('close', () => {
+        this.isConnected = false;
+        this.logger.warn(`[QueueService] Redis connection closed. Queue dispatch paused.`);
+      });
 
       this.redisClient.on('error', (err) => {
         this.logger.warn(`[QueueService] Redis connection error: ${err.message}`);

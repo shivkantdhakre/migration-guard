@@ -1,49 +1,75 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { DatabaseService } from '../src/database/database.service';
 
-describe('Backend PostgreSQL Live Persistence Integration (Run 005.2 & Run 005.4)', () => {
+describe('Backend PostgreSQL Live Persistence Integration (Run 005.2 & Run 005.5)', () => {
   let dbService: DatabaseService;
   const isCi = process.env.CI === 'true';
   const testWorkspaceId = `ws-live-test-${Date.now()}`;
   const testSlug = `test-ws-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
   const testName = `Integration Test Workspace ${Date.now()}`;
 
-  const targetDbUrl =
-    process.env.MIGRATIONGUARD_TEST_DATABASE_URL ||
-    process.env.TEST_DATABASE_URL ||
-    process.env.DATABASE_URL;
-
   if (process.env.NODE_ENV === 'production') {
     throw new Error('[Safety Guard] Live backend PostgreSQL integration tests must never run in production environment.');
   }
 
-  const isLocalOrCi = (() => {
+  // Remote databases MUST be explicitly configured through MIGRATIONGUARD_TEST_DATABASE_URL or TEST_DATABASE_URL.
+  // We NEVER approve a remote database simply from DATABASE_URL, even if it contains "test" or "dev".
+  const explicitTestDbUrl =
+    process.env.MIGRATIONGUARD_TEST_DATABASE_URL || process.env.TEST_DATABASE_URL;
+
+  const isLocalDatabaseUrl = (() => {
+    if (!process.env.DATABASE_URL) return false;
+    try {
+      const parsed = new URL(process.env.DATABASE_URL);
+      return DatabaseService.isLoopbackHost(parsed.hostname);
+    } catch {
+      return (
+        process.env.DATABASE_URL.includes('localhost') ||
+        process.env.DATABASE_URL.includes('127.0.0.1') ||
+        process.env.DATABASE_URL.includes('::1')
+      );
+    }
+  })();
+
+  const targetDbUrl = explicitTestDbUrl || (isLocalDatabaseUrl ? process.env.DATABASE_URL : undefined);
+
+  const isTargetLocal = (() => {
     if (!targetDbUrl) return false;
     try {
       const parsed = new URL(targetDbUrl);
       return DatabaseService.isLoopbackHost(parsed.hostname);
     } catch {
-      return targetDbUrl.includes('localhost') || targetDbUrl.includes('127.0.0.1') || targetDbUrl.includes('::1');
+      return false;
     }
   })();
 
-  const isExplicitTestDb = Boolean(
-    process.env.MIGRATIONGUARD_TEST_DATABASE_URL ||
-    process.env.TEST_DATABASE_URL ||
-    (targetDbUrl && (targetDbUrl.includes('test') || targetDbUrl.includes('dev'))),
-  );
-
   beforeAll(async () => {
+    if (isCi && !explicitTestDbUrl) {
+      throw new Error(
+        '[CI Mandatory Failure] MIGRATIONGUARD_TEST_DATABASE_URL or TEST_DATABASE_URL must be explicitly configured in CI environment.',
+      );
+    }
+
     if (!targetDbUrl) {
       if (isCi) {
-        throw new Error('[CI Mandatory Failure] MIGRATIONGUARD_TEST_DATABASE_URL or DATABASE_URL must be configured in CI environment.');
+        throw new Error(
+          '[CI Mandatory Failure] No valid test database URL configured. Remote DATABASE_URL cannot be used for tests.',
+        );
       }
-      console.warn('[Notice] No test database configured, skipping live PostgreSQL persistence test.');
+      console.warn(
+        '[Safety Guard] Refusing to run tests against remote DATABASE_URL. MIGRATIONGUARD_TEST_DATABASE_URL required.',
+      );
       return;
     }
 
-    if (!isLocalOrCi && !isExplicitTestDb && process.env.ALLOW_REMOTE_TEST_DB !== 'true') {
-      console.warn('[Safety Guard] Refusing to run live persistence test against non-test/remote database without ALLOW_REMOTE_TEST_DB=true.');
+    // If target is remote, require explicit ALLOW_REMOTE_TEST_DB=true override
+    if (!isTargetLocal && process.env.ALLOW_REMOTE_TEST_DB !== 'true') {
+      const msg =
+        '[Safety Guard] Refusing to run live persistence test against remote database without explicit ALLOW_REMOTE_TEST_DB=true.';
+      if (isCi) {
+        throw new Error(`[CI Mandatory Failure] ${msg}`);
+      }
+      console.warn(msg);
       return;
     }
 

@@ -3,11 +3,15 @@ import { QueueService, MigrationJobPayload } from '../src/queue/queue.service';
 import { Worker, Job } from 'bullmq';
 import { Redis } from 'ioredis';
 
-describe('Backend QueueService Live Redis Integration (Run 005.4)', () => {
+describe('Backend QueueService Live Redis Integration (Run 005.4 & Run 005.5)', () => {
   let queueService: QueueService;
   let testWorker: Worker | null = null;
   let testRedisClient: Redis | null = null;
   const isCi = process.env.CI === 'true';
+
+  // Isolated queue name to ensure zero state collision with other test suites or default queues
+  const uniqueQueueName = `test-live-queue-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+  const prevQueueName = process.env.BULLMQ_QUEUE_NAME;
 
   const redisUrl =
     process.env.REDIS_URL ||
@@ -16,6 +20,8 @@ describe('Backend QueueService Live Redis Integration (Run 005.4)', () => {
       : 'redis://localhost:6379');
 
   beforeAll(async () => {
+    process.env.BULLMQ_QUEUE_NAME = uniqueQueueName;
+
     // Probe Redis connectivity first with lazy connect
     try {
       testRedisClient = new Redis(redisUrl, {
@@ -48,11 +54,23 @@ describe('Backend QueueService Live Redis Integration (Run 005.4)', () => {
       testWorker = null;
     }
     if (queueService) {
+      const q = queueService.getQueue();
+      if (q) {
+        try {
+          await q.drain();
+          await q.obliterate({ force: true });
+        } catch {}
+      }
       await queueService.onModuleDestroy();
     }
     if (testRedisClient) {
       testRedisClient.disconnect();
       testRedisClient = null;
+    }
+    if (prevQueueName) {
+      process.env.BULLMQ_QUEUE_NAME = prevQueueName;
+    } else {
+      delete process.env.BULLMQ_QUEUE_NAME;
     }
   });
 
@@ -62,7 +80,57 @@ describe('Backend QueueService Live Redis Integration (Run 005.4)', () => {
     expect(queueService.isQueueConnected).toBe(true);
   });
 
-  it('dispatches a migration batch via QueueService and verifies BullMQ worker consumes it', async () => {
+  it('recovers connection and resumes dispatching after a simulated disconnect on live Redis', async () => {
+    if (!testRedisClient || !queueService || !queueService.isQueueConnected) return;
+
+    const redis = queueService.getRedisClient();
+    if (!redis) return;
+
+    expect(queueService.isQueueConnected).toBe(true);
+
+    // 1. Simulate transient outage: connection closes
+    redis.emit('close');
+    expect(queueService.isQueueConnected).toBe(false);
+
+    // 2. Dispatches in disconnected state must fail-closed
+    await expect(
+      queueService.dispatchBatchJob({
+        jobId: 'test_transient_job',
+        migrationRunId: 'run-transient',
+        batchKey: 'batch_transient',
+        sequenceNo: 99,
+        sourceObject: 'customers',
+        destinationObject: 'customers',
+        cursorStart: null,
+        batchSize: 10,
+        planVersionId: 'plan-v1',
+        mappingVersionId: 'map-v1',
+        writeMode: 'upsert',
+      }),
+    ).rejects.toThrow(/Queue is offline or Redis is disconnected/);
+
+    // 3. Simulate automatic reconnection / recovery: ready event fires
+    redis.emit('ready');
+    expect(queueService.isQueueConnected).toBe(true);
+
+    // 4. Verify recovery allows immediate dispatch
+    const recoveryJobId = await queueService.dispatchBatchJob({
+      jobId: 'test_recovery_job',
+      migrationRunId: 'run-recovery',
+      batchKey: 'batch_recovery',
+      sequenceNo: 100,
+      sourceObject: 'customers',
+      destinationObject: 'customers',
+      cursorStart: null,
+      batchSize: 10,
+      planVersionId: 'plan-v1',
+      mappingVersionId: 'map-v1',
+      writeMode: 'upsert',
+    });
+    expect(recoveryJobId).toBe('run-recovery_batch_recovery');
+  });
+
+  it('dispatches a migration batch via QueueService and verifies BullMQ worker consumes it on unique queue', async () => {
     if (!testRedisClient || !queueService || !queueService.isQueueConnected) return;
 
     const testRunId = `run-live-${Date.now()}`;
@@ -92,7 +160,7 @@ describe('Backend QueueService Live Redis Integration (Run 005.4)', () => {
       workerConnection.on('error', (err) => console.warn('Worker connection warning:', err.message));
 
       testWorker = new Worker(
-        QueueService.QUEUE_NAME,
+        uniqueQueueName,
         async (job: Job) => {
           consumedData = job.data as MigrationJobPayload;
           return { status: 'COMMITTED', recordsProcessed: 100 };

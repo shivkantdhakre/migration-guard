@@ -88,6 +88,31 @@ export const isUnsafeProductionHost = (host: string): boolean => {
   return isLoopbackHost(host) || isUnspecifiedHost(host);
 };
 
+export function validateDestinationConnectionString(connStr: string, connectionId = 'unknown'): void {
+  if (!connStr || connStr.trim() === '') {
+    throw new Error(`[Worker Security] Destination connection ${connectionId} has an empty connection string.`);
+  }
+
+  let hostname = '';
+  try {
+    const parsed = new URL(connStr);
+    hostname = parsed.hostname;
+  } catch {
+    const match = /@([^:/]+|\[[^\]]+\])/.exec(connStr);
+    if (match) {
+      hostname = match[1];
+    } else {
+      throw new Error(`[Worker Security] Destination connection ${connectionId} has an invalid connection string format.`);
+    }
+  }
+
+  if (process.env.NODE_ENV === 'production' && isUnsafeProductionHost(hostname)) {
+    throw new Error(
+      `[Worker Security] In production (NODE_ENV=production), destination connection ${connectionId} cannot point to localhost, loopback, or wildcard addresses (${hostname}).`,
+    );
+  }
+}
+
 const allowInsecureTls = process.env.ALLOW_INSECURE_TLS === 'true';
 if (allowInsecureTls && process.env.NODE_ENV === 'production') {
   throw new Error('[Security] Insecure TLS (ALLOW_INSECURE_TLS=true) is strictly forbidden in production.');
@@ -427,6 +452,9 @@ async function getDestinationConnector(payload: MigrationJobPayload): Promise<De
     );
   }
 
+  // Runtime Destination Safety Enforcement: Validate connection string against unsafe production hosts
+  validateDestinationConnectionString(connStr, connectionId);
+
   // P0.3: Cache key includes credential_version to handle rotation correctly
   const credVer = vault.credentialVersion ?? 'unpinned';
   const cacheKey = `${connectionId}:v${credVer}`;
@@ -672,4 +700,6 @@ async function shutdown() {
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
-startWorker();
+if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
+  startWorker();
+}

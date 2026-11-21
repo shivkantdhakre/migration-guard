@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { DatabaseService } from '../src/database/database.service';
+import { validateSafeTestDatabaseEndpoint } from './redis-test-utils';
 
 describe('Backend PostgreSQL Live Persistence Integration (Run 005.2 & Run 005.5)', () => {
   let dbService: DatabaseService;
@@ -17,20 +18,6 @@ describe('Backend PostgreSQL Live Persistence Integration (Run 005.2 & Run 005.5
   const targetDbUrl =
     process.env.MIGRATIONGUARD_TEST_DATABASE_URL || process.env.TEST_DATABASE_URL;
 
-  const isTargetLocal = (() => {
-    if (!targetDbUrl) return false;
-    try {
-      const parsed = new URL(targetDbUrl);
-      return DatabaseService.isLoopbackHost(parsed.hostname);
-    } catch {
-      return (
-        targetDbUrl.includes('localhost') ||
-        targetDbUrl.includes('127.0.0.1') ||
-        targetDbUrl.includes('::1')
-      );
-    }
-  })();
-
   beforeAll(async () => {
     if (!targetDbUrl) {
       if (isCi) {
@@ -44,64 +31,14 @@ describe('Backend PostgreSQL Live Persistence Integration (Run 005.2 & Run 005.5
       return;
     }
 
-    // If target is remote, enforce production rejection, explicit approval, and database identity allowlists
-    if (!isTargetLocal) {
-      let host = '';
-      let port = '5432';
-      let dbName = '';
-      try {
-        const parsed = new URL(targetDbUrl);
-        host = parsed.hostname;
-        port = parsed.port || '5432';
-        dbName = (parsed.pathname || '').replace(/^\//, '').split('?')[0];
-      } catch {
-        host = targetDbUrl;
+    try {
+      validateSafeTestDatabaseEndpoint(targetDbUrl);
+    } catch (err: any) {
+      if (isCi) {
+        throw new Error(`[CI Mandatory Failure] ${err.message}`);
       }
-
-      if (/prod/i.test(host) || /prod/i.test(targetDbUrl) || (dbName && /prod/i.test(dbName))) {
-        const msg = `[Safety Guard] Designated test database (${host}/${dbName}) matches production naming patterns (/prod/i). Testing against production endpoints is strictly forbidden.`;
-        if (isCi) throw new Error(`[CI Mandatory Failure] ${msg}`);
-        console.warn(msg);
-        return;
-      }
-
-      if (process.env.ALLOW_REMOTE_TEST_DB !== 'true') {
-        const msg =
-          '[Safety Guard] Refusing to run live persistence test against remote database without explicit ALLOW_REMOTE_TEST_DB=true.';
-        if (isCi) {
-          throw new Error(`[CI Mandatory Failure] ${msg}`);
-        }
-        console.warn(msg);
-        return;
-      }
-
-      const allowedDbHosts = (process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_HOSTS || '')
-        .split(',')
-        .map((h) => h.trim().toLowerCase())
-        .filter(Boolean);
-
-      if (!allowedDbHosts.includes(host.toLowerCase())) {
-        const msg = `[Safety Guard] Remote database host '${host}' is not present in MIGRATIONGUARD_ALLOWED_TEST_DATABASE_HOSTS allowlist. Refusing execution.`;
-        if (isCi) {
-          throw new Error(`[CI Mandatory Failure] ${msg}`);
-        }
-        console.warn(msg);
-        return;
-      }
-
-      const allowedDbNames = (process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_NAMES || '')
-        .split(',')
-        .map((n) => n.trim().toLowerCase())
-        .filter(Boolean);
-
-      if (allowedDbNames.length > 0 && dbName && !allowedDbNames.includes(dbName.toLowerCase())) {
-        const msg = `[Safety Guard] Remote database name '${dbName}' is not present in MIGRATIONGUARD_ALLOWED_TEST_DATABASE_NAMES allowlist. Refusing execution.`;
-        if (isCi) {
-          throw new Error(`[CI Mandatory Failure] ${msg}`);
-        }
-        console.warn(msg);
-        return;
-      }
+      console.warn(err.message);
+      return;
     }
 
     // Explicitly enforce that in-memory fallback is disabled for this test suite

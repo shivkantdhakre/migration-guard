@@ -33,20 +33,29 @@ export const isUnsafeProductionHost = (host: string): boolean => {
   return isLoopbackHost(host) || isUnspecifiedHost(host);
 };
 
-const resolvePostgresSsl = (connectionString: string): boolean | { rejectUnauthorized: boolean } => {
+export const resolvePostgresSsl = (connectionString: string): boolean | { rejectUnauthorized: boolean } => {
   let isLocal = false;
+  let hostname = '';
   try {
     const parsed = new URL(connectionString);
-    isLocal = isLoopbackHost(parsed.hostname);
+    hostname = parsed.hostname;
+    isLocal = isLoopbackHost(hostname);
   } catch {
     const match = /@([^:/]+|\[[^\]]+\])/.exec(connectionString);
     if (match) {
-      isLocal = isLoopbackHost(match[1]);
+      hostname = match[1];
+      isLocal = isLoopbackHost(hostname);
     }
   }
 
   const allowInsecureTls = process.env.ALLOW_INSECURE_TLS === 'true';
   const isProduction = process.env.NODE_ENV === 'production';
+
+  if (isProduction && isUnsafeProductionHost(hostname)) {
+    throw new Error(
+      `[Security] In production (NODE_ENV=production), PostgreSQL connection cannot point to localhost, loopback, or wildcard addresses (${hostname}).`,
+    );
+  }
 
   if (isLocal && !isProduction) {
     return false;

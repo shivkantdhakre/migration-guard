@@ -1,6 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, afterEach } from 'vitest';
 import { execSync } from 'node:child_process';
 import path from 'node:path';
+import { validateDestinationConnectionString } from '../src/worker-main.js';
+import { resolvePostgresSsl } from '../src/connectors/connector-factory.js';
+import { validateSafeTestDatabaseEndpoint } from './helpers/postgres-test-utils.js';
 
 describe('Worker Configuration Fail-Closed Security (P1 & Run 005.1)', { timeout: 35000 }, () => {
   const repoRoot = path.resolve(__dirname, '../../..');
@@ -117,5 +120,128 @@ describe('Worker Configuration Fail-Closed Security (P1 & Run 005.1)', { timeout
     const res2 = runNodeCmd(cmd2);
     expect(res2.failed).toBe(true);
     expect(res2.errorMessage).toMatch(/REDIS_URL or remote non-loopback REDIS_HOST must be explicitly configured/);
+  });
+
+  describe('Vault Destination Host Runtime Safety & Safe Test Endpoint Validation (Run 005.12)', () => {
+    const origEnv = { ...process.env };
+
+    afterEach(() => {
+      for (const key of Object.keys(process.env)) {
+        if (!(key in origEnv)) {
+          delete process.env[key];
+        }
+      }
+      for (const [key, value] of Object.entries(origEnv)) {
+        process.env[key] = value;
+      }
+    });
+
+    it('rejects destination connection strings with loopback or wildcard addresses in production', () => {
+      process.env.NODE_ENV = 'production';
+
+      expect(() => {
+        validateDestinationConnectionString('postgresql://postgres:pass@localhost:5432/dest', 'conn-1');
+      }).toThrow(/cannot point to localhost, loopback, or wildcard addresses \(localhost\)/);
+
+      expect(() => {
+        validateDestinationConnectionString('postgresql://postgres:pass@127.0.0.1:5432/dest', 'conn-2');
+      }).toThrow(/cannot point to localhost, loopback, or wildcard addresses \(127\.0\.0\.1\)/);
+
+      expect(() => {
+        validateDestinationConnectionString('postgresql://postgres:pass@[::1]:5432/dest', 'conn-3');
+      }).toThrow(/cannot point to localhost, loopback, or wildcard addresses \(\[::1\]\)/);
+
+      expect(() => {
+        validateDestinationConnectionString('postgresql://postgres:pass@0.0.0.0:5432/dest', 'conn-4');
+      }).toThrow(/cannot point to localhost, loopback, or wildcard addresses \(0\.0\.0\.0\)/);
+
+      expect(() => {
+        validateDestinationConnectionString('postgresql://postgres:pass@[::]:5432/dest', 'conn-5');
+      }).toThrow(/cannot point to localhost, loopback, or wildcard addresses \(\[::\]\)/);
+    });
+
+    it('allows valid remote destination connection strings in production', () => {
+      process.env.NODE_ENV = 'production';
+      expect(() => {
+        validateDestinationConnectionString('postgresql://postgres:pass@remote-db.cloud.provider:5432/dest_catalog', 'conn-ok');
+      }).not.toThrow();
+    });
+
+    it('allows loopback destination connection strings in test and development environments', () => {
+      process.env.NODE_ENV = 'test';
+      expect(() => {
+        validateDestinationConnectionString('postgresql://postgres:pass@localhost:5432/test_dest', 'conn-dev');
+      }).not.toThrow();
+    });
+
+    it('rejects empty or invalid destination connection strings', () => {
+      expect(() => {
+        validateDestinationConnectionString('', 'conn-empty');
+      }).toThrow(/has an empty connection string/);
+
+      expect(() => {
+        validateDestinationConnectionString('invalid-conn-string', 'conn-bad');
+      }).toThrow(/invalid connection string format/);
+    });
+
+    it('enforces resolvePostgresSsl production hostname restrictions', () => {
+      process.env.NODE_ENV = 'production';
+      expect(() => {
+        resolvePostgresSsl('postgresql://postgres:pass@localhost:5432/db');
+      }).toThrow(/PostgreSQL connection cannot point to localhost, loopback, or wildcard addresses/);
+
+      expect(() => {
+        resolvePostgresSsl('postgresql://postgres:pass@0.0.0.0:5432/db');
+      }).toThrow(/PostgreSQL connection cannot point to localhost, loopback, or wildcard addresses/);
+
+      expect(() => {
+        resolvePostgresSsl('postgresql://postgres:pass@[::]:5432/db');
+      }).toThrow(/PostgreSQL connection cannot point to localhost, loopback, or wildcard addresses/);
+
+      process.env.NODE_ENV = 'test';
+      expect(resolvePostgresSsl('postgresql://postgres:pass@localhost:5432/db')).toBe(false);
+    });
+
+    it('enforces worker validateSafeTestDatabaseEndpoint mandatory allowlists', () => {
+      process.env.NODE_ENV = 'test';
+      // Reject empty database name
+      expect(() => {
+        validateSafeTestDatabaseEndpoint('postgresql://postgres:pass@remote.net:5432');
+      }).toThrow(/must specify a non-empty database name/);
+
+      // Reject remote without ALLOW_REMOTE_TEST_DB
+      process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_HOSTS = 'remote.net';
+      process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_NAMES = 'test_db';
+      expect(() => {
+        validateSafeTestDatabaseEndpoint('postgresql://postgres:pass@remote.net:5432/test_db');
+      }).toThrow(/without explicit ALLOW_REMOTE_TEST_DB=true/);
+
+      // Reject remote when database-name allowlist is missing
+      process.env.ALLOW_REMOTE_TEST_DB = 'true';
+      delete process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_NAMES;
+      expect(() => {
+        validateSafeTestDatabaseEndpoint('postgresql://postgres:pass@remote.net:5432/test_db');
+      }).toThrow(/strictly requires a non-empty MIGRATIONGUARD_ALLOWED_TEST_DATABASE_NAMES allowlist/);
+
+      // Reject remote when database name is unapproved
+      process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_NAMES = 'other_db';
+      expect(() => {
+        validateSafeTestDatabaseEndpoint('postgresql://postgres:pass@remote.net:5432/test_db');
+      }).toThrow(/Remote database name 'test_db' is not present in MIGRATIONGUARD_ALLOWED_TEST_DATABASE_NAMES allowlist/);
+
+      // Reject remote when port is unapproved
+      process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_NAMES = 'test_db';
+      process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_PORTS = '5433';
+      expect(() => {
+        validateSafeTestDatabaseEndpoint('postgresql://postgres:pass@remote.net:5432/test_db');
+      }).toThrow(/Remote database port '5432' is not present in MIGRATIONGUARD_ALLOWED_TEST_DATABASE_PORTS allowlist/);
+
+      // Accept when properly configured
+      process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_PORTS = '5432';
+      const target = validateSafeTestDatabaseEndpoint('postgresql://postgres:pass@remote.net:5432/test_db');
+      expect(target.host).toBe('remote.net');
+      expect(target.port).toBe('5432');
+      expect(target.dbName).toBe('test_db');
+    });
   });
 });

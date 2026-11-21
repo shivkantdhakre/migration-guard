@@ -8,6 +8,7 @@ import {
   isUnsafeProductionHost as connectorUnsafe,
 } from '../src/connectors/connector-factory.js';
 import { TransformedBatch } from '../src/types.js';
+import { validateSafeTestDatabaseEndpoint } from './helpers/postgres-test-utils.js';
 
 export const isLoopbackHost = (host: string): boolean => {
   if (!host) return false;
@@ -61,67 +62,14 @@ describe('Real PostgreSQL Destination Connector Integration', () => {
       return;
     }
 
-    let targetHost = '';
-    let targetPort = '5432';
-    let targetDbName = '';
     try {
-      const parsed = new URL(targetDbUrl);
-      targetHost = parsed.hostname;
-      targetPort = parsed.port || '5432';
-      targetDbName = (parsed.pathname || '').replace(/^\//, '').split('?')[0];
-    } catch {
-      targetHost = targetDbUrl;
-    }
-
-    if (!isLocalOrCi) {
-      // 1. Strict production pattern guard
-      if (/prod/i.test(targetHost) || /prod/i.test(targetDbUrl) || (targetDbName && /prod/i.test(targetDbName))) {
-        const msg = `[Safety Guard] Designated test database (${targetHost}/${targetDbName}) matches production naming patterns (/prod/i). Testing against production endpoints is strictly forbidden.`;
-        if (process.env.CI === 'true') throw new Error(`[CI Mandatory Failure] ${msg}`);
-        console.warn(msg);
-        return;
+      validateSafeTestDatabaseEndpoint(targetDbUrl);
+    } catch (err: any) {
+      if (process.env.CI === 'true') {
+        throw new Error(`[CI Mandatory Failure] ${err.message}`);
       }
-
-      // 2. Strict remote approval guard
-      if (process.env.ALLOW_REMOTE_TEST_DB !== 'true') {
-        const msg =
-          '[Safety Guard] Refusing to run live destination integration test against remote database without explicit ALLOW_REMOTE_TEST_DB=true.';
-        if (process.env.CI === 'true') {
-          throw new Error(`[CI Mandatory Failure] ${msg}`);
-        }
-        console.warn(msg);
-        return;
-      }
-
-      // 3. Strict host allowlist guard
-      const allowedDbHosts = (process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_HOSTS || '')
-        .split(',')
-        .map((h) => h.trim().toLowerCase())
-        .filter(Boolean);
-
-      if (!allowedDbHosts.includes(targetHost.toLowerCase())) {
-        const msg = `[Safety Guard] Remote database host '${targetHost}' is not present in MIGRATIONGUARD_ALLOWED_TEST_DATABASE_HOSTS allowlist. Refusing execution.`;
-        if (process.env.CI === 'true') {
-          throw new Error(`[CI Mandatory Failure] ${msg}`);
-        }
-        console.warn(msg);
-        return;
-      }
-
-      // 4. Strict database name allowlist guard (if configured)
-      const allowedDbNames = (process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_NAMES || '')
-        .split(',')
-        .map((n) => n.trim().toLowerCase())
-        .filter(Boolean);
-
-      if (allowedDbNames.length > 0 && targetDbName && !allowedDbNames.includes(targetDbName.toLowerCase())) {
-        const msg = `[Safety Guard] Remote database name '${targetDbName}' is not present in MIGRATIONGUARD_ALLOWED_TEST_DATABASE_NAMES allowlist. Refusing execution.`;
-        if (process.env.CI === 'true') {
-          throw new Error(`[CI Mandatory Failure] ${msg}`);
-        }
-        console.warn(msg);
-        return;
-      }
+      console.warn(err.message);
+      return;
     }
 
     adminPool = new pg.Pool({ connectionString: targetDbUrl, ssl, max: 2 });

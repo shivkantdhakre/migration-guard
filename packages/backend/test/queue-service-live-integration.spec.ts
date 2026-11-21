@@ -20,6 +20,7 @@ describe('Backend QueueService Live Redis Integration (Run 005.4 & Run 005.5)', 
       : 'redis://localhost:6379');
 
   beforeAll(async () => {
+    delete process.env.ALLOW_SIMULATED_DISPATCH;
     process.env.BULLMQ_QUEUE_NAME = uniqueQueueName;
 
     // Probe Redis connectivity first with lazy connect
@@ -80,7 +81,7 @@ describe('Backend QueueService Live Redis Integration (Run 005.4 & Run 005.5)', 
     expect(queueService.isQueueConnected).toBe(true);
   });
 
-  it('recovers connection and resumes dispatching after a simulated disconnect on live Redis', async () => {
+  it('recovers connection, resumes dispatching, and consumes job after genuine Redis CLIENT KILL disconnect', async () => {
     if (!testRedisClient || !queueService || !queueService.isQueueConnected) return;
 
     const redis = queueService.getRedisClient();
@@ -88,11 +89,32 @@ describe('Backend QueueService Live Redis Integration (Run 005.4 & Run 005.5)', 
 
     expect(queueService.isQueueConnected).toBe(true);
 
-    // 1. Simulate transient outage: connection closes
-    redis.emit('close');
+    // 1. Capture client ID of queueService's redis connection
+    const rawClientId = await redis.client('ID');
+    const clientId = String(rawClientId);
+
+    const closePromise = new Promise<void>((resolve) => {
+      if (!queueService.isQueueConnected) return resolve();
+      redis.once('close', () => resolve());
+    });
+
+    const readyPromise = new Promise<void>((resolve) => {
+      redis.once('ready', () => resolve());
+    });
+
+    // 2. Terminate connection from server-side using admin client (genuine connection interruption)
+    await testRedisClient.client('KILL', 'ID', clientId, 'SKIPME', 'YES');
+
+    // 3. Await genuine socket disconnect
+    await Promise.race([
+      closePromise,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Timed out waiting for Redis client close event after CLIENT KILL')), 4000),
+      ),
+    ]);
     expect(queueService.isQueueConnected).toBe(false);
 
-    // 2. Dispatches in disconnected state must fail-closed
+    // 4. Dispatches in disconnected state must fail-closed
     await expect(
       queueService.dispatchBatchJob({
         jobId: 'test_transient_job',
@@ -109,13 +131,18 @@ describe('Backend QueueService Live Redis Integration (Run 005.4 & Run 005.5)', 
       }),
     ).rejects.toThrow(/Queue is offline or Redis is disconnected/);
 
-    // 3. Simulate automatic reconnection / recovery: ready event fires
-    redis.emit('ready');
+    // 5. Await genuine automatic reconnection via retryStrategy & ready event
+    await Promise.race([
+      readyPromise,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Timed out waiting for Redis automatic reconnection ready event')), 8000),
+      ),
+    ]);
     expect(queueService.isQueueConnected).toBe(true);
 
-    // 4. Verify recovery allows immediate dispatch
-    const recoveryJobId = await queueService.dispatchBatchJob({
-      jobId: 'test_recovery_job',
+    // 6. Verify recovery allows dispatch and actual BullMQ worker consumption
+    const recoveryPayload: MigrationJobPayload = {
+      jobId: 'run-recovery_batch_recovery',
       migrationRunId: 'run-recovery',
       batchKey: 'batch_recovery',
       sequenceNo: 100,
@@ -126,8 +153,56 @@ describe('Backend QueueService Live Redis Integration (Run 005.4 & Run 005.5)', 
       planVersionId: 'plan-v1',
       mappingVersionId: 'map-v1',
       writeMode: 'upsert',
+    };
+
+    const recoveryWorkerConnection = new Redis(redisUrl, {
+      maxRetriesPerRequest: null,
+      enableReadyCheck: false,
+      lazyConnect: false,
     });
-    expect(recoveryJobId).toBe('run-recovery_batch_recovery');
+    recoveryWorkerConnection.on('error', () => {});
+
+    let recoveryJobConsumed = false;
+    const recoveryWorker = new Worker(
+      uniqueQueueName,
+      async (job: Job) => {
+        if (job.id === 'run-recovery_batch_recovery') {
+          recoveryJobConsumed = true;
+        }
+        return { status: 'COMMITTED' };
+      },
+      {
+        connection: recoveryWorkerConnection,
+        concurrency: 1,
+      },
+    );
+
+    try {
+      const recoveryJobId = await queueService.dispatchBatchJob(recoveryPayload);
+      expect(recoveryJobId).toBe('run-recovery_batch_recovery');
+
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(
+          () => reject(new Error('Timed out waiting for recovery job consumption by worker')),
+          8000,
+        );
+        recoveryWorker.on('completed', (job: Job) => {
+          if (job.id === 'run-recovery_batch_recovery') {
+            clearTimeout(timeout);
+            resolve();
+          }
+        });
+        recoveryWorker.on('failed', (_, err) => {
+          clearTimeout(timeout);
+          reject(err);
+        });
+      });
+
+      expect(recoveryJobConsumed).toBe(true);
+    } finally {
+      await recoveryWorker.close();
+      recoveryWorkerConnection.disconnect();
+    }
 
     // Drain the test queue to ensure test 2 jobs do not spill into test 3
     const q = queueService.getQueue();

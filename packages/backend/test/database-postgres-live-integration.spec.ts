@@ -4,7 +4,6 @@ import { DatabaseService } from '../src/database/database.service';
 describe('Backend PostgreSQL Live Persistence Integration (Run 005.2 & Run 005.5)', () => {
   let dbService: DatabaseService;
   const isCi = process.env.CI === 'true';
-  const testWorkspaceId = `ws-live-test-${Date.now()}`;
   const testSlug = `test-ws-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
   const testName = `Integration Test Workspace ${Date.now()}`;
 
@@ -12,26 +11,10 @@ describe('Backend PostgreSQL Live Persistence Integration (Run 005.2 & Run 005.5
     throw new Error('[Safety Guard] Live backend PostgreSQL integration tests must never run in production environment.');
   }
 
-  // Remote databases MUST be explicitly configured through MIGRATIONGUARD_TEST_DATABASE_URL or TEST_DATABASE_URL.
-  // We NEVER approve a remote database simply from DATABASE_URL, even if it contains "test" or "dev".
-  const explicitTestDbUrl =
+  // Both local and remote test runs MUST be explicitly designated via MIGRATIONGUARD_TEST_DATABASE_URL or TEST_DATABASE_URL.
+  // We NEVER fall back to DATABASE_URL under any circumstances to prevent polluting or dropping tables in development databases.
+  const targetDbUrl =
     process.env.MIGRATIONGUARD_TEST_DATABASE_URL || process.env.TEST_DATABASE_URL;
-
-  const isLocalDatabaseUrl = (() => {
-    if (!process.env.DATABASE_URL) return false;
-    try {
-      const parsed = new URL(process.env.DATABASE_URL);
-      return DatabaseService.isLoopbackHost(parsed.hostname);
-    } catch {
-      return (
-        process.env.DATABASE_URL.includes('localhost') ||
-        process.env.DATABASE_URL.includes('127.0.0.1') ||
-        process.env.DATABASE_URL.includes('::1')
-      );
-    }
-  })();
-
-  const targetDbUrl = explicitTestDbUrl || (isLocalDatabaseUrl ? process.env.DATABASE_URL : undefined);
 
   const isTargetLocal = (() => {
     if (!targetDbUrl) return false;
@@ -39,25 +22,23 @@ describe('Backend PostgreSQL Live Persistence Integration (Run 005.2 & Run 005.5
       const parsed = new URL(targetDbUrl);
       return DatabaseService.isLoopbackHost(parsed.hostname);
     } catch {
-      return false;
+      return (
+        targetDbUrl.includes('localhost') ||
+        targetDbUrl.includes('127.0.0.1') ||
+        targetDbUrl.includes('::1')
+      );
     }
   })();
 
   beforeAll(async () => {
-    if (isCi && !explicitTestDbUrl) {
-      throw new Error(
-        '[CI Mandatory Failure] MIGRATIONGUARD_TEST_DATABASE_URL or TEST_DATABASE_URL must be explicitly configured in CI environment.',
-      );
-    }
-
     if (!targetDbUrl) {
       if (isCi) {
         throw new Error(
-          '[CI Mandatory Failure] No valid test database URL configured. Remote DATABASE_URL cannot be used for tests.',
+          '[CI Mandatory Failure] MIGRATIONGUARD_TEST_DATABASE_URL or TEST_DATABASE_URL must be explicitly configured in CI environment.',
         );
       }
       console.warn(
-        '[Safety Guard] Refusing to run tests against remote DATABASE_URL. MIGRATIONGUARD_TEST_DATABASE_URL required.',
+        '[Safety Guard] No designated test database URL provided. MIGRATIONGUARD_TEST_DATABASE_URL or TEST_DATABASE_URL required. Skipping live integration test.',
       );
       return;
     }

@@ -73,6 +73,15 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
     return this.redisClient;
   }
 
+  private ensureQueue(): void {
+    if (!this.queue && this.redisClient) {
+      this.queue = new Queue(QueueService.QUEUE_NAME, {
+        connection: this.redisClient,
+      });
+      this.logger.log(`[QueueService] Connected to BullMQ queue: '${QueueService.QUEUE_NAME}'`);
+    }
+  }
+
   private async initQueue() {
     try {
       const redisUrl = this.customRedisUrl || process.env.REDIS_URL;
@@ -116,11 +125,7 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
 
       this.redisClient.on('ready', () => {
         this.isConnected = true;
-        if (!this.queue && this.redisClient) {
-          this.queue = new Queue(QueueService.QUEUE_NAME, {
-            connection: this.redisClient,
-          });
-        }
+        this.ensureQueue();
         this.logger.log(`[QueueService] Redis connection ready. Queue '${QueueService.QUEUE_NAME}' active.`);
       });
 
@@ -139,10 +144,7 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
         await this.redisClient.connect();
         await this.redisClient.ping();
         this.isConnected = true;
-        this.queue = new Queue(QueueService.QUEUE_NAME, {
-          connection: this.redisClient,
-        });
-        this.logger.log(`[QueueService] Connected to BullMQ queue: '${QueueService.QUEUE_NAME}'`);
+        this.ensureQueue();
       } catch (pingErr: any) {
         this.isConnected = false;
         this.logger.warn(

@@ -1,15 +1,57 @@
 import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
 import { QueueService, MigrationJobPayload } from '../src/queue/queue.service';
+import { DatabaseService } from '../src/database/database.service';
 
 describe('QueueService (BullMQ Producer)', () => {
   let queueService: QueueService;
+  const unitTestQueue = `test-unit-queue-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+  let prevQueueName: string | undefined;
+
+  // Strict safety guards: Queue unit tests must never connect to production Redis
+  if (
+    process.env.NODE_ENV === 'production' ||
+    (process.env.REDIS_URL && /prod/i.test(process.env.REDIS_URL))
+  ) {
+    throw new Error('[Safety Guard] Queue unit tests must never run against production Redis.');
+  }
+
+  const redisUrl = process.env.REDIS_URL;
+  if (redisUrl) {
+    let isLoopback = false;
+    try {
+      const parsed = new URL(redisUrl);
+      isLoopback = DatabaseService.isLoopbackHost(parsed.hostname);
+    } catch {
+      isLoopback =
+        redisUrl.includes('localhost') ||
+        redisUrl.includes('127.0.0.1') ||
+        redisUrl.includes('::1');
+    }
+    if (!isLoopback && process.env.ALLOW_REMOTE_TEST_REDIS !== 'true') {
+      if (process.env.CI === 'true') {
+        throw new Error(
+          '[Safety Guard] Refusing to run queue unit tests against remote Redis in CI without explicit ALLOW_REMOTE_TEST_REDIS=true.',
+        );
+      }
+      // In local dev with remote REDIS_URL in .env, isolate unit tests to protect remote instance
+      delete process.env.REDIS_URL;
+      delete process.env.REDIS_HOST;
+    }
+  }
 
   beforeAll(() => {
+    prevQueueName = process.env.BULLMQ_QUEUE_NAME;
+    process.env.BULLMQ_QUEUE_NAME = unitTestQueue;
     process.env.ALLOW_SIMULATED_DISPATCH = 'true';
   });
 
-  afterAll(() => {
+  afterAll(async () => {
     delete process.env.ALLOW_SIMULATED_DISPATCH;
+    if (prevQueueName) {
+      process.env.BULLMQ_QUEUE_NAME = prevQueueName;
+    } else {
+      delete process.env.BULLMQ_QUEUE_NAME;
+    }
   });
 
   beforeEach(async () => {
@@ -18,7 +60,16 @@ describe('QueueService (BullMQ Producer)', () => {
   });
 
   afterEach(async () => {
-    await queueService.onModuleDestroy();
+    if (queueService) {
+      const q = queueService.getQueue();
+      if (q) {
+        try {
+          await q.drain();
+          await q.obliterate({ force: true });
+        } catch {}
+      }
+      await queueService.onModuleDestroy();
+    }
   });
 
   it('should initialize queue service without crashing', () => {

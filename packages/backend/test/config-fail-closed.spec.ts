@@ -102,12 +102,12 @@ describe('Backend Configuration Fail-Closed Security (P0.3)', () => {
   });
 
   it('fails startup in production when database is unreachable even if ALLOW_IN_MEMORY_DB is true', () => {
-    const cmd = `node -e "process.env.NODE_ENV='production'; process.env.ALLOW_IN_MEMORY_DB='true'; process.env.JWT_SECRET='strong_production_secret_key_greater_than_32_characters_long!'; process.env.ENCRYPTION_KEY='0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'; process.env.DATABASE_URL='postgresql://user:pass@192.0.2.1:5432/db'; const { DatabaseService } = require('./packages/backend/dist/database/database.service.js'); const db = new DatabaseService(); db.onModuleInit().catch(err => { console.error(err.message); process.exit(1); });"`;
+    const cmd = `node -e "process.env.NODE_ENV='production'; process.env.ALLOW_IN_MEMORY_DB='true'; process.env.JWT_SECRET='strong_production_secret_key_greater_than_32_characters_long!'; process.env.ENCRYPTION_KEY='0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'; process.env.DATABASE_URL='postgresql://user:pass@nonexistent-db.invalid:5432/db'; const { DatabaseService } = require('./packages/backend/dist/database/database.service.js'); const db = new DatabaseService(); db.onModuleInit().catch(err => { console.error(err.message); process.exit(1); });"`;
 
     let failed = false;
     let errorMessage = '';
     try {
-      execSync(cmd, { cwd: repoRoot, stdio: 'pipe', timeout: 5000 });
+      execSync(cmd, { cwd: repoRoot, stdio: 'pipe', timeout: 15000 });
     } catch (err: any) {
       failed = true;
       errorMessage = err.stderr ? err.stderr.toString() : err.message;

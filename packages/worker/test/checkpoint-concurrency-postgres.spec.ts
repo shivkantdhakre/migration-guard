@@ -199,9 +199,8 @@ describe('Checkpoint Concurrency & Atomic PostgreSQL Persistence (P0.1)', () => 
     try {
       await testPool.query('SELECT 1');
       await testPool.query(`CREATE SCHEMA IF NOT EXISTS "${testSchema}"`);
-      await testPool.query(`SET search_path TO "${testSchema}"`);
       await testPool.query(`
-        CREATE TABLE IF NOT EXISTS migration_runs (
+        CREATE TABLE IF NOT EXISTS "${testSchema}".migration_runs (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
           plan_version_id TEXT,
           status TEXT,
@@ -236,7 +235,7 @@ describe('Checkpoint Concurrency & Atomic PostgreSQL Persistence (P0.1)', () => 
     const runId = randomUUID();
     try {
       await testPool.query(
-        `INSERT INTO migration_runs (id, plan_version_id, status, source_boundary_json, progress_json, created_at, updated_at)
+        `INSERT INTO "${testSchema}".migration_runs (id, plan_version_id, status, source_boundary_json, progress_json, created_at, updated_at)
          VALUES ($1, '00000000-0000-0000-0000-000000000000', 'RUNNING', '{}'::jsonb, '{}'::jsonb, NOW(), NOW())`,
         [runId],
       );

@@ -14,11 +14,13 @@ describe('BullMQ Redis Live Integration (Run 005.1)', () => {
     let testClient: Redis | null = null;
     try {
       testClient = new Redis(redisUrl, {
-        connectTimeout: 3000,
+        connectTimeout: 4000,
         maxRetriesPerRequest: null,
-        enableOfflineQueue: false,
+        lazyConnect: true,
         retryStrategy: () => null,
       });
+      testClient.on('error', () => {}); // swallow unhandled error events during test probing
+      await testClient.connect();
       await testClient.ping();
     } catch (err: any) {
       if (testClient) {

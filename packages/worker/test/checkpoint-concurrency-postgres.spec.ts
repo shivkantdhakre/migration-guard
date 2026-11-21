@@ -154,6 +154,10 @@ describe('Checkpoint Concurrency & Atomic PostgreSQL Persistence (P0.1)', () => 
   });
 
   it('runs concurrent PostgreSQL transactions with SELECT ... FOR UPDATE when DB is reachable', async () => {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('[Safety Guard] Live integration tests must never run in production environment.');
+    }
+
     if (!dbUrl) {
       if (process.env.CI === 'true') {
         throw new Error('[CI Mandatory Failure] DATABASE_URL must be configured in CI environment.');
@@ -178,13 +182,24 @@ describe('Checkpoint Concurrency & Atomic PostgreSQL Persistence (P0.1)', () => 
         return dbUrl.includes('localhost') || dbUrl.includes('127.0.0.1') || dbUrl.includes('::1');
       }
     })();
+
+    const isTestDbName = dbUrl.includes('test') || dbUrl.includes('dev');
+    if (!isLocalOrCi && !isTestDbName && process.env.ALLOW_REMOTE_TEST_DB !== 'true') {
+      console.warn('[Safety Guard] Refusing to run integration test against non-test/non-local database without ALLOW_REMOTE_TEST_DB=true.');
+      return;
+    }
+
     const isProduction = process.env.NODE_ENV === 'production';
     const ssl = isLocalOrCi && !isProduction ? false : { rejectUnauthorized: true };
 
-    // Attempt live connection
+    const testSchema = `test_chk_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+
+    // Attempt live connection and create dedicated test schema
     const testPool = new pg.Pool({ connectionString: dbUrl, ssl, max: 5 });
     try {
       await testPool.query('SELECT 1');
+      await testPool.query(`CREATE SCHEMA IF NOT EXISTS "${testSchema}"`);
+      await testPool.query(`SET search_path TO "${testSchema}"`);
       await testPool.query(`
         CREATE TABLE IF NOT EXISTS migration_runs (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -206,8 +221,15 @@ describe('Checkpoint Concurrency & Atomic PostgreSQL Persistence (P0.1)', () => 
       return;
     }
 
-    const pool1 = new pg.Pool({ connectionString: dbUrl, ssl, max: 5 });
-    const pool2 = new pg.Pool({ connectionString: dbUrl, ssl, max: 5 });
+    // Both independent pools connect strictly scoped to the isolated test schema
+    const poolConfig = {
+      connectionString: dbUrl,
+      ssl,
+      max: 5,
+      options: `-c search_path="${testSchema}"`,
+    };
+    const pool1 = new pg.Pool(poolConfig);
+    const pool2 = new pg.Pool(poolConfig);
     const adapter1 = new PostgresStorageAdapters(pool1);
     const adapter2 = new PostgresStorageAdapters(pool2);
 
@@ -253,7 +275,11 @@ describe('Checkpoint Concurrency & Atomic PostgreSQL Persistence (P0.1)', () => 
 
       console.log('[PostgreSQL Concurrency Integration] Verified atomic row-level locking with 2 independent pools on live PostgreSQL.');
     } finally {
-      await testPool.query(`DROP TABLE IF EXISTS migration_runs CASCADE`).catch(() => {});
+      // Safely drop ONLY the isolated test schema, never shared application tables
+      try {
+        await testPool.query(`SET search_path TO public`);
+        await testPool.query(`DROP SCHEMA IF EXISTS "${testSchema}" CASCADE`);
+      } catch {}
       await Promise.all([
         pool1.end().catch(() => {}),
         pool2.end().catch(() => {}),

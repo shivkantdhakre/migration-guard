@@ -54,6 +54,9 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
 
     const allowInsecureTls = process.env.ALLOW_INSECURE_TLS === 'true';
     const isProduction = process.env.NODE_ENV === 'production';
+    if (allowInsecureTls && isProduction) {
+      throw new Error('[Security] Insecure TLS (ALLOW_INSECURE_TLS=true) is strictly forbidden in production.');
+    }
     const ssl = isLocal && !isProduction ? false : { rejectUnauthorized: !allowInsecureTls };
 
     try {
@@ -71,14 +74,17 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       await this.runMigrations();
     } catch (err: any) {
       this.isConnected = false;
-      if (isProduction || !isInMemoryAllowed) {
+      if (isProduction) {
+        console.error(`[DatabaseService] CRITICAL: Failed to connect to mandatory PostgreSQL in production (${err.message}).`);
+        throw new Error(
+          `[DatabaseService] CRITICAL: PostgreSQL connection is strictly required in production (NODE_ENV=production): ${err.message}`,
+        );
+      }
+      if (!isInMemoryAllowed) {
         console.error(`[DatabaseService] CRITICAL: Failed to connect to mandatory PostgreSQL (${err.message}).`);
-        // If in-memory is not explicitly permitted, throw fatal error
-        if (!isInMemoryAllowed) {
-          throw new Error(
-            `[DatabaseService] Database connection failed and in-memory fallback is disabled: ${err.message}`,
-          );
-        }
+        throw new Error(
+          `[DatabaseService] Database connection failed and in-memory fallback is disabled: ${err.message}`,
+        );
       }
       console.warn(
         `[DatabaseService] PostgreSQL not available (${err.message}). Using built-in memory store (ALLOW_IN_MEMORY_DB=true).`,
@@ -180,6 +186,12 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         rows: res.rows,
         rowCount: res.rowCount ?? res.rows.length,
       };
+    }
+
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error(
+        '[DatabaseService] Cannot execute query: PostgreSQL is not connected. In-memory store is strictly forbidden in production.',
+      );
     }
 
     if (process.env.ALLOW_IN_MEMORY_DB === 'true' || process.env.NODE_ENV === 'test') {

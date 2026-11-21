@@ -1,6 +1,10 @@
 import * as dotenv from 'dotenv';
 dotenv.config();
 
+if (process.env.ALLOW_INSECURE_TLS === 'true' && process.env.NODE_ENV === 'production') {
+  throw new Error('[Security] Insecure TLS (ALLOW_INSECURE_TLS=true) is strictly forbidden in production.');
+}
+
 export interface AppConfig {
   port: number;
   databaseUrl: string;

@@ -60,6 +60,8 @@ describe('Backend PostgreSQL Live Persistence Integration (Run 005.2)', () => {
     const tableNames = res.rows.map((r: any) => r.table_name);
     expect(tableNames).toContain('workspaces');
     expect(tableNames).toContain('users');
+    expect(tableNames).toContain('migration_runs');
+    expect(tableNames).toContain('connections');
   });
 
   it('executes real transactional persistence and rollback on PostgreSQL', async () => {

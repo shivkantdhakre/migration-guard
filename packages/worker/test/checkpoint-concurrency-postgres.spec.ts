@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import pg from 'pg';
+import { randomUUID } from 'node:crypto';
 import { CheckpointManager, InMemoryCheckpointStorage, mergeCheckpointUpdate } from '../src/engine/checkpoint.js';
 import { PostgresStorageAdapters } from '../src/engine/postgres-storage-adapters.js';
 import { MigrationBatch, SourceCursor } from '../src/types.js';
@@ -186,7 +187,7 @@ describe('Checkpoint Concurrency & Atomic PostgreSQL Persistence (P0.1)', () => 
       await testPool.query('SELECT 1');
       await testPool.query(`
         CREATE TABLE IF NOT EXISTS migration_runs (
-          id TEXT PRIMARY KEY,
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
           plan_version_id TEXT,
           status TEXT,
           source_boundary_json JSONB DEFAULT '{}'::jsonb,
@@ -210,7 +211,7 @@ describe('Checkpoint Concurrency & Atomic PostgreSQL Persistence (P0.1)', () => 
     const adapter1 = new PostgresStorageAdapters(pool1);
     const adapter2 = new PostgresStorageAdapters(pool2);
 
-    const runId = `run-pg-concurrency-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+    const runId = randomUUID();
     try {
       await testPool.query(
         `INSERT INTO migration_runs (id, plan_version_id, status, source_boundary_json, progress_json, created_at, updated_at)
@@ -252,7 +253,7 @@ describe('Checkpoint Concurrency & Atomic PostgreSQL Persistence (P0.1)', () => 
 
       console.log('[PostgreSQL Concurrency Integration] Verified atomic row-level locking with 2 independent pools on live PostgreSQL.');
     } finally {
-      await testPool.query(`DELETE FROM migration_runs WHERE id = $1`, [runId]).catch(() => {});
+      await testPool.query(`DROP TABLE IF EXISTS migration_runs CASCADE`).catch(() => {});
       await Promise.all([
         pool1.end().catch(() => {}),
         pool2.end().catch(() => {}),

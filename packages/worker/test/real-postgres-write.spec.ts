@@ -36,7 +36,7 @@ describe('Real PostgreSQL Destination Connector Integration', () => {
 
   afterAll(async () => {
     try {
-      await connector.query(`DELETE FROM customers WHERE id = $1`, [testKey]);
+      await connector.query(`DROP TABLE IF EXISTS customers CASCADE`);
     } catch {}
     await connector.close();
   });

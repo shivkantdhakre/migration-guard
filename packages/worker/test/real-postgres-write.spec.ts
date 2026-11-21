@@ -4,17 +4,17 @@ import { ConnectorFactory, PostgresDestinationConnector } from '../src/connector
 import { TransformedBatch } from '../src/types.js';
 
 describe('Real PostgreSQL Destination Connector Integration', () => {
-  const dbUrl =
-    process.env.DATABASE_URL ||
-    'postgresql://postgres:postgres_password@localhost:5432/migrationguard_control?schema=public';
+  const targetDbUrl =
+    process.env.MIGRATIONGUARD_TEST_DATABASE_URL || process.env.TEST_DATABASE_URL;
 
   if (process.env.NODE_ENV === 'production') {
     throw new Error('[Safety Guard] Live destination write integration tests must never run in production.');
   }
 
   const isLocalOrCi = (() => {
+    if (!targetDbUrl) return false;
     try {
-      const parsed = new URL(dbUrl);
+      const parsed = new URL(targetDbUrl);
       const host = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase().trim();
       return (
         host === 'localhost' ||
@@ -25,11 +25,10 @@ describe('Real PostgreSQL Destination Connector Integration', () => {
         host === '::'
       );
     } catch {
-      return dbUrl.includes('localhost') || dbUrl.includes('127.0.0.1') || dbUrl.includes('::1');
+      return false;
     }
   })();
 
-  const isTestDbName = dbUrl.includes('test') || dbUrl.includes('dev');
   const ssl = isLocalOrCi ? false : { rejectUnauthorized: true };
 
   const testSchema = `test_dest_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
@@ -40,12 +39,29 @@ describe('Real PostgreSQL Destination Connector Integration', () => {
   let connector: PostgresDestinationConnector;
 
   beforeAll(async () => {
-    if (!isLocalOrCi && !isTestDbName && process.env.ALLOW_REMOTE_TEST_DB !== 'true') {
-      console.warn('[Safety Guard] Refusing to run integration test against non-test/non-local database without ALLOW_REMOTE_TEST_DB=true.');
+    if (!targetDbUrl) {
+      if (process.env.CI === 'true') {
+        throw new Error(
+          '[CI Mandatory Failure] MIGRATIONGUARD_TEST_DATABASE_URL or TEST_DATABASE_URL must be explicitly configured in CI environment.',
+        );
+      }
+      console.warn(
+        '[Safety Guard] No designated test database URL provided. MIGRATIONGUARD_TEST_DATABASE_URL or TEST_DATABASE_URL required. Skipping live integration test.',
+      );
       return;
     }
 
-    adminPool = new pg.Pool({ connectionString: dbUrl, ssl, max: 2 });
+    if (!isLocalOrCi && process.env.ALLOW_REMOTE_TEST_DB !== 'true') {
+      const msg =
+        '[Safety Guard] Refusing to run live destination integration test against remote database without explicit ALLOW_REMOTE_TEST_DB=true.';
+      if (process.env.CI === 'true') {
+        throw new Error(`[CI Mandatory Failure] ${msg}`);
+      }
+      console.warn(msg);
+      return;
+    }
+
+    adminPool = new pg.Pool({ connectionString: targetDbUrl, ssl, max: 2 });
     try {
       await adminPool.query('SELECT 1');
       await adminPool.query(`CREATE SCHEMA IF NOT EXISTS "${testSchema}"`);
@@ -59,7 +75,7 @@ describe('Real PostgreSQL Destination Connector Integration', () => {
 
     // Connector pool connects strictly scoped to the isolated test schema
     connectorPool = new pg.Pool({
-      connectionString: dbUrl,
+      connectionString: targetDbUrl,
       ssl,
       max: 5,
       options: `-c search_path="${testSchema}"`,
@@ -81,24 +97,42 @@ describe('Real PostgreSQL Destination Connector Integration', () => {
   });
 
   afterAll(async () => {
-    if (connector) {
-      await connector.close().catch(() => {});
+    let cleanupError: any = null;
+    try {
+      if (connector) {
+        await connector.close();
+      }
+    } catch (err: any) {
+      cleanupError = err;
     }
-    // Safely drop ONLY the isolated test schema, never shared application tables
-    if (adminPool) {
-      try {
+
+    try {
+      if (adminPool) {
         await adminPool.query(`DROP SCHEMA IF EXISTS "${testSchema}" CASCADE`);
-      } catch {}
-      await adminPool.end().catch(() => {});
+      }
+    } catch (err: any) {
+      if (!cleanupError) cleanupError = err;
+    }
+
+    try {
+      if (adminPool) {
+        await adminPool.end();
+      }
+    } catch (err: any) {
+      if (!cleanupError) cleanupError = err;
+    }
+
+    if (cleanupError) {
+      throw cleanupError;
     }
   });
 
-  it('should verify live PostgreSQL connectivity', async () => {
+  it('should verify live PostgreSQL connectivity', async (ctx) => {
     if (!connector) {
       if (process.env.CI === 'true') {
         throw new Error('[CI Mandatory Failure] Connector was not initialized in CI.');
       }
-      console.warn('[Notice] Live database offline in sandbox, skipping test.');
+      ctx.skip();
       return;
     }
     const res = await connector.testConnection();
@@ -106,21 +140,24 @@ describe('Real PostgreSQL Destination Connector Integration', () => {
       if (process.env.CI === 'true') {
         throw new Error(`[CI Mandatory Failure] Live PostgreSQL connection failed in CI: ${res.message}`);
       }
-      console.warn(`[Notice] Live database offline in sandbox: ${res.message}`);
+      ctx.skip();
       return;
     }
     expect(res.success).toBe(true);
     expect(res.latencyMs).toBeGreaterThanOrEqual(0);
   });
 
-  it('should write real transformed batch into destination PostgreSQL', async () => {
-    if (!connector) return;
+  it('should write real transformed batch into destination PostgreSQL', async (ctx) => {
+    if (!connector) {
+      ctx.skip();
+      return;
+    }
     const check = await connector.testConnection();
     if (!check.success) {
       if (process.env.CI === 'true') {
         throw new Error(`[CI Mandatory Failure] Live PostgreSQL destination write failed in CI: ${check.message}`);
       }
-      console.warn(`[Notice] Live database offline in sandbox, skipping write`);
+      ctx.skip();
       return;
     }
 
@@ -157,14 +194,17 @@ describe('Real PostgreSQL Destination Connector Integration', () => {
     expect(writeResult.recordsFailed).toBe(0);
   });
 
-  it('should read written records back from destination PostgreSQL using readByKeys', async () => {
-    if (!connector) return;
+  it('should read written records back from destination PostgreSQL using readByKeys', async (ctx) => {
+    if (!connector) {
+      ctx.skip();
+      return;
+    }
     const check = await connector.testConnection();
     if (!check.success) {
       if (process.env.CI === 'true') {
         throw new Error(`[CI Mandatory Failure] Live PostgreSQL destination read failed in CI: ${check.message}`);
       }
-      console.warn(`[Notice] Live database offline in sandbox, skipping read`);
+      ctx.skip();
       return;
     }
 

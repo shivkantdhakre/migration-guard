@@ -1,103 +1,24 @@
 import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
 import { QueueService, MigrationJobPayload } from '../src/queue/queue.service';
-import { DatabaseService } from '../src/database/database.service';
-import { appConfig } from '../src/config/configuration';
+import { resolveSafeTestRedisEndpoint } from './redis-test-utils';
 
 describe('QueueService (BullMQ Producer)', () => {
   let queueService: QueueService;
   const initialEnv = { ...process.env };
   const unitTestQueue = `test-unit-queue-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+  const isCi = process.env.CI === 'true';
 
-  // Resolve and validate the effective Redis endpoint (checking designated test URL, REDIS_URL, REDIS_HOST, and appConfig.redis)
-  const effectiveTarget = (() => {
-    const designatedTestUrl =
-      process.env.MIGRATIONGUARD_TEST_REDIS_URL || process.env.TEST_REDIS_URL;
-    if (designatedTestUrl) {
-      try {
-        const parsed = new URL(designatedTestUrl);
-        return {
-          host: parsed.hostname,
-          port: parsed.port || '6379',
-          source: 'MIGRATIONGUARD_TEST_REDIS_URL',
-          url: designatedTestUrl,
-        };
-      } catch {
-        return {
-          host: designatedTestUrl,
-          port: '6379',
-          source: 'MIGRATIONGUARD_TEST_REDIS_URL',
-          url: designatedTestUrl,
-        };
-      }
+  let effectiveTestRedisUrl = 'redis://127.0.0.1:6379';
+  try {
+    const target = resolveSafeTestRedisEndpoint();
+    effectiveTestRedisUrl = target.url;
+  } catch (err: any) {
+    if (isCi) {
+      throw new Error(`[CI Mandatory Failure] ${err.message}`);
     }
-    if (process.env.REDIS_URL) {
-      try {
-        const parsed = new URL(process.env.REDIS_URL);
-        return {
-          host: parsed.hostname,
-          port: parsed.port || '6379',
-          source: 'REDIS_URL',
-          url: process.env.REDIS_URL,
-        };
-      } catch {
-        return {
-          host: process.env.REDIS_URL,
-          port: '6379',
-          source: 'REDIS_URL',
-          url: process.env.REDIS_URL,
-        };
-      }
-    }
-    const host = process.env.REDIS_HOST || appConfig.redis.host || 'localhost';
-    const port = String(process.env.REDIS_PORT || appConfig.redis.port || '6379');
-    return {
-      host,
-      port,
-      source: process.env.REDIS_HOST ? 'REDIS_HOST' : 'appConfig.redis.host',
-      url: undefined,
-    };
-  })();
-
-  // 1. Strict production guard: Queue unit tests must never connect to production Redis
-  const isProductionTarget =
-    process.env.NODE_ENV === 'production' ||
-    process.env.REDIS_ENV === 'production' ||
-    /prod/i.test(effectiveTarget.host) ||
-    (effectiveTarget.url ? /prod/i.test(effectiveTarget.url) : false);
-
-  if (isProductionTarget) {
-    throw new Error(
-      `[Safety Guard] Queue unit tests must never connect to production Redis (${effectiveTarget.host} via ${effectiveTarget.source}).`,
-    );
+    // In local dev where generic REDIS_URL in .env is remote, isolate unit tests to loopback (detached mode)
+    effectiveTestRedisUrl = 'redis://127.0.0.1:6379';
   }
-
-  // 2. Strict remote guard: Remote endpoints strictly require ALLOW_REMOTE_TEST_REDIS=true
-  const isTargetLoopback = DatabaseService.isLoopbackHost(effectiveTarget.host);
-  if (!isTargetLoopback && process.env.ALLOW_REMOTE_TEST_REDIS !== 'true') {
-    if (process.env.CI === 'true') {
-      throw new Error(
-        `[Safety Guard] Refusing to run queue unit tests against remote Redis (${effectiveTarget.host} via ${effectiveTarget.source}) in CI without explicit ALLOW_REMOTE_TEST_REDIS=true.`,
-      );
-    }
-  }
-
-  // Determine explicit isolated test Redis URL:
-  // In loopback or explicitly authorized environments, use the target; otherwise route to local loopback
-  const effectiveTestRedisUrl = (() => {
-    if (isTargetLoopback || process.env.ALLOW_REMOTE_TEST_REDIS === 'true') {
-      if (effectiveTarget.url) {
-        return effectiveTarget.url;
-      }
-      const isTls = process.env.REDIS_TLS === 'true';
-      const auth = (process.env.REDIS_PASSWORD || appConfig.redis.password)
-        ? `:${process.env.REDIS_PASSWORD || appConfig.redis.password}@`
-        : '';
-      const protocol = isTls ? 'rediss://' : 'redis://';
-      return `${protocol}${auth}${effectiveTarget.host}:${effectiveTarget.port}`;
-    }
-    // Protect remote development Redis instance from unit test execution when not explicitly authorized
-    return 'redis://127.0.0.1:6379';
-  })();
 
   beforeAll(() => {
     process.env.BULLMQ_QUEUE_NAME = unitTestQueue;
@@ -289,5 +210,42 @@ describe('QueueService (BullMQ Producer)', () => {
     expect(jobIds).toHaveLength(2);
     expect(jobIds[0]).toBe('run-002_batch_0001');
     expect(jobIds[1]).toBe('run-002_batch_0002');
+  });
+
+  it('rejects remote generic REDIS_URL even when ALLOW_REMOTE_TEST_REDIS is true', () => {
+    const prevUrl = process.env.REDIS_URL;
+    const prevRemote = process.env.ALLOW_REMOTE_TEST_REDIS;
+    const prevTestUrl = process.env.MIGRATIONGUARD_TEST_REDIS_URL;
+    const prevTestUrlAlt = process.env.TEST_REDIS_URL;
+    const prevNodeEnv = process.env.NODE_ENV;
+    try {
+      process.env.NODE_ENV = 'test';
+      delete process.env.MIGRATIONGUARD_TEST_REDIS_URL;
+      delete process.env.TEST_REDIS_URL;
+      process.env.REDIS_URL = 'redis://cache-01.example.net:6379';
+      process.env.ALLOW_REMOTE_TEST_REDIS = 'true';
+
+      expect(() => {
+        resolveSafeTestRedisEndpoint();
+      }).toThrow(/Generic application Redis endpoint .* cannot be used for remote testing/);
+    } finally {
+      process.env.NODE_ENV = prevNodeEnv;
+      process.env.REDIS_URL = prevUrl;
+      process.env.ALLOW_REMOTE_TEST_REDIS = prevRemote;
+      if (prevTestUrl) process.env.MIGRATIONGUARD_TEST_REDIS_URL = prevTestUrl;
+      if (prevTestUrlAlt) process.env.TEST_REDIS_URL = prevTestUrlAlt;
+    }
+  });
+
+  it('strictly forbids testing against production environments regardless of configuration', () => {
+    const prevNodeEnv = process.env.NODE_ENV;
+    try {
+      process.env.NODE_ENV = 'production';
+      expect(() => {
+        resolveSafeTestRedisEndpoint();
+      }).toThrow(/Redis tests must never run in production environment/);
+    } finally {
+      process.env.NODE_ENV = prevNodeEnv;
+    }
   });
 });

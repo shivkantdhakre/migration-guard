@@ -1,106 +1,31 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { QueueService, MigrationJobPayload } from '../src/queue/queue.service';
-import { DatabaseService } from '../src/database/database.service';
+import { resolveSafeTestRedisEndpoint, ResolvedRedisTarget } from './redis-test-utils';
 import { Worker, Job } from 'bullmq';
 import { Redis } from 'ioredis';
 
 describe('Backend QueueService Live Redis Integration (Run 005.4 & Run 005.5)', () => {
-  let queueService: QueueService;
+  let queueService: QueueService | null = null;
   let testWorker: Worker | null = null;
   let testWorkerConnection: Redis | null = null;
   let testRedisClient: Redis | null = null;
+  let resolvedTarget: ResolvedRedisTarget | null = null;
   const isCi = process.env.CI === 'true';
   const initialEnv = { ...process.env };
 
   // Isolated queue name to ensure zero state collision with other test suites or default queues
   const uniqueQueueName = `test-live-queue-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
 
-  // 1. Resolve effective Redis target
-  const effectiveTarget = (() => {
-    const designatedTestUrl =
-      process.env.MIGRATIONGUARD_TEST_REDIS_URL || process.env.TEST_REDIS_URL;
-    if (designatedTestUrl) {
-      try {
-        const parsed = new URL(designatedTestUrl);
-        return {
-          host: parsed.hostname,
-          port: parsed.port || '6379',
-          source: 'MIGRATIONGUARD_TEST_REDIS_URL',
-          url: designatedTestUrl,
-        };
-      } catch {
-        return {
-          host: designatedTestUrl,
-          port: '6379',
-          source: 'MIGRATIONGUARD_TEST_REDIS_URL',
-          url: designatedTestUrl,
-        };
-      }
-    }
-    if (process.env.REDIS_URL) {
-      try {
-        const parsed = new URL(process.env.REDIS_URL);
-        return {
-          host: parsed.hostname,
-          port: parsed.port || '6379',
-          source: 'REDIS_URL',
-          url: process.env.REDIS_URL,
-        };
-      } catch {
-        return {
-          host: process.env.REDIS_URL,
-          port: '6379',
-          source: 'REDIS_URL',
-          url: process.env.REDIS_URL,
-        };
-      }
-    }
-    const host = process.env.REDIS_HOST || 'localhost';
-    const port = String(process.env.REDIS_PORT || '6379');
-    return {
-      host,
-      port,
-      source: 'REDIS_HOST',
-      url: undefined,
-    };
-  })();
-
-  // 2. Strict production guard: Live integration tests must NEVER run in production or against production Redis
-  const isProductionTarget =
-    process.env.NODE_ENV === 'production' ||
-    process.env.REDIS_ENV === 'production' ||
-    /prod/i.test(effectiveTarget.host) ||
-    (effectiveTarget.url ? /prod/i.test(effectiveTarget.url) : false);
-
-  if (isProductionTarget) {
-    throw new Error(
-      `[Safety Guard] Live Redis integration tests must never connect to production Redis (${effectiveTarget.host} via ${effectiveTarget.source}).`,
-    );
-  }
-
-  // 3. Strict remote guard: Remote endpoints strictly require ALLOW_REMOTE_TEST_REDIS=true
-  const isTargetLoopback = DatabaseService.isLoopbackHost(effectiveTarget.host);
-  if (!isTargetLoopback && process.env.ALLOW_REMOTE_TEST_REDIS !== 'true') {
+  // Evaluate endpoint resolution safely
+  try {
+    resolvedTarget = resolveSafeTestRedisEndpoint();
+  } catch (err: any) {
     if (isCi) {
-      throw new Error(
-        `[CI Mandatory Failure] Refusing to run live Redis integration tests against remote Redis (${effectiveTarget.host} via ${effectiveTarget.source}) in CI without explicit ALLOW_REMOTE_TEST_REDIS=true.`,
-      );
+      throw err;
     }
   }
 
-  const redisUrl = (() => {
-    if (isTargetLoopback || process.env.ALLOW_REMOTE_TEST_REDIS === 'true') {
-      if (effectiveTarget.url) {
-        return effectiveTarget.url;
-      }
-      const isTls = process.env.REDIS_TLS === 'true';
-      const auth = process.env.REDIS_PASSWORD ? `:${process.env.REDIS_PASSWORD}@` : '';
-      const protocol = isTls ? 'rediss://' : 'redis://';
-      return `${protocol}${auth}${effectiveTarget.host}:${effectiveTarget.port}`;
-    }
-    return 'redis://localhost:6379';
-  })();
-
+  const redisUrl = resolvedTarget ? resolvedTarget.url : 'redis://127.0.0.1:6379';
   const isRediss = redisUrl.startsWith('rediss://');
   const isTls = isRediss || process.env.REDIS_TLS === 'true';
   const allowInsecureTls = process.env.ALLOW_INSECURE_TLS === 'true';
@@ -121,10 +46,8 @@ describe('Backend QueueService Live Redis Integration (Run 005.4 & Run 005.5)', 
     delete process.env.ALLOW_SIMULATED_DISPATCH;
     process.env.BULLMQ_QUEUE_NAME = uniqueQueueName;
 
-    if (!isTargetLoopback && process.env.ALLOW_REMOTE_TEST_REDIS !== 'true') {
-      console.warn(
-        `[Safety Guard] Refusing to run live Redis integration test against remote Redis (${effectiveTarget.host}) without explicit ALLOW_REMOTE_TEST_REDIS=true. Skipping test.`,
-      );
+    if (!resolvedTarget) {
+      console.warn('[Safety Notice] Safe Redis test endpoint not available in local environment, skipping live test.');
       return;
     }
 
@@ -141,6 +64,7 @@ describe('Backend QueueService Live Redis Integration (Run 005.4 & Run 005.5)', 
     } catch (err: any) {
       if (testRedisClient) {
         testRedisClient.disconnect();
+        testRedisClient = null;
       }
       if (isCi) {
         throw new Error(`[CI Mandatory Failure] Live Redis is unreachable in CI environment: ${err.message}`);
@@ -155,6 +79,27 @@ describe('Backend QueueService Live Redis Integration (Run 005.4 & Run 005.5)', 
 
   afterAll(async () => {
     let cleanupError: any = null;
+
+    // 1. Close workers and worker connections first so no active jobs block queue obliteration
+    try {
+      if (testWorker) {
+        await testWorker.close();
+        testWorker = null;
+      }
+    } catch (err) {
+      if (!cleanupError) cleanupError = err;
+    }
+
+    try {
+      if (testWorkerConnection) {
+        testWorkerConnection.disconnect();
+        testWorkerConnection = null;
+      }
+    } catch (err) {
+      if (!cleanupError) cleanupError = err;
+    }
+
+    // 2. Now drain and obliterate queue
     try {
       if (queueService) {
         const q = queueService.getQueue();
@@ -164,52 +109,36 @@ describe('Backend QueueService Live Redis Integration (Run 005.4 & Run 005.5)', 
         }
       }
     } catch (err: any) {
-      cleanupError = err;
-    } finally {
-      try {
-        if (testWorker) {
-          await testWorker.close();
-          testWorker = null;
-        }
-      } catch (err) {
-        if (!cleanupError) cleanupError = err;
-      }
+      if (!cleanupError) cleanupError = err;
+    }
 
-      try {
-        if (testWorkerConnection) {
-          testWorkerConnection.disconnect();
-          testWorkerConnection = null;
-        }
-      } catch (err) {
-        if (!cleanupError) cleanupError = err;
+    // 3. Close QueueService and test Redis client
+    try {
+      if (queueService) {
+        await queueService.onModuleDestroy();
+        queueService = null;
       }
+    } catch (err) {
+      if (!cleanupError) cleanupError = err;
+    }
 
-      try {
-        if (queueService) {
-          await queueService.onModuleDestroy();
-        }
-      } catch (err) {
-        if (!cleanupError) cleanupError = err;
+    try {
+      if (testRedisClient) {
+        testRedisClient.disconnect();
+        testRedisClient = null;
       }
+    } catch (err) {
+      if (!cleanupError) cleanupError = err;
+    }
 
-      try {
-        if (testRedisClient) {
-          testRedisClient.disconnect();
-          testRedisClient = null;
-        }
-      } catch (err) {
-        if (!cleanupError) cleanupError = err;
+    // 4. Always restore process environment
+    for (const key of Object.keys(process.env)) {
+      if (!(key in initialEnv)) {
+        delete process.env[key];
       }
-
-      // Always restore process environment
-      for (const key of Object.keys(process.env)) {
-        if (!(key in initialEnv)) {
-          delete process.env[key];
-        }
-      }
-      for (const [key, value] of Object.entries(initialEnv)) {
-        process.env[key] = value;
-      }
+    }
+    for (const [key, value] of Object.entries(initialEnv)) {
+      process.env[key] = value;
     }
 
     if (cleanupError) {
@@ -217,17 +146,26 @@ describe('Backend QueueService Live Redis Integration (Run 005.4 & Run 005.5)', 
     }
   });
 
-  it('connects actual QueueService to live Redis without connection or TLS errors', async () => {
-    if (!testRedisClient || !queueService) return;
+  it('connects actual QueueService to live Redis without connection or TLS errors', async (ctx) => {
+    if (!resolvedTarget || !testRedisClient || !queueService || !queueService.isQueueConnected) {
+      ctx.skip();
+      return;
+    }
 
     expect(queueService.isQueueConnected).toBe(true);
   });
 
-  it('recovers connection, resumes dispatching, and consumes job after genuine Redis CLIENT KILL disconnect', async () => {
-    if (!testRedisClient || !queueService || !queueService.isQueueConnected) return;
+  it('recovers connection, resumes dispatching, and consumes job after genuine Redis CLIENT KILL disconnect', async (ctx) => {
+    if (!resolvedTarget || !testRedisClient || !queueService || !queueService.isQueueConnected) {
+      ctx.skip();
+      return;
+    }
 
     const redis = queueService.getRedisClient();
-    if (!redis) return;
+    if (!redis) {
+      ctx.skip();
+      return;
+    }
 
     expect(queueService.isQueueConnected).toBe(true);
 
@@ -343,8 +281,11 @@ describe('Backend QueueService Live Redis Integration (Run 005.4 & Run 005.5)', 
       await consumptionPromise;
       expect(recoveryJobConsumed).toBe(true);
     } finally {
-      await recoveryWorker.close();
-      recoveryWorkerConnection.disconnect();
+      try {
+        await recoveryWorker.close();
+      } finally {
+        recoveryWorkerConnection.disconnect();
+      }
     }
 
     // Drain the test queue to ensure test 2 jobs do not spill into test 3
@@ -354,8 +295,11 @@ describe('Backend QueueService Live Redis Integration (Run 005.4 & Run 005.5)', 
     }
   });
 
-  it('dispatches a migration batch via QueueService and verifies BullMQ worker consumes it on unique queue', async () => {
-    if (!testRedisClient || !queueService || !queueService.isQueueConnected) return;
+  it('dispatches a migration batch via QueueService and verifies BullMQ worker consumes it on unique queue', async (ctx) => {
+    if (!resolvedTarget || !testRedisClient || !queueService || !queueService.isQueueConnected) {
+      ctx.skip();
+      return;
+    }
 
     // Ensure queue is clean before dispatching test 3 job
     const q = queueService.getQueue();

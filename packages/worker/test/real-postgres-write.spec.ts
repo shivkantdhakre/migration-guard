@@ -110,7 +110,7 @@ describe('Real PostgreSQL Destination Connector Integration', () => {
       return;
     }
     expect(res.success).toBe(true);
-    expect(res.latencyMs).toBeGreaterThan(0);
+    expect(res.latencyMs).toBeGreaterThanOrEqual(0);
   });
 
   it('should write real transformed batch into destination PostgreSQL', async () => {

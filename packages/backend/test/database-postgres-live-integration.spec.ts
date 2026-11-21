@@ -4,6 +4,7 @@ import { DatabaseService } from '../src/database/database.service';
 describe('Backend PostgreSQL Live Persistence Integration (Run 005.2 & Run 005.5)', () => {
   let dbService: DatabaseService;
   const isCi = process.env.CI === 'true';
+  const initialEnv = { ...process.env };
   const testSlug = `test-ws-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
   const testName = `Integration Test Workspace ${Date.now()}`;
 
@@ -70,15 +71,35 @@ describe('Backend PostgreSQL Live Persistence Integration (Run 005.2 & Run 005.5
   });
 
   afterAll(async () => {
-    if (dbService?.isDbConnected) {
-      try {
+    let cleanupError: any = null;
+    try {
+      if (dbService?.isDbConnected) {
         await dbService.query(`DELETE FROM workspaces WHERE slug = $1`, [testSlug]);
-      } catch {}
-      await dbService.onModuleDestroy();
+      }
+    } catch (err: any) {
+      cleanupError = err;
+    } finally {
+      if (dbService) {
+        try {
+          await dbService.onModuleDestroy();
+        } catch (err) {
+          if (!cleanupError) cleanupError = err;
+        }
+      }
+      // Restore all environment variables to initial snapshot
+      for (const key of Object.keys(process.env)) {
+        if (!(key in initialEnv)) {
+          delete process.env[key];
+        }
+      }
+      for (const [key, value] of Object.entries(initialEnv)) {
+        process.env[key] = value;
+      }
     }
-    // Restore default for subsequent tests if any
-    process.env.ALLOW_IN_MEMORY_DB = 'true';
-    delete process.env.FORCE_POSTGRES_DB;
+
+    if (cleanupError) {
+      throw cleanupError;
+    }
   });
 
   it('connects to real PostgreSQL without in-memory fallback', async () => {

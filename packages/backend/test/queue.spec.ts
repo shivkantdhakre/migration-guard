@@ -84,13 +84,18 @@ describe('QueueService (BullMQ Producer)', () => {
   // Determine explicit isolated test Redis URL:
   // In loopback or explicitly authorized environments, use the target; otherwise route to local loopback
   const effectiveTestRedisUrl = (() => {
-    if (effectiveTarget.url && (isTargetLoopback || process.env.ALLOW_REMOTE_TEST_REDIS === 'true')) {
-      return effectiveTarget.url;
+    if (isTargetLoopback || process.env.ALLOW_REMOTE_TEST_REDIS === 'true') {
+      if (effectiveTarget.url) {
+        return effectiveTarget.url;
+      }
+      const isTls = process.env.REDIS_TLS === 'true';
+      const auth = (process.env.REDIS_PASSWORD || appConfig.redis.password)
+        ? `:${process.env.REDIS_PASSWORD || appConfig.redis.password}@`
+        : '';
+      const protocol = isTls ? 'rediss://' : 'redis://';
+      return `${protocol}${auth}${effectiveTarget.host}:${effectiveTarget.port}`;
     }
-    if (isTargetLoopback) {
-      return `redis://${effectiveTarget.host}:${effectiveTarget.port}`;
-    }
-    // Protect remote development Redis instance from unit test execution
+    // Protect remote development Redis instance from unit test execution when not explicitly authorized
     return 'redis://127.0.0.1:6379';
   })();
 
@@ -117,13 +122,24 @@ describe('QueueService (BullMQ Producer)', () => {
   });
 
   afterEach(async () => {
-    if (queueService) {
-      const q = queueService.getQueue();
-      if (q && queueService.isQueueConnected) {
-        await q.drain();
-        await q.obliterate({ force: true });
+    let cleanupError: any = null;
+    try {
+      if (queueService) {
+        const q = queueService.getQueue();
+        if (q && queueService.isQueueConnected) {
+          await q.drain();
+          await q.obliterate({ force: true });
+        }
       }
-      await queueService.onModuleDestroy();
+    } catch (err: any) {
+      cleanupError = err;
+    } finally {
+      if (queueService) {
+        await queueService.onModuleDestroy();
+      }
+    }
+    if (cleanupError) {
+      throw cleanupError;
     }
   });
 

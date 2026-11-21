@@ -128,10 +128,22 @@ describe('Backend QueueService Live Redis Integration (Run 005.4 & Run 005.5)', 
       writeMode: 'upsert',
     });
     expect(recoveryJobId).toBe('run-recovery_batch_recovery');
+
+    // Drain the test queue to ensure test 2 jobs do not spill into test 3
+    const q = queueService.getQueue();
+    if (q) {
+      await q.drain();
+    }
   });
 
   it('dispatches a migration batch via QueueService and verifies BullMQ worker consumes it on unique queue', async () => {
     if (!testRedisClient || !queueService || !queueService.isQueueConnected) return;
+
+    // Ensure queue is clean before dispatching test 3 job
+    const q = queueService.getQueue();
+    if (q) {
+      await q.drain();
+    }
 
     const testRunId = `run-live-${Date.now()}`;
     const payload: MigrationJobPayload = {
@@ -149,6 +161,7 @@ describe('Backend QueueService Live Redis Integration (Run 005.4 & Run 005.5)', 
       writeMode: 'upsert',
     };
 
+    const targetJobId = `${payload.migrationRunId}_${payload.batchKey}`;
     let consumedData: MigrationJobPayload | null = null;
 
     const jobPromise = new Promise<{ id: string; data: MigrationJobPayload }>((resolve, reject) => {
@@ -162,7 +175,9 @@ describe('Backend QueueService Live Redis Integration (Run 005.4 & Run 005.5)', 
       testWorker = new Worker(
         uniqueQueueName,
         async (job: Job) => {
-          consumedData = job.data as MigrationJobPayload;
+          if (job.id === targetJobId) {
+            consumedData = job.data as MigrationJobPayload;
+          }
           return { status: 'COMMITTED', recordsProcessed: 100 };
         },
         {
@@ -172,7 +187,9 @@ describe('Backend QueueService Live Redis Integration (Run 005.4 & Run 005.5)', 
       );
 
       testWorker.on('completed', (job: Job) => {
-        resolve({ id: job.id!, data: job.data });
+        if (job.id === targetJobId) {
+          resolve({ id: job.id!, data: job.data });
+        }
       });
 
       testWorker.on('failed', (job, err) => {

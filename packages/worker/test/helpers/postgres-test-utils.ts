@@ -1,6 +1,39 @@
+export function normalizeIpHost(host: string): string {
+  if (!host) return '';
+  const clean = host.replace(/^\[|\]$/g, '').toLowerCase().trim();
+
+  // Handle IPv4-mapped IPv6 in hex: e.g. ::ffff:7f00:1 or 0:0:0:0:0:ffff:7f00:1
+  const ipv4MappedHex = /^(?:::ffff:|0:0:0:0:0:ffff:)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(clean);
+  if (ipv4MappedHex) {
+    const high = parseInt(ipv4MappedHex[1], 16);
+    const low = parseInt(ipv4MappedHex[2], 16);
+    const b1 = (high >> 8) & 0xff;
+    const b2 = high & 0xff;
+    const b3 = (low >> 8) & 0xff;
+    const b4 = low & 0xff;
+    return `${b1}.${b2}.${b3}.${b4}`;
+  }
+
+  // Handle IPv4-mapped IPv6 in dotted decimal: ::ffff:127.0.0.1
+  const ipv4MappedDot = /^(?:::ffff:|0:0:0:0:0:ffff:)(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/i.exec(clean);
+  if (ipv4MappedDot) {
+    return ipv4MappedDot[1];
+  }
+
+  // Handle fully expanded IPv6 loopback and unspecified
+  if (/^(0+:){7}0*1$/.test(clean)) {
+    return '::1';
+  }
+  if (/^(0+:){7}0*0$/.test(clean)) {
+    return '::';
+  }
+
+  return clean;
+}
+
 export const isLoopbackHost = (host: string): boolean => {
   if (!host) return false;
-  const normalized = host.replace(/^\[|\]$/g, '').toLowerCase().trim();
+  const normalized = normalizeIpHost(host);
   return (
     normalized === 'localhost' ||
     normalized === '127.0.0.1' ||
@@ -11,7 +44,7 @@ export const isLoopbackHost = (host: string): boolean => {
 
 export const isUnspecifiedHost = (host: string): boolean => {
   if (!host) return false;
-  const normalized = host.replace(/^\[|\]$/g, '').toLowerCase().trim();
+  const normalized = normalizeIpHost(host);
   return normalized === '0.0.0.0' || normalized === '::';
 };
 
@@ -79,17 +112,17 @@ export function validateSafeTestDatabaseEndpoint(targetDbUrl: string): ResolvedD
     throw new Error(`[Safety Guard] Target test database URL must specify a non-empty database name: '${targetDbUrl}'.`);
   }
 
+  // 1. Strict production pattern guard (applies UNCONDITIONALLY to all endpoints, local and remote alike)
+  if (/prod/i.test(host) || /prod/i.test(targetDbUrl) || /prod/i.test(dbName)) {
+    throw new Error(
+      `[Safety Guard] Designated test database (${host}/${dbName}) matches production naming patterns (/prod/i). ` +
+      `Testing against production endpoints is strictly forbidden.`,
+    );
+  }
+
   const isLoopback = isLoopbackHost(host);
 
   if (!isLoopback) {
-    // 1. Strict production pattern guard
-    if (/prod/i.test(host) || /prod/i.test(targetDbUrl) || /prod/i.test(dbName)) {
-      throw new Error(
-        `[Safety Guard] Designated test database (${host}/${dbName}) matches production naming patterns (/prod/i). ` +
-        `Testing against production endpoints is strictly forbidden.`,
-      );
-    }
-
     // 2. Strict remote approval guard
     if (process.env.ALLOW_REMOTE_TEST_DB !== 'true') {
       throw new Error(
@@ -97,11 +130,17 @@ export function validateSafeTestDatabaseEndpoint(targetDbUrl: string): ResolvedD
       );
     }
 
-    // 3. Strict host allowlist guard
+    // 3. Strict host allowlist guard (MANDATORY for remote endpoints)
     const allowedHosts = (process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_HOSTS || '')
       .split(',')
       .map((h) => h.trim().toLowerCase())
       .filter(Boolean);
+
+    if (allowedHosts.length === 0) {
+      throw new Error(
+        `[Safety Guard] Remote database testing strictly requires a non-empty MIGRATIONGUARD_ALLOWED_TEST_DATABASE_HOSTS allowlist. Refusing execution.`,
+      );
+    }
 
     if (!allowedHosts.includes(host.toLowerCase())) {
       throw new Error(
@@ -127,31 +166,41 @@ export function validateSafeTestDatabaseEndpoint(targetDbUrl: string): ResolvedD
       );
     }
 
-    // 5. Port validation against MIGRATIONGUARD_ALLOWED_TEST_DATABASE_PORTS (if configured)
+    // 5. Port validation against MIGRATIONGUARD_ALLOWED_TEST_DATABASE_PORTS (MANDATORY for remote endpoints)
     const allowedPorts = (process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_PORTS || '')
       .split(',')
       .map((p) => p.trim())
       .filter(Boolean);
 
-    if (allowedPorts.length > 0 && !allowedPorts.includes(port)) {
+    if (allowedPorts.length === 0) {
+      throw new Error(
+        `[Safety Guard] Remote database testing strictly requires a non-empty MIGRATIONGUARD_ALLOWED_TEST_DATABASE_PORTS allowlist. Refusing execution.`,
+      );
+    }
+
+    if (!allowedPorts.includes(port)) {
       throw new Error(
         `[Safety Guard] Remote database port '${port}' is not present in MIGRATIONGUARD_ALLOWED_TEST_DATABASE_PORTS allowlist. Refusing execution.`,
       );
     }
 
-    // 6. Target tuple authorization against MIGRATIONGUARD_ALLOWED_TEST_DATABASE_TARGETS (if configured)
+    // 6. Target tuple authorization against MIGRATIONGUARD_ALLOWED_TEST_DATABASE_TARGETS (MANDATORY for remote endpoints)
     const allowedTargets = (process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_TARGETS || '')
       .split(',')
       .map((t) => t.trim().toLowerCase())
       .filter(Boolean);
 
-    if (allowedTargets.length > 0) {
-      const targetTuple = `${host.toLowerCase()}:${port}/${dbName.toLowerCase()}`;
-      if (!allowedTargets.includes(targetTuple)) {
-        throw new Error(
-          `[Safety Guard] Remote database target tuple '${targetTuple}' is not present in MIGRATIONGUARD_ALLOWED_TEST_DATABASE_TARGETS allowlist. Refusing execution.`,
-        );
-      }
+    if (allowedTargets.length === 0) {
+      throw new Error(
+        `[Safety Guard] Remote database testing strictly requires a non-empty MIGRATIONGUARD_ALLOWED_TEST_DATABASE_TARGETS allowlist. Refusing execution.`,
+      );
+    }
+
+    const targetTuple = `${host.toLowerCase()}:${port}/${dbName.toLowerCase()}`;
+    if (!allowedTargets.includes(targetTuple)) {
+      throw new Error(
+        `[Safety Guard] Remote database target tuple '${targetTuple}' is not present in MIGRATIONGUARD_ALLOWED_TEST_DATABASE_TARGETS allowlist. Refusing execution.`,
+      );
     }
   }
 

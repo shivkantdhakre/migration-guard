@@ -8,18 +8,7 @@ import {
   isUnsafeProductionHost as connectorUnsafe,
 } from '../src/connectors/connector-factory.js';
 import { TransformedBatch } from '../src/types.js';
-import { validateSafeTestDatabaseEndpoint } from './helpers/postgres-test-utils.js';
-
-export const isLoopbackHost = (host: string): boolean => {
-  if (!host) return false;
-  const normalized = host.replace(/^\[|\]$/g, '').toLowerCase().trim();
-  return (
-    normalized === 'localhost' ||
-    normalized === '127.0.0.1' ||
-    normalized === '::1' ||
-    normalized.startsWith('127.')
-  );
-};
+import { validateSafeTestDatabaseEndpoint, isLoopbackHost } from './helpers/postgres-test-utils.js';
 
 describe('Real PostgreSQL Destination Connector Integration', () => {
   const targetDbUrl =

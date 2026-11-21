@@ -23,9 +23,42 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   // In-memory relational store fallback for unit testing or explicitly enabled offline dev
   private memoryStore: Map<string, Map<string, any>> = new Map();
 
+  public static normalizeIpHost(host: string): string {
+    if (!host) return '';
+    const clean = host.replace(/^\[|\]$/g, '').toLowerCase().trim();
+
+    // Handle IPv4-mapped IPv6 in hex: e.g. ::ffff:7f00:1 or 0:0:0:0:0:ffff:7f00:1
+    const ipv4MappedHex = /^(?:::ffff:|0:0:0:0:0:ffff:)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(clean);
+    if (ipv4MappedHex) {
+      const high = parseInt(ipv4MappedHex[1], 16);
+      const low = parseInt(ipv4MappedHex[2], 16);
+      const b1 = (high >> 8) & 0xff;
+      const b2 = high & 0xff;
+      const b3 = (low >> 8) & 0xff;
+      const b4 = low & 0xff;
+      return `${b1}.${b2}.${b3}.${b4}`;
+    }
+
+    // Handle IPv4-mapped IPv6 in dotted decimal: ::ffff:127.0.0.1
+    const ipv4MappedDot = /^(?:::ffff:|0:0:0:0:0:ffff:)(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/i.exec(clean);
+    if (ipv4MappedDot) {
+      return ipv4MappedDot[1];
+    }
+
+    // Handle fully expanded IPv6 loopback and unspecified
+    if (/^(0+:){7}0*1$/.test(clean)) {
+      return '::1';
+    }
+    if (/^(0+:){7}0*0$/.test(clean)) {
+      return '::';
+    }
+
+    return clean;
+  }
+
   public static isLoopbackHost(host: string): boolean {
     if (!host) return false;
-    const normalized = host.replace(/^\[|\]$/g, '').toLowerCase().trim();
+    const normalized = DatabaseService.normalizeIpHost(host);
     return (
       normalized === 'localhost' ||
       normalized === '127.0.0.1' ||
@@ -36,7 +69,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
 
   public static isUnspecifiedHost(host: string): boolean {
     if (!host) return false;
-    const normalized = host.replace(/^\[|\]$/g, '').toLowerCase().trim();
+    const normalized = DatabaseService.normalizeIpHost(host);
     return normalized === '0.0.0.0' || normalized === '::';
   }
 

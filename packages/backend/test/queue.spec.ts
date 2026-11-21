@@ -331,9 +331,20 @@ describe('QueueService (BullMQ Producer)', () => {
     expect(DatabaseService.isUnsafeProductionHost('localhost')).toBe(true);
     expect(DatabaseService.isUnsafeProductionHost('127.0.0.1')).toBe(true);
     expect(DatabaseService.isUnsafeProductionHost('db-staging.internal.net')).toBe(false);
+
+    // IPv4-mapped IPv6 loopback and wildcard aliases (Run 005.13 P1)
+    expect(DatabaseService.isLoopbackHost('[::ffff:127.0.0.1]')).toBe(true);
+    expect(DatabaseService.isLoopbackHost('[::ffff:7f00:1]')).toBe(true);
+    expect(DatabaseService.isLoopbackHost('::ffff:127.0.0.1')).toBe(true);
+    expect(DatabaseService.isLoopbackHost('::ffff:7f00:1')).toBe(true);
+    expect(DatabaseService.isUnspecifiedHost('[::ffff:0:0]')).toBe(true);
+    expect(DatabaseService.isUnspecifiedHost('[::ffff:0.0.0.0]')).toBe(true);
+    expect(DatabaseService.isUnsafeProductionHost('[::ffff:127.0.0.1]')).toBe(true);
+    expect(DatabaseService.isUnsafeProductionHost('[::ffff:7f00:1]')).toBe(true);
+    expect(DatabaseService.isUnsafeProductionHost('[::ffff:0:0]')).toBe(true);
   });
 
-  describe('validateSafeTestDatabaseEndpoint (Run 005.12 Mandatory Allowlists)', () => {
+  describe('validateSafeTestDatabaseEndpoint (Run 005.12 & Run 005.13 Mandatory Allowlists)', () => {
     it('rejects target database URL when database name is empty', () => {
       const restoreEnv = snapshotEnv();
       try {
@@ -350,12 +361,34 @@ describe('QueueService (BullMQ Producer)', () => {
       }
     });
 
+    it('rejects local loopback database when database name or URL matches production naming patterns (/prod/i) (Run 005.13 P2)', () => {
+      const restoreEnv = snapshotEnv();
+      try {
+        process.env.NODE_ENV = 'test';
+        expect(() => {
+          validateSafeTestDatabaseEndpoint('postgresql://postgres:pass@localhost:5432/production');
+        }).toThrow(/matches production naming patterns/);
+
+        expect(() => {
+          validateSafeTestDatabaseEndpoint('postgresql://postgres:pass@127.0.0.1:5432/prod_data');
+        }).toThrow(/matches production naming patterns/);
+
+        expect(() => {
+          validateSafeTestDatabaseEndpoint('postgresql://postgres:pass@[::1]:5432/production_replica');
+        }).toThrow(/matches production naming patterns/);
+      } finally {
+        restoreEnv();
+      }
+    });
+
     it('rejects remote database when MIGRATIONGUARD_ALLOWED_TEST_DATABASE_NAMES is missing or empty', () => {
       const restoreEnv = snapshotEnv();
       try {
         process.env.NODE_ENV = 'test';
         process.env.ALLOW_REMOTE_TEST_DB = 'true';
         process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_HOSTS = 'staging-db.internal.net';
+        process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_PORTS = '5432';
+        process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_TARGETS = 'staging-db.internal.net:5432/testdb';
         delete process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_NAMES;
 
         expect(() => {
@@ -373,10 +406,30 @@ describe('QueueService (BullMQ Producer)', () => {
         process.env.ALLOW_REMOTE_TEST_DB = 'true';
         process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_HOSTS = 'staging-db.internal.net';
         process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_NAMES = 'allowed_db_1, allowed_db_2';
+        process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_PORTS = '5432';
+        process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_TARGETS = 'staging-db.internal.net:5432/allowed_db_1';
 
         expect(() => {
           validateSafeTestDatabaseEndpoint('postgresql://postgres:pass@staging-db.internal.net:5432/unauthorized_db');
         }).toThrow(/Remote database name 'unauthorized_db' is not present in MIGRATIONGUARD_ALLOWED_TEST_DATABASE_NAMES allowlist/);
+      } finally {
+        restoreEnv();
+      }
+    });
+
+    it('rejects remote database when MIGRATIONGUARD_ALLOWED_TEST_DATABASE_PORTS is missing or empty (Run 005.13 P1)', () => {
+      const restoreEnv = snapshotEnv();
+      try {
+        process.env.NODE_ENV = 'test';
+        process.env.ALLOW_REMOTE_TEST_DB = 'true';
+        process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_HOSTS = 'staging-db.internal.net';
+        process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_NAMES = 'staging_db';
+        process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_TARGETS = 'staging-db.internal.net:5432/staging_db';
+        delete process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_PORTS;
+
+        expect(() => {
+          validateSafeTestDatabaseEndpoint('postgresql://postgres:pass@staging-db.internal.net:5432/staging_db');
+        }).toThrow(/Remote database testing strictly requires a non-empty MIGRATIONGUARD_ALLOWED_TEST_DATABASE_PORTS allowlist/);
       } finally {
         restoreEnv();
       }
@@ -390,10 +443,29 @@ describe('QueueService (BullMQ Producer)', () => {
         process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_HOSTS = 'staging-db.internal.net';
         process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_NAMES = 'staging_db';
         process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_PORTS = '5432, 5433';
+        process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_TARGETS = 'staging-db.internal.net:5434/staging_db';
 
         expect(() => {
           validateSafeTestDatabaseEndpoint('postgresql://postgres:pass@staging-db.internal.net:5434/staging_db');
         }).toThrow(/Remote database port '5434' is not present in MIGRATIONGUARD_ALLOWED_TEST_DATABASE_PORTS allowlist/);
+      } finally {
+        restoreEnv();
+      }
+    });
+
+    it('rejects remote database when MIGRATIONGUARD_ALLOWED_TEST_DATABASE_TARGETS is missing or empty (Run 005.13 P1)', () => {
+      const restoreEnv = snapshotEnv();
+      try {
+        process.env.NODE_ENV = 'test';
+        process.env.ALLOW_REMOTE_TEST_DB = 'true';
+        process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_HOSTS = 'staging-db.internal.net';
+        process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_NAMES = 'staging_db';
+        process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_PORTS = '5432';
+        delete process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_TARGETS;
+
+        expect(() => {
+          validateSafeTestDatabaseEndpoint('postgresql://postgres:pass@staging-db.internal.net:5432/staging_db');
+        }).toThrow(/Remote database testing strictly requires a non-empty MIGRATIONGUARD_ALLOWED_TEST_DATABASE_TARGETS allowlist/);
       } finally {
         restoreEnv();
       }
@@ -406,6 +478,7 @@ describe('QueueService (BullMQ Producer)', () => {
         process.env.ALLOW_REMOTE_TEST_DB = 'true';
         process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_HOSTS = 'staging-db.internal.net';
         process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_NAMES = 'staging_db';
+        process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_PORTS = '5432';
         process.env.MIGRATIONGUARD_ALLOWED_TEST_DATABASE_TARGETS = 'staging-db.internal.net:5432/other_db';
 
         expect(() => {

@@ -67,9 +67,42 @@ function loadEnv() {
 }
 loadEnv();
 
+export function normalizeIpHost(host: string): string {
+  if (!host) return '';
+  const clean = host.replace(/^\[|\]$/g, '').toLowerCase().trim();
+
+  // Handle IPv4-mapped IPv6 in hex: e.g. ::ffff:7f00:1 or 0:0:0:0:0:ffff:7f00:1
+  const ipv4MappedHex = /^(?:::ffff:|0:0:0:0:0:ffff:)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(clean);
+  if (ipv4MappedHex) {
+    const high = parseInt(ipv4MappedHex[1], 16);
+    const low = parseInt(ipv4MappedHex[2], 16);
+    const b1 = (high >> 8) & 0xff;
+    const b2 = high & 0xff;
+    const b3 = (low >> 8) & 0xff;
+    const b4 = low & 0xff;
+    return `${b1}.${b2}.${b3}.${b4}`;
+  }
+
+  // Handle IPv4-mapped IPv6 in dotted decimal: ::ffff:127.0.0.1
+  const ipv4MappedDot = /^(?:::ffff:|0:0:0:0:0:ffff:)(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/i.exec(clean);
+  if (ipv4MappedDot) {
+    return ipv4MappedDot[1];
+  }
+
+  // Handle fully expanded IPv6 loopback and unspecified
+  if (/^(0+:){7}0*1$/.test(clean)) {
+    return '::1';
+  }
+  if (/^(0+:){7}0*0$/.test(clean)) {
+    return '::';
+  }
+
+  return clean;
+}
+
 export const isLoopbackHost = (host: string): boolean => {
   if (!host) return false;
-  const normalized = host.replace(/^\[|\]$/g, '').toLowerCase().trim();
+  const normalized = normalizeIpHost(host);
   return (
     normalized === 'localhost' ||
     normalized === '127.0.0.1' ||
@@ -80,7 +113,7 @@ export const isLoopbackHost = (host: string): boolean => {
 
 export const isUnspecifiedHost = (host: string): boolean => {
   if (!host) return false;
-  const normalized = host.replace(/^\[|\]$/g, '').toLowerCase().trim();
+  const normalized = normalizeIpHost(host);
   return normalized === '0.0.0.0' || normalized === '::';
 };
 
@@ -98,9 +131,9 @@ export function validateDestinationConnectionString(connStr: string, connectionI
     const parsed = new URL(connStr);
     hostname = parsed.hostname;
   } catch {
-    const match = /@([^:/]+|\[[^\]]+\])/.exec(connStr);
+    const match = /@(?:\[([^\]]+)\]|([^/@]+?)(?::\d+)?(?:\/|$))/.exec(connStr);
     if (match) {
-      hostname = match[1];
+      hostname = match[1] || match[2];
     } else {
       throw new Error(`[Worker Security] Destination connection ${connectionId} has an invalid connection string format.`);
     }
@@ -700,6 +733,13 @@ async function shutdown() {
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
-if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
+export { startWorker, shutdown };
+
+const isDirectEntrypoint = Boolean(
+  process.argv[1] &&
+  (process.argv[1].endsWith('worker-main.js') || process.argv[1].endsWith('worker-main.ts'))
+);
+
+if (isDirectEntrypoint || process.env.RUN_STANDALONE_WORKER === 'true') {
   startWorker();
 }

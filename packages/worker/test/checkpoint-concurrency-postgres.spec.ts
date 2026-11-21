@@ -154,12 +154,22 @@ describe('Checkpoint Concurrency & Atomic PostgreSQL Persistence (P0.1)', () => 
 
   it('runs concurrent PostgreSQL transactions with SELECT ... FOR UPDATE when DB is reachable', async () => {
     if (!dbUrl) {
+      if (process.env.CI === 'true') {
+        throw new Error('[CI Mandatory Failure] DATABASE_URL must be configured in CI environment.');
+      }
       console.warn('[Notice] DATABASE_URL not set, skipping live PostgreSQL concurrency test.');
       return;
     }
 
+    const isLocalOrCi =
+      dbUrl.includes('localhost') ||
+      dbUrl.includes('127.0.0.1') ||
+      dbUrl.includes('postgres:') ||
+      dbUrl.includes('migrationguard_test');
+    const ssl = isLocalOrCi ? false : { rejectUnauthorized: true };
+
     // Attempt live connection
-    const testPool = new pg.Pool({ connectionString: dbUrl, ssl: { rejectUnauthorized: false } });
+    const testPool = new pg.Pool({ connectionString: dbUrl, ssl, max: 5 });
     try {
       await testPool.query('SELECT 1');
       await testPool.query(`
@@ -173,56 +183,69 @@ describe('Checkpoint Concurrency & Atomic PostgreSQL Persistence (P0.1)', () => 
           updated_at TIMESTAMPTZ DEFAULT NOW()
         )
       `);
-    } catch {
+    } catch (err: any) {
+      if (process.env.CI === 'true') {
+        await testPool.end().catch(() => {});
+        throw new Error(`[CI Mandatory Failure] Live PostgreSQL is unreachable in CI: ${err.message}`);
+      }
       console.warn('[Notice] Live database unreachable in sandbox, skipping live PostgreSQL test.');
-      await testPool.end();
+      await testPool.end().catch(() => {});
       return;
     }
 
-    const runId = `run-pg-concurrency-${Date.now()}`;
-    await testPool.query(
-      `INSERT INTO migration_runs (id, plan_version_id, status, source_boundary_json, progress_json, created_at, updated_at)
-       VALUES ($1, '00000000-0000-0000-0000-000000000000', 'RUNNING', '{}'::jsonb, '{}'::jsonb, NOW(), NOW())`,
-      [runId],
-    );
+    const pool1 = new pg.Pool({ connectionString: dbUrl, ssl, max: 5 });
+    const pool2 = new pg.Pool({ connectionString: dbUrl, ssl, max: 5 });
+    const adapter1 = new PostgresStorageAdapters(pool1);
+    const adapter2 = new PostgresStorageAdapters(pool2);
 
-    const adapter1 = new PostgresStorageAdapters(dbUrl);
-    const adapter2 = new PostgresStorageAdapters(dbUrl);
+    const runId = `run-pg-concurrency-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+    try {
+      await testPool.query(
+        `INSERT INTO migration_runs (id, plan_version_id, status, source_boundary_json, progress_json, created_at, updated_at)
+         VALUES ($1, '00000000-0000-0000-0000-000000000000', 'RUNNING', '{}'::jsonb, '{}'::jsonb, NOW(), NOW())`,
+        [runId],
+      );
 
-    const batch1 = createBatch(1, 'batch_customers_0001', 0);
-    const batch2 = createBatch(2, 'batch_customers_0002', 100);
+      const batch1 = createBatch(1, 'batch_customers_0001', 0);
+      const batch2 = createBatch(2, 'batch_customers_0002', 100);
 
-    // Fire both concurrent checkpoint advancements simultaneously
-    const [cp1, cp2] = await Promise.all([
-      adapter1.advanceCheckpoint({
-        migrationRunId: runId,
-        sourceObject: 'customers',
-        batch: batch1,
-        planVersionId: 'plan-v1',
-        mappingVersionId: 'map-v1',
-        recordsCommittedCount: 100,
-        cursorEnd: { lastId: 'cust_0100' },
-      }),
-      adapter2.advanceCheckpoint({
-        migrationRunId: runId,
-        sourceObject: 'customers',
-        batch: batch2,
-        planVersionId: 'plan-v1',
-        mappingVersionId: 'map-v1',
-        recordsCommittedCount: 100,
-        cursorEnd: { lastId: 'cust_0200' },
-      }),
-    ]);
+      // Fire both concurrent checkpoint advancements simultaneously with independent pools
+      const [cp1, cp2] = await Promise.all([
+        adapter1.advanceCheckpoint({
+          migrationRunId: runId,
+          sourceObject: 'customers',
+          batch: batch1,
+          planVersionId: 'plan-v1',
+          mappingVersionId: 'map-v1',
+          recordsCommittedCount: 100,
+          cursorEnd: { lastId: 'cust_0100' },
+        }),
+        adapter2.advanceCheckpoint({
+          migrationRunId: runId,
+          sourceObject: 'customers',
+          batch: batch2,
+          planVersionId: 'plan-v1',
+          mappingVersionId: 'map-v1',
+          recordsCommittedCount: 100,
+          cursorEnd: { lastId: 'cust_0200' },
+        }),
+      ]);
 
-    // Inspect final DB state
-    const finalCp = await adapter1.getCheckpoint(runId, 'customers');
-    expect(finalCp).not.toBeNull();
-    expect(finalCp!.committedSequences).toEqual([1, 2]);
-    expect(finalCp!.totalRecordsCommitted).toBe(200);
-    expect(finalCp!.lastCommittedSequenceNo).toBe(2);
+      // Inspect final DB state
+      const finalCp = await adapter1.getCheckpoint(runId, 'customers');
+      expect(finalCp).not.toBeNull();
+      expect(finalCp!.committedSequences).toEqual([1, 2]);
+      expect(finalCp!.totalRecordsCommitted).toBe(200);
+      expect(finalCp!.lastCommittedSequenceNo).toBe(2);
 
-    // Cleanup
-    await testPool.query(`DELETE FROM migration_runs WHERE id = $1`, [runId]);
-    await testPool.end();
+      console.log('[PostgreSQL Concurrency Integration] Verified atomic row-level locking with 2 independent pools on live PostgreSQL.');
+    } finally {
+      await testPool.query(`DELETE FROM migration_runs WHERE id = $1`, [runId]).catch(() => {});
+      await Promise.all([
+        pool1.end().catch(() => {}),
+        pool2.end().catch(() => {}),
+        testPool.end().catch(() => {}),
+      ]);
+    }
   });
 });

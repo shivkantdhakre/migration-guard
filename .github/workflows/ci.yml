@@ -24,6 +24,15 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
     env:
       CI: "true"
       ALLOW_IN_MEMORY_DB: "true"
@@ -31,6 +40,9 @@ jobs:
       ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
       JWT_SECRET: "migrationguard_super_secure_jwt_dev_secret_key_minimum_32_chars!"
       DATABASE_URL: "postgresql://postgres:testpassword@localhost:5432/migrationguard_test?schema=public"
+      REDIS_HOST: "localhost"
+      REDIS_PORT: 6379
+      REDIS_URL: "redis://localhost:6379"
 
     steps:
       - name: Checkout repository

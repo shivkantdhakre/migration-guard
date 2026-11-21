@@ -67,9 +67,25 @@ function loadEnv() {
 }
 loadEnv();
 
+const isLoopbackHost = (host: string): boolean => {
+  const normalized = host.toLowerCase().trim();
+  return (
+    normalized === 'localhost' ||
+    normalized === '127.0.0.1' ||
+    normalized === '::1' ||
+    normalized === '0.0.0.0' ||
+    normalized.startsWith('127.') ||
+    normalized === '[::1]'
+  );
+};
+
 const allowInsecureTls = process.env.ALLOW_INSECURE_TLS === 'true';
 if (allowInsecureTls && process.env.NODE_ENV === 'production') {
   throw new Error('[Security] Insecure TLS (ALLOW_INSECURE_TLS=true) is strictly forbidden in production.');
+}
+
+if (process.env.NODE_ENV === 'production' && process.env.ALLOW_SYNTHETIC_SOURCE === 'true') {
+  throw new Error('[Security] Synthetic source execution (ALLOW_SYNTHETIC_SOURCE=true) is strictly forbidden in production.');
 }
 
 const REDIS_URL = process.env.REDIS_URL;
@@ -84,7 +100,7 @@ const IS_REDIS_TLS =
 const DATABASE_URL = (() => {
   const url = process.env.DATABASE_URL;
   if (process.env.NODE_ENV === 'production') {
-    if (!url || url.trim() === '' || url.includes('localhost') || url.includes('127.0.0.1')) {
+    if (!url || url.trim() === '' || isLoopbackHost(url.replace(/^.*@/, '').split(':')[0].split('/')[0])) {
       throw new Error(
         '[Worker Config] In production (NODE_ENV=production), DATABASE_URL must be explicitly configured and cannot use localhost.',
       );
@@ -98,10 +114,34 @@ const DATABASE_URL = (() => {
 })();
 
 if (process.env.NODE_ENV === 'production') {
-  if (!REDIS_URL && (!process.env.REDIS_HOST || process.env.REDIS_HOST === 'localhost' || process.env.REDIS_HOST === '127.0.0.1')) {
-    throw new Error(
-      '[Worker Config] In production (NODE_ENV=production), REDIS_URL or remote REDIS_HOST must be explicitly configured.',
-    );
+  if (REDIS_URL) {
+    let parsed: URL;
+    try {
+      parsed = new URL(REDIS_URL);
+    } catch (err: any) {
+      throw new Error(`[Worker Config] In production (NODE_ENV=production), REDIS_URL is invalid: ${err.message}`);
+    }
+    if (isLoopbackHost(parsed.hostname)) {
+      throw new Error(
+        `[Worker Config] In production (NODE_ENV=production), REDIS_URL cannot point to loopback/localhost (${parsed.hostname}).`,
+      );
+    }
+    if (parsed.protocol !== 'rediss:') {
+      throw new Error(
+        `[Worker Config] In production (NODE_ENV=production), REDIS_URL must use TLS ('rediss://'). Got '${parsed.protocol}'.`,
+      );
+    }
+  } else {
+    if (!process.env.REDIS_HOST || isLoopbackHost(process.env.REDIS_HOST)) {
+      throw new Error(
+        `[Worker Config] In production (NODE_ENV=production), REDIS_URL or remote non-loopback REDIS_HOST must be explicitly configured.`,
+      );
+    }
+    if (process.env.REDIS_TLS !== 'true') {
+      throw new Error(
+        `[Worker Config] In production (NODE_ENV=production), REDIS_TLS=true is required when connecting via REDIS_HOST.`,
+      );
+    }
   }
 }
 
@@ -119,11 +159,17 @@ let dbPool: pg.Pool | null = null;
 let redisClient: Redis | null = null;
 
 // Initialize persistent PostgreSQL connection pool and adapters
+const isLocalDb =
+  DATABASE_URL.includes('localhost') ||
+  DATABASE_URL.includes('127.0.0.1') ||
+  DATABASE_URL.includes('::1') ||
+  DATABASE_URL.includes('migrationguard_test');
+
 dbPool = new pg.Pool({
   connectionString: DATABASE_URL,
   connectionTimeoutMillis: 10000,
   max: 20,
-  ssl: { rejectUnauthorized: !allowInsecureTls },
+  ssl: isLocalDb ? false : { rejectUnauthorized: !allowInsecureTls },
 });
 
 const postgresAdapters = new PostgresStorageAdapters(dbPool);
@@ -407,7 +453,7 @@ async function startWorker() {
         // FR-EXEC-002 & P0.4: strictly validate queue message contains identifiers/cursors, NOT bulk records
         // and requires explicit connection references in production
         QueueHandler.validatePayload(job.data, {
-          requireConnections: process.env.ALLOW_SYNTHETIC_SOURCE !== 'true',
+          requireConnections: process.env.ALLOW_SYNTHETIC_SOURCE !== 'true' || process.env.NODE_ENV === 'production',
         });
 
         console.log(

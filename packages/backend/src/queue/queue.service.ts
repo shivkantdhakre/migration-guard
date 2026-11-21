@@ -29,6 +29,11 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
   private queue: Queue | null = null;
   private redisClient: Redis | null = null;
   private isConnected = false;
+  private customRedisUrl?: string;
+
+  constructor(customRedisUrl?: string) {
+    this.customRedisUrl = customRedisUrl;
+  }
 
   public static get QUEUE_NAME(): string {
     return process.env.BULLMQ_QUEUE_NAME || 'migration-execution';
@@ -44,7 +49,11 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
       this.queue = null;
     }
     if (this.redisClient) {
-      this.redisClient.disconnect();
+      try {
+        await this.redisClient.quit();
+      } catch {
+        this.redisClient.disconnect();
+      }
       this.redisClient = null;
     }
     this.isConnected = false;
@@ -54,44 +63,46 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
     return this.isConnected;
   }
 
+  public getQueue(): Queue | null {
+    return this.queue;
+  }
+
+  public getRedisClient(): Redis | null {
+    return this.redisClient;
+  }
+
   private async initQueue() {
     try {
-      const redisUrl = process.env.REDIS_URL;
-      const isTls =
-        process.env.REDIS_TLS === 'true' ||
-        appConfig.redis.port === 15678 ||
-        (redisUrl && redisUrl.startsWith('rediss://'));
+      const redisUrl = this.customRedisUrl || process.env.REDIS_URL;
+      const isProduction = process.env.NODE_ENV === 'production';
+      const allowInsecureTls = process.env.ALLOW_INSECURE_TLS === 'true';
+
+      const isRediss = redisUrl ? redisUrl.startsWith('rediss://') : false;
+      const isTls = isRediss || process.env.REDIS_TLS === 'true';
+      const tlsConfig = isTls
+        ? { rejectUnauthorized: isProduction ? true : !allowInsecureTls }
+        : undefined;
+
+      const connectionOptions = {
+        maxRetriesPerRequest: null,
+        enableReadyCheck: false,
+        connectTimeout: 4000,
+        lazyConnect: true,
+        retryStrategy: () => null,
+      };
 
       if (redisUrl) {
-        try {
-          const parsed = new URL(redisUrl);
-          this.redisClient = new Redis({
-            host: parsed.hostname,
-            port: parseInt(parsed.port || '15678', 10),
-            username: parsed.username || 'default',
-            password: parsed.password || undefined,
-            tls: { rejectUnauthorized: false },
-            maxRetriesPerRequest: null,
-            enableReadyCheck: false,
-            connectTimeout: 3000,
-          });
-        } catch {
-          this.redisClient = new Redis(redisUrl, {
-            maxRetriesPerRequest: null,
-            enableReadyCheck: false,
-            connectTimeout: 3000,
-            tls: isTls ? { rejectUnauthorized: false } : undefined,
-          });
-        }
+        this.redisClient = new Redis(redisUrl, {
+          ...connectionOptions,
+          tls: tlsConfig,
+        });
       } else {
         this.redisClient = new Redis({
           host: appConfig.redis.host,
           port: appConfig.redis.port,
           password: appConfig.redis.password || undefined,
-          tls: isTls ? { rejectUnauthorized: false } : undefined,
-          maxRetriesPerRequest: null,
-          enableReadyCheck: false,
-          connectTimeout: 3000,
+          tls: tlsConfig,
+          ...connectionOptions,
         });
       }
 
@@ -100,12 +111,10 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
         this.isConnected = false;
       });
 
-      // Probe connection with timeout to ensure queue is active
+      // Probe connection to ensure queue is active
       try {
-        await Promise.race([
-          this.redisClient.ping(),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('Connection timeout')), 3000)),
-        ]);
+        await this.redisClient.connect();
+        await this.redisClient.ping();
         this.isConnected = true;
         this.queue = new Queue(QueueService.QUEUE_NAME, {
           connection: this.redisClient,
@@ -132,6 +141,14 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
     const deterministicJobId = `${payload.migrationRunId}_${payload.batchKey}`;
 
     if (!this.queue || !this.isConnected) {
+      if (process.env.NODE_ENV === 'production' || process.env.ALLOW_SIMULATED_DISPATCH !== 'true') {
+        this.logger.error(
+          `[QueueService] Failed to dispatch job ${deterministicJobId}: Queue is offline or Redis is disconnected.`,
+        );
+        throw new Error(
+          `[QueueService] Cannot dispatch batch job: Queue is offline or Redis is disconnected. Simulated dispatch is forbidden.`,
+        );
+      }
       this.logger.warn(
         `[QueueService] Queue offline. Simulating dispatch for batch ${payload.batchKey} (Job: ${deterministicJobId})`,
       );

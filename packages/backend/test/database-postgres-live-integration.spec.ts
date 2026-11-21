@@ -1,19 +1,57 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { DatabaseService } from '../src/database/database.service';
 
-describe('Backend PostgreSQL Live Persistence Integration (Run 005.2)', () => {
+describe('Backend PostgreSQL Live Persistence Integration (Run 005.2 & Run 005.4)', () => {
   let dbService: DatabaseService;
   const isCi = process.env.CI === 'true';
   const testWorkspaceId = `ws-live-test-${Date.now()}`;
   const testSlug = `test-ws-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
   const testName = `Integration Test Workspace ${Date.now()}`;
 
+  const targetDbUrl =
+    process.env.MIGRATIONGUARD_TEST_DATABASE_URL ||
+    process.env.TEST_DATABASE_URL ||
+    process.env.DATABASE_URL;
+
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('[Safety Guard] Live backend PostgreSQL integration tests must never run in production environment.');
+  }
+
+  const isLocalOrCi = (() => {
+    if (!targetDbUrl) return false;
+    try {
+      const parsed = new URL(targetDbUrl);
+      return DatabaseService.isLoopbackHost(parsed.hostname);
+    } catch {
+      return targetDbUrl.includes('localhost') || targetDbUrl.includes('127.0.0.1') || targetDbUrl.includes('::1');
+    }
+  })();
+
+  const isExplicitTestDb = Boolean(
+    process.env.MIGRATIONGUARD_TEST_DATABASE_URL ||
+    process.env.TEST_DATABASE_URL ||
+    (targetDbUrl && (targetDbUrl.includes('test') || targetDbUrl.includes('dev'))),
+  );
+
   beforeAll(async () => {
+    if (!targetDbUrl) {
+      if (isCi) {
+        throw new Error('[CI Mandatory Failure] MIGRATIONGUARD_TEST_DATABASE_URL or DATABASE_URL must be configured in CI environment.');
+      }
+      console.warn('[Notice] No test database configured, skipping live PostgreSQL persistence test.');
+      return;
+    }
+
+    if (!isLocalOrCi && !isExplicitTestDb && process.env.ALLOW_REMOTE_TEST_DB !== 'true') {
+      console.warn('[Safety Guard] Refusing to run live persistence test against non-test/remote database without ALLOW_REMOTE_TEST_DB=true.');
+      return;
+    }
+
     // Explicitly enforce that in-memory fallback is disabled for this test suite
     process.env.ALLOW_IN_MEMORY_DB = 'false';
     process.env.FORCE_POSTGRES_DB = 'true';
 
-    dbService = new DatabaseService();
+    dbService = new DatabaseService(targetDbUrl);
     try {
       await dbService.onModuleInit();
     } catch (err: any) {

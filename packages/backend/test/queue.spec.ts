@@ -1,8 +1,16 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
 import { QueueService, MigrationJobPayload } from '../src/queue/queue.service';
 
 describe('QueueService (BullMQ Producer)', () => {
   let queueService: QueueService;
+
+  beforeAll(() => {
+    process.env.ALLOW_SIMULATED_DISPATCH = 'true';
+  });
+
+  afterAll(() => {
+    delete process.env.ALLOW_SIMULATED_DISPATCH;
+  });
 
   beforeEach(async () => {
     queueService = new QueueService();
@@ -15,6 +23,59 @@ describe('QueueService (BullMQ Producer)', () => {
 
   it('should initialize queue service without crashing', () => {
     expect(queueService).toBeDefined();
+  });
+
+  it('fails dispatch in production when Redis is disconnected even if ALLOW_SIMULATED_DISPATCH is true', async () => {
+    const prevEnv = process.env.NODE_ENV;
+    try {
+      process.env.NODE_ENV = 'production';
+      // If queue is disconnected in this unit environment
+      if (!queueService.isQueueConnected) {
+        await expect(
+          queueService.dispatchBatchJob({
+            jobId: 'run-prod_batch_0001',
+            migrationRunId: 'run-prod',
+            batchKey: 'batch_0001',
+            sequenceNo: 1,
+            sourceObject: 'customers',
+            destinationObject: 'customers',
+            cursorStart: null,
+            batchSize: 100,
+            planVersionId: 'plan-v1',
+            mappingVersionId: 'map-v1',
+            writeMode: 'upsert',
+          }),
+        ).rejects.toThrow(/Cannot dispatch batch job: Queue is offline or Redis is disconnected/);
+      }
+    } finally {
+      process.env.NODE_ENV = prevEnv;
+    }
+  });
+
+  it('fails dispatch when Redis is disconnected and simulated dispatch is disabled', async () => {
+    const prevSim = process.env.ALLOW_SIMULATED_DISPATCH;
+    try {
+      delete process.env.ALLOW_SIMULATED_DISPATCH;
+      if (!queueService.isQueueConnected) {
+        await expect(
+          queueService.dispatchBatchJob({
+            jobId: 'run-fail_batch_0001',
+            migrationRunId: 'run-fail',
+            batchKey: 'batch_0001',
+            sequenceNo: 1,
+            sourceObject: 'customers',
+            destinationObject: 'customers',
+            cursorStart: null,
+            batchSize: 100,
+            planVersionId: 'plan-v1',
+            mappingVersionId: 'map-v1',
+            writeMode: 'upsert',
+          }),
+        ).rejects.toThrow(/Simulated dispatch is forbidden/);
+      }
+    } finally {
+      process.env.ALLOW_SIMULATED_DISPATCH = prevSim;
+    }
   });
 
   it('should generate deterministic Job IDs and dispatch job', async () => {

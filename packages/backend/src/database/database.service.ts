@@ -14,6 +14,11 @@ export interface QueryResult<T = any> {
 export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   private pool: pg.Pool | null = null;
   private isConnected = false;
+  private customDatabaseUrl?: string;
+
+  constructor(customDatabaseUrl?: string) {
+    this.customDatabaseUrl = customDatabaseUrl;
+  }
 
   // In-memory relational store fallback for unit testing or explicitly enabled offline dev
   private memoryStore: Map<string, Map<string, any>> = new Map();
@@ -42,12 +47,18 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
+    const effectiveDbUrl =
+      this.customDatabaseUrl ||
+      (process.env.NODE_ENV === 'test' &&
+        (process.env.MIGRATIONGUARD_TEST_DATABASE_URL || process.env.TEST_DATABASE_URL)) ||
+      appConfig.databaseUrl;
+
     const isLocal = (() => {
       try {
-        const parsed = new URL(appConfig.databaseUrl);
+        const parsed = new URL(effectiveDbUrl);
         return DatabaseService.isLoopbackHost(parsed.hostname);
       } catch {
-        const match = /@([^:/]+|\[[^\]]+\])/.exec(appConfig.databaseUrl);
+        const match = /@([^:/]+|\[[^\]]+\])/.exec(effectiveDbUrl);
         return match ? DatabaseService.isLoopbackHost(match[1]) : false;
       }
     })();
@@ -61,7 +72,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
 
     try {
       this.pool = new pg.Pool({
-        connectionString: appConfig.databaseUrl,
+        connectionString: effectiveDbUrl,
         connectionTimeoutMillis: 10000,
         max: 10,
         ssl,

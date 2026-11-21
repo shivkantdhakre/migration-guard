@@ -206,13 +206,29 @@ CREATE TABLE IF NOT EXISTS record_manifests (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     migration_run_id UUID NOT NULL REFERENCES migration_runs(id) ON DELETE CASCADE,
     migration_batch_id UUID REFERENCES migration_batches(id) ON DELETE CASCADE,
+    batch_key TEXT,
     source_object TEXT NOT NULL,
     source_key TEXT NOT NULL,
+    destination_object TEXT,
     destination_key TEXT,
     content_hash TEXT,
-    status TEXT NOT NULL DEFAULT 'COMMITTED',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    status TEXT NOT NULL DEFAULT 'WRITTEN', -- 'WRITTEN', 'SKIPPED', 'FAILED'
+    error_details TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_record_manifests_run_source UNIQUE (migration_run_id, source_object, source_key)
 );
+
+ALTER TABLE record_manifests ADD COLUMN IF NOT EXISTS batch_key TEXT;
+ALTER TABLE record_manifests ADD COLUMN IF NOT EXISTS destination_object TEXT;
+ALTER TABLE record_manifests ADD COLUMN IF NOT EXISTS error_details TEXT;
+DO $$ 
+BEGIN 
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'uq_record_manifests_run_source'
+  ) THEN 
+    ALTER TABLE record_manifests ADD CONSTRAINT uq_record_manifests_run_source UNIQUE (migration_run_id, source_object, source_key);
+  END IF; 
+END $$;
 
 -- Validation Runs
 CREATE TABLE IF NOT EXISTS validation_runs (

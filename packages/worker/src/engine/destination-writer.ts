@@ -100,6 +100,13 @@ export class DestinationWriter {
       );
     }
 
+    if (process.env.FAULT_INJECTION_EXIT_AFTER === 'DESTINATION_WRITTEN') {
+      console.error(
+        `[Fault Injection] Triggering abrupt simulated worker crash after DESTINATION_WRITTEN (batch: ${batch.batchKey})`,
+      );
+      process.exit(137);
+    }
+
     // 5. Persist ID mappings for written records (FR-MAP-005)
     if (this.idTracker && writeResult.writtenKeys.length > 0) {
       const writtenKeySet = new Set(writeResult.writtenKeys);
@@ -152,6 +159,13 @@ export class DestinationWriter {
         batch.batchKey,
         'MANIFEST_COMMITTED',
       );
+
+      if (process.env.FAULT_INJECTION_EXIT_AFTER === 'MANIFEST_COMMITTED') {
+        console.error(
+          `[Fault Injection] Triggering abrupt simulated worker crash after MANIFEST_COMMITTED (batch: ${batch.batchKey})`,
+        );
+        process.exit(137);
+      }
     }
 
     return {

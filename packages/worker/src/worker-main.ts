@@ -512,23 +512,53 @@ async function getDestinationConnector(payload: MigrationJobPayload): Promise<De
 
 async function startWorker() {
   try {
+    // 1. Verify control-plane database connectivity
+    if (dbPool) {
+      try {
+        await dbPool.query('SELECT 1');
+      } catch (dbErr: any) {
+        throw new Error(`Control-plane PostgreSQL connection failed: ${dbErr.message}`);
+      }
+    }
+
     const redisTls = IS_REDIS_TLS ? { rejectUnauthorized: !allowInsecureTls } : undefined;
 
+    const redisOptions = {
+      maxRetriesPerRequest: null,
+      enableReadyCheck: true,
+      connectTimeout: 3000,
+      retryStrategy: (times: number) => {
+        if (process.env.NODE_ENV === 'test' && times > 2) {
+          return null; // Terminate retries quickly in test environment
+        }
+        if (times > 5) {
+          return null;
+        }
+        return Math.min(times * 100, 1000);
+      },
+      tls: redisTls,
+    };
+
     if (REDIS_URL) {
-      redisClient = new Redis(REDIS_URL, {
-        maxRetriesPerRequest: null,
-        enableReadyCheck: false,
-        tls: redisTls,
-      });
+      redisClient = new Redis(REDIS_URL, redisOptions);
     } else {
       redisClient = new Redis({
         host: REDIS_HOST,
         port: REDIS_PORT,
         password: REDIS_PASSWORD,
-        tls: redisTls,
-        maxRetriesPerRequest: null,
-        enableReadyCheck: false,
+        ...redisOptions,
       });
+    }
+
+    redisClient.on('error', (err) => {
+      // Prevent unhandled error event during initial connection failure or reconnects
+    });
+
+    // Verify Redis connection via ping
+    try {
+      await redisClient.ping();
+    } catch (redisErr: any) {
+      throw new Error(`Redis connection failed: ${redisErr.message}`);
     }
 
     const QUEUE_NAME = process.env.BULLMQ_QUEUE_NAME || 'migration-execution';
@@ -673,6 +703,9 @@ async function startWorker() {
       },
     );
 
+    // 3. Wait until BullMQ Worker is ready
+    await executionWorker.waitUntilReady();
+
     executionWorker.on('completed', (job) => {
       console.log(`[Worker] Job ${job.id} marked COMPLETED.`);
     });
@@ -682,7 +715,7 @@ async function startWorker() {
     });
 
     executionWorker.on('error', (err) => {
-      console.warn(`[Worker] Redis queue connection notice: ${err.message}`);
+      console.error(`[Worker] BullMQ Worker error: ${err.message}`);
     });
 
     console.log('[Worker] Worker pools initialized:');
@@ -692,7 +725,14 @@ async function startWorker() {
     console.log('  ✔ Encrypted Vault credential resolution active');
     console.log('[Worker] Worker is listening for jobs.\n');
   } catch (err: any) {
-    console.error(`[Worker] Error starting worker: ${err.message}`);
+    console.error(`[Worker] Fatal error starting worker: ${err.message}`);
+    if (redisClient) {
+      try { redisClient.disconnect(); } catch {}
+    }
+    if (dbPool) {
+      try { await dbPool.end(); } catch {}
+    }
+    process.exit(1);
   }
 }
 

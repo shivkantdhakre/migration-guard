@@ -56,6 +56,18 @@ export class InMemoryBatchManifestStorage implements BatchManifestStorageAdapter
 
   public async saveRecordManifests(manifests: RecordManifest[]): Promise<void> {
     for (const m of manifests) {
+      // Deduplicate on (migrationRunId, sourceObject, sourceKey) across all batches in this run
+      for (const [key, existingList] of this.recordManifests.entries()) {
+        if (key.startsWith(`${m.migrationRunId}:`)) {
+          const idx = existingList.findIndex(
+            (e) => e.sourceObject === m.sourceObject && e.sourceKey === m.sourceKey,
+          );
+          if (idx >= 0) {
+            existingList.splice(idx, 1);
+          }
+        }
+      }
+
       const key = `${m.migrationRunId}:${m.batchKey}`;
       const existing = this.recordManifests.get(key) || [];
       existing.push({ ...m });

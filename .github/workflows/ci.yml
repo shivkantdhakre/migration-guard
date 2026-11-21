@@ -33,6 +33,15 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 5
+      mongodb:
+        image: mongo:7.0
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand({ ping: 1 })'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
     env:
       CI: "true"
       ALLOW_IN_MEMORY_DB: "true"
@@ -44,6 +53,8 @@ jobs:
       REDIS_HOST: "localhost"
       REDIS_PORT: 6379
       REDIS_URL: "redis://localhost:6379"
+      MONGO_URL: "mongodb://localhost:27017/migrationguard_e2e_source"
+      MIGRATIONGUARD_TEST_MONGO_URL: "mongodb://localhost:27017/migrationguard_e2e_source"
 
     steps:
       - name: Checkout repository

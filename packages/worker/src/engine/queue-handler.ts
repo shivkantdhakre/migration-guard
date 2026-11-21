@@ -312,6 +312,13 @@ export class QueueHandler {
         'CHECKPOINT_COMMITTED',
       );
 
+      if (process.env.FAULT_INJECTION_EXIT_AFTER === 'CHECKPOINT_COMMITTED') {
+        console.error(
+          `[Fault Injection] Triggering abrupt simulated worker crash after CHECKPOINT_COMMITTED (batch: ${payload.batchKey})`,
+        );
+        process.exit(137);
+      }
+
       // 9. Schedule next batch if more records exist
       let nextPayload: MigrationJobPayload | undefined;
       const hasMore = sourceBatch.hasMore && cursorEnd !== null;

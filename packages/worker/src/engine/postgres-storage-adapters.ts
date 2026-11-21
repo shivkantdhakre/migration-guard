@@ -126,38 +126,69 @@ export class PostgresStorageAdapters
   async saveRecordManifests(manifests: RecordManifest[]): Promise<void> {
     if (manifests.length === 0) return;
 
-    for (const m of manifests) {
-      await this.pool.query(
-        `INSERT INTO record_manifests (
-           migration_run_id, source_object, source_key, destination_key, content_hash, status, created_at
-         ) VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
-        [
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const query = `
+        INSERT INTO record_manifests (
+          migration_run_id, batch_key, source_object, source_key,
+          destination_object, destination_key, content_hash, status, error_details, created_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+        ON CONFLICT (migration_run_id, source_object, source_key) DO UPDATE SET
+          batch_key = EXCLUDED.batch_key,
+          destination_object = EXCLUDED.destination_object,
+          destination_key = EXCLUDED.destination_key,
+          content_hash = EXCLUDED.content_hash,
+          status = EXCLUDED.status,
+          error_details = EXCLUDED.error_details;
+      `;
+
+      for (const m of manifests) {
+        await client.query(query, [
           m.migrationRunId,
+          m.batchKey || '',
           m.sourceObject,
           m.sourceKey,
+          m.destinationObject,
           m.destinationKey,
-          m.contentHash,
-          m.status || 'COMMITTED',
-        ],
-      );
+          m.contentHash || null,
+          m.status || 'WRITTEN',
+          m.error || null,
+        ]);
+      }
+
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
     }
   }
 
-  async listRecordManifests(migrationRunId: string, _batchKey?: string): Promise<RecordManifest[]> {
-    const res = await this.pool.query(
-      `SELECT * FROM record_manifests WHERE migration_run_id = $1 ORDER BY created_at ASC`,
-      [migrationRunId],
-    );
+  async listRecordManifests(migrationRunId: string, batchKey?: string): Promise<RecordManifest[]> {
+    let query = `SELECT * FROM record_manifests WHERE migration_run_id = $1`;
+    const params: any[] = [migrationRunId];
+
+    if (batchKey) {
+      query += ` AND batch_key = $2`;
+      params.push(batchKey);
+    }
+
+    query += ` ORDER BY created_at ASC`;
+    const res = await this.pool.query(query, params);
+
     return res.rows.map((r) => ({
       id: r.id,
       migrationRunId: r.migration_run_id,
-      batchKey: '',
+      batchKey: r.batch_key || '',
       sourceObject: r.source_object,
       sourceKey: r.source_key,
-      destinationObject: r.destination_key ? r.source_object : r.source_object,
+      destinationObject: r.destination_object || r.source_object,
       destinationKey: r.destination_key || r.source_key,
-      contentHash: r.content_hash,
-      status: r.status as any,
+      contentHash: r.content_hash || undefined,
+      status: (r.status as 'WRITTEN' | 'SKIPPED' | 'FAILED') || 'WRITTEN',
+      error: r.error_details || undefined,
       createdAt: r.created_at ? new Date(r.created_at).toISOString() : new Date().toISOString(),
     }));
   }

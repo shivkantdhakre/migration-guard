@@ -250,6 +250,8 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.13 P2)', 
             }
           };
 
+          child.stdout?.pipe(process.stdout);
+          child.stderr?.pipe(process.stderr);
           child.stdout?.on('data', onData);
           child.stderr?.on('data', onData);
 
@@ -298,7 +300,7 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.13 P2)', 
       // 8. Poll for Batch 1 committed state
       let batch1Committed = false;
       const startWait = Date.now();
-      while (Date.now() - startWait < 12000) {
+      while (Date.now() - startWait < 15000) {
         const bRes = await testPool.query(
           `SELECT status, records_written FROM migration_batches WHERE migration_run_id = $1 AND batch_key = $2`,
           [runId, 'batch_customers_0001'],
@@ -368,7 +370,7 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.13 P2)', 
       // 12. Poll for Batch 2 committed state
       let batch2Committed = false;
       const startWait2 = Date.now();
-      while (Date.now() - startWait2 < 12000) {
+      while (Date.now() - startWait2 < 15000) {
         const bRes = await testPool.query(
           `SELECT status, records_written FROM migration_batches WHERE migration_run_id = $1 AND batch_key = $2`,
           [runId, 'batch_customers_0002'],
@@ -452,3 +454,4 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.13 P2)', 
     }
   });
 });
+

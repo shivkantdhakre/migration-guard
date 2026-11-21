@@ -18,7 +18,7 @@ import { BatchManifestTracker } from './engine/batch-manifest.js';
 import { CheckpointManager } from './engine/checkpoint.js';
 import { IdTracker } from './engine/id-tracker.js';
 import { PostgresStorageAdapters } from './engine/postgres-storage-adapters.js';
-import { ConnectorFactory } from './connectors/connector-factory.js';
+import { ConnectorFactory, resolvePostgresSsl } from './connectors/connector-factory.js';
 import {
   MigrationJobPayload,
   DestinationConnector,
@@ -254,7 +254,7 @@ dbPool = new pg.Pool({
   connectionString: DATABASE_URL,
   connectionTimeoutMillis: 10000,
   max: 20,
-  ssl: isLocalDb && !isProduction ? false : { rejectUnauthorized: !allowInsecureTls },
+  ssl: resolvePostgresSsl(DATABASE_URL),
 });
 
 const postgresAdapters = new PostgresStorageAdapters(dbPool);
@@ -497,12 +497,12 @@ async function getDestinationConnector(payload: MigrationJobPayload): Promise<De
     return destPoolCache.get(cacheKey)!.connector;
   }
 
-  console.log(`[Worker] ✔ Creating dedicated PostgreSQL destination pool for connection ${connectionId} v${credVer} (Strict TLS: ${!allowInsecureTls})`);
+  console.log(`[Worker] ✔ Creating dedicated PostgreSQL destination pool for connection ${connectionId} v${credVer}`);
   const pool = new pg.Pool({
     connectionString: connStr,
     connectionTimeoutMillis: 10000,
     max: 10,
-    ssl: { rejectUnauthorized: !allowInsecureTls },
+    ssl: resolvePostgresSsl(connStr),
   });
 
   const connector = ConnectorFactory.createPostgresDestination(pool);

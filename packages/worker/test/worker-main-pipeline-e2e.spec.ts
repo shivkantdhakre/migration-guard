@@ -172,6 +172,17 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.13 P2)', 
           created_at TIMESTAMPTZ DEFAULT NOW()
         );
 
+        CREATE TABLE IF NOT EXISTS id_mappings (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          migration_run_id UUID NOT NULL,
+          source_object TEXT NOT NULL,
+          source_key TEXT NOT NULL,
+          destination_object TEXT NOT NULL,
+          destination_key TEXT NOT NULL,
+          created_at TIMESTAMPTZ DEFAULT NOW(),
+          CONSTRAINT uq_id_mappings_${testSuffix} UNIQUE (migration_run_id, source_object, source_key)
+        );
+
         CREATE TABLE IF NOT EXISTS "${destTable}" (
           id TEXT PRIMARY KEY,
           name TEXT,
@@ -445,6 +456,7 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.13 P2)', 
         await testPool.query(`DROP TABLE IF EXISTS "${destTable}" CASCADE`).catch(() => {});
         await testPool.query(`DELETE FROM migration_batches WHERE migration_run_id = $1`, [runId]).catch(() => {});
         await testPool.query(`DELETE FROM record_manifests WHERE migration_run_id = $1`, [runId]).catch(() => {});
+        await testPool.query(`DELETE FROM id_mappings WHERE migration_run_id = $1`, [runId]).catch(() => {});
         await testPool.query(`DELETE FROM migration_runs WHERE id = $1`, [runId]).catch(() => {});
         await testPool.query(`DELETE FROM connection_secrets WHERE connection_id = $1`, [destConnId]).catch(() => {});
         await testPool.query(`DELETE FROM connections WHERE id = $1`, [destConnId]).catch(() => {});

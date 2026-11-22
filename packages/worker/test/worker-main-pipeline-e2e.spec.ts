@@ -12,25 +12,94 @@ import { fileURLToPath } from 'node:url';
 /**
  * Independent RFC 8785 JSON Canonicalization Oracle (Test-Only).
  * Implemented independently of production library to verify the hash contract without shared code.
+ * Includes independent Unicode surrogate validation and active-recursion-path cycle tracking.
  */
-function independentCanonicalize(value: unknown): string {
-  if (value === null || typeof value === 'boolean' || typeof value === 'string') {
+function independentValidateUnicode(str: string, context = 'string'): void {
+  for (let i = 0; i < str.length; i++) {
+    const code = str.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      if (i + 1 >= str.length) {
+        throw new TypeError(`[Test Oracle] Invalid Unicode ${context}: isolated high surrogate at index ${i}`);
+      }
+      const next = str.charCodeAt(i + 1);
+      if (next < 0xdc00 || next > 0xdfff) {
+        throw new TypeError(`[Test Oracle] Invalid Unicode ${context}: malformed surrogate pair at index ${i}`);
+      }
+      i++;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      throw new TypeError(`[Test Oracle] Invalid Unicode ${context}: isolated low surrogate at index ${i}`);
+    }
+  }
+}
+
+function independentCanonicalize(value: unknown, activePath = new Set<object>()): string {
+  if (value === null || value === undefined) {
+    return 'null';
+  }
+  if (typeof value === 'boolean') {
+    return value ? 'true' : 'false';
+  }
+  if (typeof value === 'string') {
+    independentValidateUnicode(value, 'string value');
     return JSON.stringify(value);
   }
   if (typeof value === 'number') {
-    return Object.is(value, -0) ? '0' : JSON.stringify(value);
+    if (Object.is(value, -0)) return '0';
+    if (Number.isNaN(value) || !Number.isFinite(value)) {
+      throw new TypeError(`[Test Oracle] Invalid non-finite number: ${value}`);
+    }
+    return JSON.stringify(value);
   }
-  if (Array.isArray(value)) {
-    return '[' + value.map(independentCanonicalize).join(',') + ']';
+  if (typeof value === 'bigint') {
+    return JSON.stringify(value.toString());
   }
-  if (typeof value === 'object') {
-    const obj = value as Record<string, unknown>;
-    // UTF-16 code unit lexicographic sort per RFC 8785 §3.2.3
-    const sortedKeys = Object.keys(obj)
-      .filter((k) => obj[k] !== undefined)
-      .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-    const parts = sortedKeys.map((k) => `${JSON.stringify(k)}:${independentCanonicalize(obj[k])}`);
-    return '{' + parts.join(',') + '}';
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) {
+      throw new TypeError('[Test Oracle] Invalid Date');
+    }
+    return JSON.stringify(value.toISOString());
+  }
+  if (value instanceof Uint8Array || (typeof Buffer !== 'undefined' && Buffer.isBuffer(value))) {
+    return JSON.stringify(Buffer.from(value as Uint8Array).toString('base64'));
+  }
+  if (typeof value === 'object' && value !== null) {
+    if (activePath.has(value)) {
+      throw new TypeError('[Test Oracle] Converting circular structure to JSON');
+    }
+    activePath.add(value);
+    try {
+      const obj = value as Record<string, unknown>;
+      if (typeof obj.toHexString === 'function') {
+        const hex = (obj.toHexString as () => string)();
+        independentValidateUnicode(hex, 'ObjectId string');
+        return JSON.stringify(hex);
+      }
+      if (obj._bsontype === 'Decimal128' && typeof obj.toString === 'function') {
+        const dec = obj.toString();
+        independentValidateUnicode(dec, 'Decimal128 string');
+        return JSON.stringify(dec);
+      }
+      if (obj._bsontype === 'ObjectId' && typeof obj.toString === 'function') {
+        const oid = obj.toString();
+        independentValidateUnicode(oid, 'ObjectId string');
+        return JSON.stringify(oid);
+      }
+      if (Array.isArray(value)) {
+        return '[' + value.map((item) => independentCanonicalize(item, activePath)).join(',') + ']';
+      }
+      const keys = Object.keys(obj);
+      for (const k of keys) {
+        independentValidateUnicode(k, 'property name');
+      }
+      // UTF-16 code unit lexicographic sort per RFC 8785 §3.2.3
+      const sortedKeys = keys
+        .filter((k) => obj[k] !== undefined && typeof obj[k] !== 'function' && typeof obj[k] !== 'symbol')
+        .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+      const parts = sortedKeys.map((k) => `${JSON.stringify(k)}:${independentCanonicalize(obj[k], activePath)}`);
+      return '{' + parts.join(',') + '}';
+    } finally {
+      activePath.delete(value);
+    }
   }
   return JSON.stringify(value);
 }

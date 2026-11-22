@@ -6,6 +6,7 @@ import {
   calculateRecordHash,
   calculatePlanHash,
   calculateMappingHash,
+  validateUnicodeString,
   sha256Hex,
 } from '../dist/canonical/index.js';
 
@@ -104,7 +105,6 @@ describe('Canonical Hashing & RFC 8785 Compliance', () => {
   // =========================================================================
 
   it('guarantees deterministic canonical output regardless of JavaScript object insertion order', () => {
-    // 3 variations of the same dictionary created in different insertion orders
     const order1: Record<string, any> = {};
     order1.z = 10;
     order1.a = 20;
@@ -131,6 +131,204 @@ describe('Canonical Hashing & RFC 8785 Compliance', () => {
     assert.equal(json2, json3);
     assert.equal(calculateCanonicalHash(order1), calculateCanonicalHash(order2));
     assert.equal(calculateCanonicalHash(order2), calculateCanonicalHash(order3));
+  });
+
+  // =========================================================================
+  // Circular References vs Shared Non-Circular References (Run 005.18)
+  // =========================================================================
+
+  it('allows a shared nested object appearing under two different properties without false positive', () => {
+    const shared = { name: 'Shared Config', tier: 1 };
+    const doc = {
+      primary: shared,
+      backup: shared,
+    };
+
+    const res = canonicalizeJson(doc);
+    assert.equal(
+      res,
+      '{"backup":{"name":"Shared Config","tier":1},"primary":{"name":"Shared Config","tier":1}}',
+    );
+  });
+
+  it('allows a shared object appearing multiple times in an array without false positive', () => {
+    const item = { id: 'item_1', active: true };
+    const doc = {
+      list: [item, item, { ...item }, item],
+    };
+
+    const res = canonicalizeJson(doc);
+    assert.equal(
+      res,
+      '{"list":[{"active":true,"id":"item_1"},{"active":true,"id":"item_1"},{"active":true,"id":"item_1"},{"active":true,"id":"item_1"}]}',
+    );
+  });
+
+  it('allows reuse of the same BSON-like ObjectId instance in two properties', () => {
+    const oid = {
+      _bsontype: 'ObjectId',
+      toString: () => '507f1f77bcf86cd799439011',
+      toHexString: () => '507f1f77bcf86cd799439011',
+    };
+    const doc = {
+      createdById: oid,
+      updatedById: oid,
+    };
+
+    const res = canonicalizeJson(doc);
+    assert.equal(
+      res,
+      '{"createdById":"507f1f77bcf86cd799439011","updatedById":"507f1f77bcf86cd799439011"}',
+    );
+  });
+
+  it('explicitly detects and rejects a genuinely circular object', () => {
+    const circular: Record<string, any> = { a: 1 };
+    circular.self = circular;
+
+    assert.throws(
+      () => canonicalizeJson(circular),
+      /Converting circular structure to JSON|Circular reference detected/,
+    );
+  });
+
+  it('explicitly detects and rejects a genuinely circular array', () => {
+    const arr: any[] = [1, 2];
+    arr.push(arr);
+
+    assert.throws(
+      () => canonicalizeJson(arr),
+      /Converting circular structure to JSON|Circular reference detected/,
+    );
+  });
+
+  it('explicitly detects and rejects nested circular references', () => {
+    const a: any = { name: 'A' };
+    const b: any = { name: 'B', toA: a };
+    const c: any = { name: 'C', toB: b };
+    a.toC = c;
+
+    assert.throws(
+      () => canonicalizeJson(a),
+      /Converting circular structure to JSON|Circular reference detected/,
+    );
+  });
+
+  // =========================================================================
+  // RFC 8785 Unicode Conformance & Surrogate Validation (Run 005.18)
+  // =========================================================================
+
+  it('accepts valid BMP Unicode characters without modification', () => {
+    const doc = {
+      latin: 'Café & naïve résumé',
+      cyrillic: 'Привет мир',
+      cjk: '你好世界 快適',
+      greek: 'Ελληνικά',
+    };
+    const res = canonicalizeJson(doc);
+    assert.equal(
+      res,
+      '{"cjk":"你好世界 快適","cyrillic":"Привет мир","greek":"Ελληνικά","latin":"Café & naïve résumé"}',
+    );
+  });
+
+  it('accepts valid supplementary Unicode characters', () => {
+    // Mathematical Alphanumeric Symbols: U+1D4B3 (𝒳) = \uD835\uDCB3
+    const doc = { mathVar: '𝒳 \uD835\uDCB3' };
+    const res = canonicalizeJson(doc);
+    assert.equal(res, '{"mathVar":"𝒳 𝒳"}');
+  });
+
+  it('accepts valid emoji surrogate pairs', () => {
+    // U+1F600 (😀) = \uD83D\uDE00, U+1F680 (🚀) = \uD83D\uDE80
+    const doc = {
+      status: '🚀 Ready 😀',
+      flag: '🛡️ MigrationGuard',
+    };
+    const res = canonicalizeJson(doc);
+    assert.equal(res, '{"flag":"🛡️ MigrationGuard","status":"🚀 Ready 😀"}');
+  });
+
+  it('explicitly rejects isolated high surrogates in string values', () => {
+    // \uD800 without following low surrogate
+    assert.throws(
+      () => canonicalizeJson({ test: 'LoneHigh\uD800' }),
+      /Invalid Unicode string value|lone surrogate/i,
+    );
+    assert.throws(
+      () => canonicalizeJson({ test: '\uD800' }),
+      /Invalid Unicode string value|lone surrogate/i,
+    );
+    assert.throws(
+      () => canonicalizeJson({ test: '\uD800\uD800' }), // Two high surrogates together
+      /Invalid Unicode string value|lone surrogate/i,
+    );
+    assert.throws(
+      () => canonicalizeJson({ test: '\uD800abc' }),
+      /Invalid Unicode string value|lone surrogate/i,
+    );
+  });
+
+  it('explicitly rejects isolated low surrogates in string values', () => {
+    // \uDC00 without preceding high surrogate
+    assert.throws(
+      () => canonicalizeJson({ test: 'LoneLow\uDC00' }),
+      /Invalid Unicode string value|lone surrogate/i,
+    );
+    assert.throws(
+      () => canonicalizeJson({ test: '\uDC00' }),
+      /Invalid Unicode string value|lone surrogate/i,
+    );
+    assert.throws(
+      () => canonicalizeJson({ test: '\uDC00\uDC00' }), // Two low surrogates together
+      /Invalid Unicode string value|lone surrogate/i,
+    );
+    assert.throws(
+      () => canonicalizeJson({ test: 'abc\uDC00def' }),
+      /Invalid Unicode string value|lone surrogate/i,
+    );
+  });
+
+  it('explicitly rejects malformed surrogate pairs in object keys / property names', () => {
+    // Lone high surrogate in property name
+    assert.throws(
+      () => canonicalizeJson({ ['bad\uD800key']: 123 }),
+      /Invalid Unicode property name|lone surrogate/i,
+    );
+    // Lone low surrogate in property name
+    assert.throws(
+      () => canonicalizeJson({ ['bad\uDC00key']: 456 }),
+      /Invalid Unicode property name|lone surrogate/i,
+    );
+  });
+
+  it('explicitly rejects malformed surrogate pairs in nested values and arrays', () => {
+    const nested = {
+      data: {
+        items: ['valid', 'good', 'corrupted\uD83D'],
+      },
+    };
+    assert.throws(
+      () => canonicalizeJson(nested),
+      /Invalid Unicode string value|lone surrogate/i,
+    );
+  });
+
+  it('verifies strict UTF-16 code unit property sorting with Unicode keys', () => {
+    const doc: Record<string, string> = {
+      'z': 'last ascii',
+      'a': 'first ascii',
+      'A': 'capital ascii',
+      '\u00e9': 'e-acute (U+00E9)',
+      '\ud83d\ude00': 'grinning (U+1F600, high surrogate U+D83D)',
+      '1': 'digit (U+0031)',
+      '': 'empty key',
+    };
+    const res = canonicalizeJson(doc);
+    assert.equal(
+      res,
+      '{"":"empty key","1":"digit (U+0031)","A":"capital ascii","a":"first ascii","z":"last ascii","é":"e-acute (U+00E9)","😀":"grinning (U+1F600, high surrogate U+D83D)"}',
+    );
   });
 
   // =========================================================================
@@ -191,16 +389,6 @@ describe('Canonical Hashing & RFC 8785 Compliance', () => {
     assert.throws(
       () => canonicalizeJson({ createdAt: invalidDate }),
       /Invalid Date in canonicalization/,
-    );
-  });
-
-  it('explicitly detects and rejects circular object references', () => {
-    const circular: Record<string, any> = { a: 1 };
-    circular.self = circular;
-
-    assert.throws(
-      () => canonicalizeJson(circular),
-      /Circular reference detected in canonicalization/,
     );
   });
 

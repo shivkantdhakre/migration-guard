@@ -81,16 +81,18 @@ export class ValidationController {
 
   @Get('discrepancies/:discrepancyId')
   async getDiscrepancy(
+    @CurrentUser() user: AuthenticatedUser,
     @Param('discrepancyId') discrepancyId: string,
   ) {
-    return this.discrepancyService.getDiscrepancy(discrepancyId);
+    return this.discrepancyService.getDiscrepancy(discrepancyId, user.id);
   }
 
   @Patch('discrepancies/:discrepancyId')
   async updateDiscrepancyStatus(
+    @CurrentUser() user: AuthenticatedUser,
     @Param('discrepancyId') discrepancyId: string,
     @Body() body: { status: 'OPEN' | 'ACKNOWLEDGED' | 'RESOLVED' | 'IGNORED'; comment?: string },
   ) {
-    return this.discrepancyService.updateDiscrepancyStatus(discrepancyId, body.status, body.comment);
+    return this.discrepancyService.updateDiscrepancyStatus(discrepancyId, body.status, body.comment, user.id);
   }
 }

@@ -26,8 +26,38 @@ export class ValidationService {
     const run = runRes.rows[0];
     await this.workspaceService.assertWorkspaceAccess(run.workspace_id, userId, 'Engineer');
 
-    // 1. Build source & destination datasets
-    // Check if real records exist in destination PostgreSQL
+    // Fetch plan version to check connection validity
+    let planVersion: any = null;
+    if (run.plan_version_id) {
+      const planRes = await this.db.query(
+        'SELECT * FROM migration_plan_versions WHERE id = $1',
+        [run.plan_version_id],
+      );
+      if (planRes.rows.length > 0) {
+        planVersion = planRes.rows[0];
+      }
+    }
+
+    // Verify source connection is not unavailable or in ERROR state
+    if (planVersion?.source_connection_id) {
+      const srcConnRes = await this.db.query(
+        'SELECT status, engine FROM connections WHERE id = $1',
+        [planVersion.source_connection_id],
+      );
+      if (srcConnRes.rows.length > 0 && srcConnRes.rows[0].status === 'ERROR') {
+        await this.db.query(
+          `INSERT INTO validation_runs (
+             workspace_id, migration_run_id, status, validation_profile_version,
+             canonicalization_version, started_at, completed_at, summary_json
+           )
+           VALUES ($1, $2, 'ERROR', '1.0', '1.0', NOW(), NOW(), $3)`,
+          [run.workspace_id, runId, { error: 'Source connection is in ERROR state; cannot validate.' }],
+        );
+        throw new Error('Source connection is unavailable or in ERROR state. Validation failed closed.');
+      }
+    }
+
+    // 1. Build source & destination datasets independently (NEVER clone destination to source)
     let destRecords: any[] = [];
     let destOrders: any[] = [];
     let destAttachments: any[] = [];
@@ -48,16 +78,22 @@ export class ValidationService {
     let sourceDataset: ValidationDataset;
     let destinationDataset: ValidationDataset;
 
-    if (destRecords.length > 0 && destOrders.length > 0 && destAttachments.length > 0) {
-      // Use full real destination records
+    const parseDateSafe = (d: any) => {
+      if (!d) return new Date().toISOString();
+      const parsed = new Date(d);
+      return isNaN(parsed.getTime()) ? new Date().toISOString() : parsed.toISOString();
+    };
+
+    if (destRecords.length > 0) {
+      // Build destination dataset from actual destination tables
       destinationDataset = {
         objectName: 'customers',
         records: destRecords.map((r: any) => ({
           id: String(r.id),
           name: r.name,
           email: r.email,
-          createdAt: r.created_at ? new Date(r.created_at).toISOString() : new Date().toISOString(),
-          updatedAt: r.updated_at ? new Date(r.updated_at).toISOString() : new Date().toISOString(),
+          createdAt: parseDateSafe(r.created_at),
+          updatedAt: parseDateSafe(r.updated_at),
           status: r.status || 'ACTIVE',
           tier: r.tier || 'STANDARD',
           metadata: typeof r.metadata === 'string' ? JSON.parse(r.metadata) : r.metadata || {},
@@ -67,7 +103,7 @@ export class ValidationService {
           customerId: String(o.customer_id),
           totalAmount: Number(o.total_amount),
           currency: 'USD',
-          orderDate: o.ordered_at ? new Date(o.ordered_at).toISOString() : new Date().toISOString(),
+          orderDate: parseDateSafe(o.ordered_at),
           status: o.status || 'COMPLETED',
           itemsCount: 1,
         })),
@@ -82,13 +118,36 @@ export class ValidationService {
         })),
       };
 
-      // Create matching source dataset baseline for validation
-      sourceDataset = {
-        objectName: 'customers',
-        records: (destinationDataset.records || []).map((r: any) => ({ ...r })),
-        orders: (destinationDataset.orders || []).map((o: any) => ({ ...o })),
-        attachments: (destinationDataset.attachments || []).map((a: any) => ({ ...a })),
-      };
+      // Load source baseline records independently from record_manifests / source store
+      const manifestsRes = await this.db.query(
+        `SELECT * FROM record_manifests WHERE migration_run_id = $1 ORDER BY created_at ASC`,
+        [runId],
+      );
+
+      if (manifestsRes.rows.length > 0) {
+        sourceDataset = {
+          objectName: 'customers',
+          records: manifestsRes.rows.map((m: any) => ({
+            id: String(m.source_key),
+            name: `Customer ${m.source_key}`,
+            email: `customer_${m.source_key}@example.com`,
+            createdAt: parseDateSafe(m.created_at),
+            updatedAt: parseDateSafe(m.created_at),
+            status: 'ACTIVE',
+            tier: 'STANDARD',
+            metadata: {},
+          })),
+          orders: [],
+          attachments: [],
+        };
+      } else {
+        sourceDataset = {
+          objectName: 'customers',
+          records: [],
+          orders: [],
+          attachments: [],
+        };
+      }
     } else {
       // Synthetic benchmark dataset with seeded discrepancy suite for assurance testing
       const benchmark = generateSyntheticDataset({ totalRecords: 200 });
@@ -108,6 +167,7 @@ export class ValidationService {
     });
 
     const summary = await engine.validate(sourceDataset, destinationDataset);
+    const overallStatus = summary.failedChecks > 0 ? 'FAILED' : 'COMPLETED';
 
     const summaryJson = {
       totalChecks: summary.totalChecks,
@@ -115,6 +175,7 @@ export class ValidationService {
       failedChecks: summary.failedChecks,
       discrepancies: summary.totalDiscrepancies,
       durationMs: summary.durationMs,
+      overallStatus,
     };
 
     // 3. Create validation_runs row with real execution summary

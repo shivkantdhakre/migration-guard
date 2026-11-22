@@ -39,9 +39,9 @@ export class PostgresStorageAdapters
       INSERT INTO migration_batches (
         id, migration_run_id, batch_key, sequence_no, status,
         records_read, records_written, records_skipped, records_failed,
-        source_cursor_start, source_cursor_end, error_summary, started_at, completed_at
+        attempt_count, source_cursor_start, source_cursor_end, error_summary, started_at, completed_at
       ) VALUES (
-        COALESCE($1::uuid, gen_random_uuid()), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
+        COALESCE($1::uuid, gen_random_uuid()), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15
       )
       ON CONFLICT (migration_run_id, batch_key) DO UPDATE SET
         status = EXCLUDED.status,
@@ -49,11 +49,24 @@ export class PostgresStorageAdapters
         records_written = EXCLUDED.records_written,
         records_skipped = EXCLUDED.records_skipped,
         records_failed = EXCLUDED.records_failed,
+        attempt_count = EXCLUDED.attempt_count,
+        source_cursor_start = EXCLUDED.source_cursor_start,
         source_cursor_end = EXCLUDED.source_cursor_end,
         error_summary = EXCLUDED.error_summary,
         completed_at = EXCLUDED.completed_at
       RETURNING id;
     `;
+
+    const cursorStart = batch.sourceCursorStart || {};
+    const meta = {
+      sourceObject: batch.sourceObject,
+      destinationObject: batch.destinationObject,
+      subStage: batch.subStage,
+      maxAttempts: batch.maxAttempts,
+    };
+    const enrichedCursorStart = typeof cursorStart === 'object' && cursorStart !== null
+      ? { ...cursorStart, _meta: meta }
+      : { value: cursorStart, _meta: meta };
 
     const res = await this.pool.query(query, [
       batch.id || null,
@@ -65,7 +78,8 @@ export class PostgresStorageAdapters
       batch.recordsWritten,
       batch.recordsSkipped,
       batch.recordsFailed,
-      batch.sourceCursorStart ? JSON.stringify(batch.sourceCursorStart) : null,
+      batch.attemptCount || 0,
+      JSON.stringify(enrichedCursorStart),
       batch.sourceCursorEnd ? JSON.stringify(batch.sourceCursorEnd) : null,
       batch.errorSummary ? JSON.stringify(batch.errorSummary) : null,
       batch.startedAt ? new Date(batch.startedAt) : null,
@@ -84,20 +98,23 @@ export class PostgresStorageAdapters
     );
     if (res.rows.length === 0) return null;
     const r = res.rows[0];
+    const meta = r.source_cursor_start?._meta || r.error_summary?._meta;
+    const inferredSource = r.batch_key ? r.batch_key.split('_')[0] : 'default';
     return {
       id: r.id,
       migrationRunId: r.migration_run_id,
       batchKey: r.batch_key,
       sequenceNo: Number(r.sequence_no),
       status: r.status as BatchStatus,
-      sourceObject: r.source_object || 'customers',
-      destinationObject: r.destination_object || 'customers',
-      maxAttempts: r.max_attempts || 3,
+      sourceObject: r.source_object || meta?.sourceObject || inferredSource,
+      destinationObject: r.destination_object || meta?.destinationObject || meta?.sourceObject || inferredSource,
+      maxAttempts: Number(r.max_attempts || meta?.maxAttempts || 3),
+      subStage: (r.sub_stage || meta?.subStage || undefined) as BatchSubStage | undefined,
       recordsRead: Number(r.records_read || 0),
       recordsWritten: Number(r.records_written || 0),
       recordsSkipped: Number(r.records_skipped || 0),
       recordsFailed: Number(r.records_failed || 0),
-      attemptCount: r.attempt_count || 0,
+      attemptCount: Number(r.attempt_count || 0),
       sourceCursorStart: r.source_cursor_start,
       sourceCursorEnd: r.source_cursor_end,
       startedAt: r.started_at ? new Date(r.started_at).toISOString() : undefined,
@@ -110,25 +127,30 @@ export class PostgresStorageAdapters
       `SELECT * FROM migration_batches WHERE migration_run_id = $1 ORDER BY sequence_no ASC`,
       [migrationRunId],
     );
-    return res.rows.map((r) => ({
-      id: r.id,
-      migrationRunId: r.migration_run_id,
-      batchKey: r.batch_key,
-      sequenceNo: Number(r.sequence_no),
-      status: r.status as BatchStatus,
-      sourceObject: r.source_object || 'customers',
-      destinationObject: r.destination_object || 'customers',
-      maxAttempts: r.max_attempts || 3,
-      recordsRead: Number(r.records_read || 0),
-      recordsWritten: Number(r.records_written || 0),
-      recordsSkipped: Number(r.records_skipped || 0),
-      recordsFailed: Number(r.records_failed || 0),
-      attemptCount: r.attempt_count || 0,
-      sourceCursorStart: r.source_cursor_start,
-      sourceCursorEnd: r.source_cursor_end,
-      startedAt: r.started_at ? new Date(r.started_at).toISOString() : undefined,
-      completedAt: r.completed_at ? new Date(r.completed_at).toISOString() : undefined,
-    }));
+    return res.rows.map((r) => {
+      const meta = r.source_cursor_start?._meta || r.error_summary?._meta;
+      const inferredSource = r.batch_key ? r.batch_key.split('_')[0] : 'default';
+      return {
+        id: r.id,
+        migrationRunId: r.migration_run_id,
+        batchKey: r.batch_key,
+        sequenceNo: Number(r.sequence_no),
+        status: r.status as BatchStatus,
+        sourceObject: r.source_object || meta?.sourceObject || inferredSource,
+        destinationObject: r.destination_object || meta?.destinationObject || meta?.sourceObject || inferredSource,
+        maxAttempts: Number(r.max_attempts || meta?.maxAttempts || 3),
+        subStage: (r.sub_stage || meta?.subStage || undefined) as BatchSubStage | undefined,
+        recordsRead: Number(r.records_read || 0),
+        recordsWritten: Number(r.records_written || 0),
+        recordsSkipped: Number(r.records_skipped || 0),
+        recordsFailed: Number(r.records_failed || 0),
+        attemptCount: Number(r.attempt_count || 0),
+        sourceCursorStart: r.source_cursor_start,
+        sourceCursorEnd: r.source_cursor_end,
+        startedAt: r.started_at ? new Date(r.started_at).toISOString() : undefined,
+        completedAt: r.completed_at ? new Date(r.completed_at).toISOString() : undefined,
+      };
+    });
   }
 
   async saveRecordManifests(manifests: RecordManifest[]): Promise<void> {

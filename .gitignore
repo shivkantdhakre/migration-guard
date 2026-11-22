@@ -34,6 +34,7 @@ Thumbs.db
 # Database / Storage data
 docker-data/
 data/
+storage/
 minio-data/
 mongo-data/
 postgres-data/
@@ -75,6 +76,7 @@ Thumbs.db
 # Database / Storage data
 docker-data/
 data/
+storage/
 minio-data/
 mongo-data/
 postgres-data/

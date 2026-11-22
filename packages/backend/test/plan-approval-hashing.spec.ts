@@ -217,9 +217,9 @@ describe('Plan Approval & Canonical Hashing', () => {
     expect(runResult.status).toBe('QUEUED');
     expect(runResult.runId).toBeDefined();
 
-    // 3. Batches exist
+    // 3. Batches exist (dynamically streamed initial batch)
     const batchesRes = await migrationService.listBatches(runResult.runId, 1, 10, user.user.id);
-    expect(batchesRes.batches.length).toBe(10);
+    expect(batchesRes.batches.length).toBeGreaterThanOrEqual(1);
     expect(batchesRes.batches[0].batch_key).toBe('batch_0001');
 
     // 4. Progress service returns metrics

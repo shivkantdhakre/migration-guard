@@ -4,6 +4,11 @@ export class ToolCatalog {
   private static mockSnapshots: Map<string, any> = new Map();
   private static mockDiscrepancies: Map<string, any[]> = new Map();
   private static mockRuns: Map<string, any> = new Map();
+  private static db: any = null;
+
+  public static setDatabaseService(db: any): void {
+    this.db = db;
+  }
 
   /**
    * Seed mock data for testing or offline execution.
@@ -35,7 +40,7 @@ export class ToolCatalog {
       };
     }
 
-    const { toolName, input } = request;
+    const { toolName, input, context } = request;
 
     try {
       let rawResult: any;
@@ -43,33 +48,40 @@ export class ToolCatalog {
       switch (toolName) {
         case 'get_schema_snapshot': {
           const snapshotId = input.snapshotId as string;
-          const found = this.mockSnapshots.get(snapshotId) || {
-            id: snapshotId,
-            engine: snapshotId.includes('pg') ? 'POSTGRESQL' : 'MONGODB',
-            createdAt: new Date().toISOString(),
-            objects: [
-              {
-                name: 'customers',
-                type: 'collection',
-                fields: [
-                  { path: '_id', type: 'ObjectId', nullable: false },
-                  { path: 'name', type: 'string', nullable: false },
-                  { path: 'email', type: 'string', nullable: true },
-                  { path: 'createdAt', type: 'Date', nullable: false },
-                  { path: 'address', type: 'object', nullable: true },
-                  { path: 'orders', type: 'array', nullable: true },
-                ],
-              },
-            ],
-          };
-          rawResult = found;
+          if (this.db) {
+            const res = await this.db.query(
+              'SELECT * FROM schema_snapshots WHERE id = $1 AND workspace_id = $2',
+              [snapshotId, context.workspaceId],
+            );
+            if (res.rows.length > 0) {
+              rawResult = res.rows[0].snapshot_json;
+              break;
+            }
+          }
+          const found = this.mockSnapshots.get(snapshotId);
+          if (found) {
+            rawResult = { ...found, isDemoModeSynthetic: true };
+          } else {
+            rawResult = { notFound: true, message: `Snapshot ${snapshotId} not found in workspace.` };
+          }
           break;
         }
 
         case 'get_profile_summary': {
           const snapshotId = input.snapshotId as string;
+          if (this.db) {
+            const res = await this.db.query(
+              'SELECT * FROM profile_runs WHERE schema_snapshot_id = $1 AND workspace_id = $2 ORDER BY created_at DESC LIMIT 1',
+              [snapshotId, context.workspaceId],
+            );
+            if (res.rows.length > 0) {
+              rawResult = res.rows[0].summary_json;
+              break;
+            }
+          }
           rawResult = {
             snapshotId,
+            isDemoModeSynthetic: true,
             sampleSize: 1000,
             profiles: [
               {

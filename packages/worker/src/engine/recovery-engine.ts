@@ -104,7 +104,7 @@ export class RecoveryEngine {
   /**
    * Reconciles a single batch based on its crash point / status
    */
-  private async reconcileBatch(
+  public async reconcileBatch(
     batch: MigrationBatch,
     destinationObject: string,
   ): Promise<ReconciliationResult | null> {

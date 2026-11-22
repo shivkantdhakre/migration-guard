@@ -7,21 +7,87 @@ import {
   Req,
   HttpCode,
   HttpStatus,
+  UseGuards,
+  UnauthorizedException,
+  ForbiddenException,
+  BadRequestException,
 } from '@nestjs/common';
 import { AiService } from './ai.service.js';
 import { ToolExecutionContext } from './types.js';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
+import { DatabaseService } from '../database/database.service.js';
+
+// Per-user and per-workspace rate limiter (FR-SEC / Section 1.2)
+const RATE_LIMIT_WINDOW_MS = 60 * 1000;
+const MAX_REQUESTS_PER_MINUTE = 60;
+const rateLimitStore = new Map<string, { count: number; resetAt: number }>();
+
+function checkRateLimit(key: string): void {
+  const now = Date.now();
+  const entry = rateLimitStore.get(key);
+  if (!entry || now > entry.resetAt) {
+    rateLimitStore.set(key, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
+    return;
+  }
+  if (entry.count >= MAX_REQUESTS_PER_MINUTE) {
+    throw new ForbiddenException(`AI rate limit exceeded for ${key}. Try again in ${Math.ceil((entry.resetAt - now) / 1000)}s.`);
+  }
+  entry.count++;
+}
 
 @Controller()
+@UseGuards(JwtAuthGuard)
 export class AiController {
-  constructor(private readonly aiService: AiService) {}
+  constructor(
+    private readonly aiService: AiService,
+    private readonly db: DatabaseService,
+  ) {}
 
-  private extractContext(req: any): ToolExecutionContext {
-    const user = req?.user || {};
+  private async extractContext(req: any): Promise<ToolExecutionContext> {
+    const user = req?.user;
+    if (!user || !user.id) {
+      throw new UnauthorizedException('Authentication required to access AI capabilities.');
+    }
+
+    const userId = user.id;
+
+    // Check rate limit per-user
+    checkRateLimit(`user:${userId}`);
+
+    // Resolve workspace membership securely from verified database record
+    // NEVER trust client headers (x-workspace-id/x-project-id) or hardcoded defaults
+    const requestedWorkspaceId =
+      req?.headers?.['x-workspace-id'] ||
+      req?.body?.workspaceId ||
+      req?.query?.workspaceId ||
+      req?.params?.workspaceId;
+
+    let memberQuery = 'SELECT workspace_id, role FROM workspace_members WHERE user_id = $1';
+    const params: any[] = [userId];
+
+    if (requestedWorkspaceId) {
+      memberQuery += ' AND workspace_id = $2';
+      params.push(requestedWorkspaceId);
+    }
+    memberQuery += ' ORDER BY created_at ASC LIMIT 1';
+
+    const memberRes = await this.db.query(memberQuery, params);
+    if (memberRes.rows.length === 0) {
+      throw new ForbiddenException('User is not authorized for the requested workspace.');
+    }
+
+    const membership = memberRes.rows[0];
+    const resolvedWorkspaceId = membership.workspace_id;
+    const resolvedRole = (membership.role || 'Viewer').toUpperCase();
+
+    // Check rate limit per-workspace
+    checkRateLimit(`workspace:${resolvedWorkspaceId}`);
+
     return {
-      workspaceId: req?.headers?.['x-workspace-id'] || user.workspaceId || 'ws-default',
-      projectId: req?.headers?.['x-project-id'] || user.projectId || 'proj-default',
-      actorId: user.id || 'actor-default',
-      actorRole: user.role || 'ENGINEER',
+      workspaceId: resolvedWorkspaceId,
+      projectId: req?.body?.projectId || req?.params?.projectId || 'default-project',
+      actorId: userId,
+      actorRole: resolvedRole,
     };
   }
 
@@ -41,7 +107,7 @@ export class AiController {
     },
     @Req() req: any
   ) {
-    const context = this.extractContext(req);
+    const context = await this.extractContext(req);
     const result = await this.aiService.suggestMappings(
       {
         workspaceId: context.workspaceId,
@@ -82,7 +148,7 @@ export class AiController {
     },
     @Req() req: any
   ) {
-    const context = this.extractContext(req);
+    const context = await this.extractContext(req);
     const result = await this.aiService.draftPlan(
       {
         workspaceId: context.workspaceId,
@@ -118,7 +184,7 @@ export class AiController {
     @Body() body: { category?: string },
     @Req() req: any
   ) {
-    const context = this.extractContext(req);
+    const context = await this.extractContext(req);
     const result = await this.aiService.analyzeDiscrepancies(
       {
         workspaceId: context.workspaceId,
@@ -148,7 +214,7 @@ export class AiController {
     @Param('projectId') projectId: string,
     @Req() req: any
   ) {
-    const context = this.extractContext(req);
+    const context = await this.extractContext(req);
     const conversationId = `conv-${Date.now()}`;
     return {
       data: {
@@ -175,7 +241,7 @@ export class AiController {
     },
     @Req() req: any
   ) {
-    const context = this.extractContext(req);
+    const context = await this.extractContext(req);
     const result = await this.aiService.askCopilot(
       {
         workspaceId: context.workspaceId,
@@ -235,8 +301,13 @@ export class AiController {
     @Param('proposalId') proposalId: string,
     @Req() req: any
   ) {
-    const context = this.extractContext(req);
+    const context = await this.extractContext(req);
     const data = await this.aiService.acceptProposal(proposalId, context.actorId);
+    await this.db.query(
+      `INSERT INTO audit_events (workspace_id, project_id, actor_type, actor_id, action, resource_type, resource_id, details_json)
+       VALUES ($1, $2, 'USER', $3, 'AI_PROPOSAL_ACCEPTED', 'AI_PROPOSAL', $4, $5)`,
+      [context.workspaceId, context.projectId === 'default-project' ? null : context.projectId, context.actorId, proposalId, { proposalId, decision: 'ACCEPT' }],
+    );
     return { data };
   }
 
@@ -249,8 +320,13 @@ export class AiController {
     @Param('proposalId') proposalId: string,
     @Req() req: any
   ) {
-    const context = this.extractContext(req);
+    const context = await this.extractContext(req);
     const data = await this.aiService.rejectProposal(proposalId, context.actorId);
+    await this.db.query(
+      `INSERT INTO audit_events (workspace_id, project_id, actor_type, actor_id, action, resource_type, resource_id, details_json)
+       VALUES ($1, $2, 'USER', $3, 'AI_PROPOSAL_REJECTED', 'AI_PROPOSAL', $4, $5)`,
+      [context.workspaceId, context.projectId === 'default-project' ? null : context.projectId, context.actorId, proposalId, { proposalId, decision: 'REJECT' }],
+    );
     return { data };
   }
 }

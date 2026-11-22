@@ -38,21 +38,21 @@ export class MigrationService {
     // Verify workspace access
     await this.workspaceService.assertWorkspaceAccess(workspaceId, userId, 'Engineer');
 
-    // 2. Critical Safety Rule: Only approved plan versions can run
+    // 2. Critical Safety Rule: Only approved plan versions can run.
+    // Ensure the latest approval/rejection decision is explicitly 'APPROVE'.
     const approvalRes = await this.db.query(
       `SELECT * FROM approvals
        WHERE resource_type = 'PLAN_VERSION'
          AND resource_id = $1
          AND resource_hash = $2
-         AND approval_status = 'APPROVE'
        ORDER BY approved_at DESC LIMIT 1`,
       [planVersionId, version.plan_hash],
     );
 
-    if (approvalRes.rows.length === 0) {
+    if (approvalRes.rows.length === 0 || approvalRes.rows[0].approval_status !== 'APPROVE') {
       throw new ForbiddenException({
         code: 'PLAN_NOT_APPROVED',
-        message: 'Cannot execute migration: plan version has not received explicit approval for its canonical hash.',
+        message: 'Cannot execute migration: plan version has not received explicit approval or latest decision was rejected.',
         planVersionId,
         planHash: version.plan_hash,
       });
@@ -92,23 +92,30 @@ export class MigrationService {
     const payloads: MigrationJobPayload[] = [];
     let overallSeq = 0;
 
+    // Support dynamic streaming: if batchesPerTable is not explicitly configured,
+    // seed initial streaming batch (seq 1, cursorStart = null) per collection/table.
+    // The worker's streaming scheduler (onNextBatchScheduled) continues reading dynamically.
+    const explicitBatchesPerTable = version.execution_config_json?.batchesPerTable;
+
     for (const table of tables) {
       const sourceObject = table.source;
       const destinationObject = table.destination;
-      const batchesPerTable = version.execution_config_json?.batchesPerTable || (tables.length > 1 ? 5 : 10);
+      const numBatches = explicitBatchesPerTable || 1;
 
-      for (let i = 1; i <= batchesPerTable; i++) {
+      for (let i = 1; i <= numBatches; i++) {
         overallSeq++;
         const batchKey =
           tables.length > 1
             ? `batch_${sourceObject}_${String(i).padStart(4, '0')}`
             : `batch_${String(i).padStart(4, '0')}`;
+
+        // Insert batch in PENDING state (Transactional Outbox Pattern)
         await this.db.query(
           `INSERT INTO migration_batches (
              migration_run_id, batch_key, sequence_no, status,
              records_read, records_written, records_skipped, records_failed
            )
-           VALUES ($1, $2, $3, 'QUEUED', 0, 0, 0, 0)`,
+           VALUES ($1, $2, $3, 'PENDING', 0, 0, 0, 0)`,
           [run.id, batchKey, overallSeq],
         );
 
@@ -120,7 +127,7 @@ export class MigrationService {
           sourceObject,
           destinationObject,
           cursorStart: i === 1 ? null : { offset: (i - 1) * batchSize },
-          cursorEnd: { offset: i * batchSize },
+          cursorEnd: explicitBatchesPerTable ? { offset: i * batchSize } : undefined,
           batchSize,
           planVersionId,
           mappingVersionId: version.mapping_version_id || 'default-mapping',
@@ -131,9 +138,13 @@ export class MigrationService {
       }
     }
 
-    // Real BullMQ job dispatch (Phase 2 Remediation)
-    if (this.queueService) {
+    // Real BullMQ job dispatch with outbox transition to QUEUED
+    if (this.queueService && payloads.length > 0) {
       await this.queueService.dispatchBatches(payloads);
+      await this.db.query(
+        `UPDATE migration_batches SET status = 'QUEUED' WHERE migration_run_id = $1 AND status = 'PENDING'`,
+        [run.id],
+      );
     }
 
     // Append to audit events
@@ -329,6 +340,8 @@ export class MigrationService {
         planVersionId: version?.id || '',
         mappingVersionId: version?.mapping_version_id || 'default-mapping',
         writeMode,
+        sourceConnectionId: version?.source_connection_id,
+        destinationConnectionId: version?.destination_connection_id,
       }));
 
       await this.queueService.dispatchBatches(retryPayloads);

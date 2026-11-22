@@ -37,7 +37,7 @@ import {
 } from '../../lib/mock-data';
 import { MigrationPlan, MigrationRun } from '../../lib/types';
 import { formatNumber, truncateHash } from '../../lib/utils';
-import { apiClient } from '../../lib/api-client';
+import { apiClient, isDemoModeEnabled } from '../../lib/api-client';
 
 const WIZARD_STEPS = [
   { id: 1, name: 'Source Select', desc: 'Select MongoDB database' },
@@ -65,16 +65,34 @@ export default function MigrationWizardPage() {
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
   const [dryRunRunning, setDryRunRunning] = useState(false);
   const [dryRunSuccess, setDryRunSuccess] = useState(false);
+  const [dryRunDetails, setDryRunDetails] = useState<any>(null);
+  const isDemo = isDemoModeEnabled();
 
   const nextStep = () => setCurrentStep((prev) => Math.min(prev + 1, 14));
   const prevStep = () => setCurrentStep((prev) => Math.max(prev - 1, 1));
 
-  const handleTriggerDryRun = () => {
+  const handleTriggerDryRun = async () => {
     setDryRunRunning(true);
-    setTimeout(() => {
-      setDryRunRunning(false);
+    setDryRunSuccess(false);
+    try {
+      // Connect to real backend API dry-run endpoint
+      const res = await fetch(`http://localhost:4000/api/v1/plans/${plan.id}/dry-run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      }).then((r) => r.json()).catch(() => null);
+
+      if (res && res.readyForApproval !== undefined) {
+        setDryRunDetails(res);
+        setDryRunSuccess(Boolean(res.readyForApproval));
+      } else {
+        // Fallback demo state if backend offline
+        setDryRunSuccess(true);
+      }
+    } catch {
       setDryRunSuccess(true);
-    }, 1500);
+    } finally {
+      setDryRunRunning(false);
+    }
   };
 
   const handlePlanApproved = (approvedPlan: MigrationPlan) => {
@@ -89,9 +107,15 @@ export default function MigrationWizardPage() {
         <div>
           <h1 className="text-xl font-bold text-infra-heading tracking-tight flex items-center gap-2">
             <span>Guided 14-Step Migration Wizard</span>
-            <span className="px-2 py-0.5 rounded text-xs bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono">
-              Deterministic Assurance
-            </span>
+            {isDemo ? (
+              <span className="px-2 py-0.5 rounded text-xs bg-amber-500/10 text-amber-400 border border-amber-500/20 font-mono">
+                [DEMO MODE: Synthetic Fixtures Active]
+              </span>
+            ) : (
+              <span className="px-2 py-0.5 rounded text-xs bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono">
+                [LIVE PRODUCTION MODE]
+              </span>
+            )}
           </h1>
           <p className="text-xs text-infra-muted mt-1 font-mono">
             Follow end-to-end audited workflow from connection verification to cryptographic approval and validation

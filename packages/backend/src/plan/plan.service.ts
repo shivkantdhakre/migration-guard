@@ -89,6 +89,69 @@ export class PlanService {
       throw new BadRequestException('sourceConnectionId and destinationConnectionId are required.');
     }
 
+    // Enforce workspace ownership and role/engine compatibility for connections (Section 1.1)
+    const sourceConnRes = await this.db.query(
+      'SELECT * FROM connections WHERE id = $1 AND workspace_id = $2',
+      [dto.sourceConnectionId, plan.workspace_id],
+    );
+    if (sourceConnRes.rows.length === 0) {
+      throw new BadRequestException('Source connection not found in plan workspace.');
+    }
+    const sourceConn = sourceConnRes.rows[0];
+    if (sourceConn.connection_role !== 'SOURCE') {
+      throw new BadRequestException(`Source connection role must be SOURCE (got ${sourceConn.connection_role}).`);
+    }
+    if (sourceConn.engine !== 'MONGODB') {
+      throw new BadRequestException(`Source connection engine must be MONGODB (got ${sourceConn.engine}).`);
+    }
+
+    const destConnRes = await this.db.query(
+      'SELECT * FROM connections WHERE id = $1 AND workspace_id = $2',
+      [dto.destinationConnectionId, plan.workspace_id],
+    );
+    if (destConnRes.rows.length === 0) {
+      throw new BadRequestException('Destination connection not found in plan workspace.');
+    }
+    const destConn = destConnRes.rows[0];
+    if (destConn.connection_role !== 'DESTINATION') {
+      throw new BadRequestException(`Destination connection role must be DESTINATION (got ${destConn.connection_role}).`);
+    }
+    if (destConn.engine !== 'POSTGRESQL') {
+      throw new BadRequestException(`Destination connection engine must be POSTGRESQL (got ${destConn.engine}).`);
+    }
+
+    // Validate snapshots belong to selected connections and workspace
+    if (dto.sourceSchemaSnapshotId) {
+      const srcSnapRes = await this.db.query(
+        'SELECT * FROM schema_snapshots WHERE id = $1 AND workspace_id = $2 AND connection_id = $3',
+        [dto.sourceSchemaSnapshotId, plan.workspace_id, dto.sourceConnectionId],
+      );
+      if (srcSnapRes.rows.length === 0) {
+        throw new BadRequestException('Source schema snapshot does not belong to selected source connection or workspace.');
+      }
+    }
+
+    if (dto.destinationSchemaSnapshotId) {
+      const destSnapRes = await this.db.query(
+        'SELECT * FROM schema_snapshots WHERE id = $1 AND workspace_id = $2 AND connection_id = $3',
+        [dto.destinationSchemaSnapshotId, plan.workspace_id, dto.destinationConnectionId],
+      );
+      if (destSnapRes.rows.length === 0) {
+        throw new BadRequestException('Destination schema snapshot does not belong to selected destination connection or workspace.');
+      }
+    }
+
+    // Validate mapping version belongs to plan workspace
+    if (dto.mappingVersionId) {
+      const mapRes = await this.db.query(
+        'SELECT * FROM mapping_versions WHERE id = $1 AND workspace_id = $2',
+        [dto.mappingVersionId, plan.workspace_id],
+      );
+      if (mapRes.rows.length === 0) {
+        throw new BadRequestException('Mapping version does not belong to plan workspace.');
+      }
+    }
+
     // Determine version number
     const countRes = await this.db.query(
       'SELECT COUNT(*) as count FROM migration_plan_versions WHERE plan_id = $1',

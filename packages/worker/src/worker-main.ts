@@ -10,15 +10,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { Worker, Job } from 'bullmq';
+import { Worker, Job, Queue } from 'bullmq';
 import { Redis } from 'ioredis';
 import pg from 'pg';
 import { QueueHandler } from './engine/queue-handler.js';
 import { BatchManifestTracker } from './engine/batch-manifest.js';
 import { CheckpointManager } from './engine/checkpoint.js';
 import { IdTracker } from './engine/id-tracker.js';
+import { RecoveryEngine } from './engine/recovery-engine.js';
 import { PostgresStorageAdapters } from './engine/postgres-storage-adapters.js';
-import { calculateCanonicalHash } from '@migrationguard/core';
+import { calculateCanonicalHash, TransformationEngine, ObjectMapping } from '@migrationguard/core';
 import { ConnectorFactory, resolvePostgresSsl } from './connectors/connector-factory.js';
 import {
   MigrationJobPayload,
@@ -234,6 +235,7 @@ console.log(`[Worker] Redis target: ${REDIS_URL ? 'Cloud Valkey/Redis' : `${REDI
 console.log(`[Worker] Database target: ${DATABASE_URL.replace(/:[^:@]+@/, ':***@')}`);
 
 let executionWorker: Worker | null = null;
+let executionQueue: Queue<MigrationJobPayload> | null = null;
 let isShuttingDown = false;
 let dbPool: pg.Pool | null = null;
 let redisClient: Redis | null = null;
@@ -564,6 +566,11 @@ async function startWorker() {
 
     const QUEUE_NAME = process.env.BULLMQ_QUEUE_NAME || 'migration-execution';
 
+    // Initialize execution queue for scheduling subsequent batches
+    executionQueue = new Queue(QUEUE_NAME, {
+      connection: redisClient,
+    });
+
     executionWorker = new Worker(
       QUEUE_NAME,
       async (job: Job<MigrationJobPayload>) => {
@@ -579,11 +586,102 @@ async function startWorker() {
           `[Worker] Executing run: ${job.data.migrationRunId}, Batch: ${job.data.batchKey}, Object: ${job.data.sourceObject} -> ${job.data.destinationObject}`,
         );
 
+        // Check if migration run is paused or cancelled before doing any work
+        if (dbPool) {
+          const runCheck = await dbPool.query(
+            `SELECT status FROM migration_runs WHERE id = $1`,
+            [job.data.migrationRunId],
+          );
+          if (runCheck.rows.length > 0) {
+            const currentStatus = runCheck.rows[0].status;
+            if (currentStatus === 'PAUSED' || currentStatus === 'CANCELLED') {
+              console.log(`[Worker] Run ${job.data.migrationRunId} is ${currentStatus}. Halting execution of batch ${job.data.batchKey}.`);
+              return {
+                migrationRunId: job.data.migrationRunId,
+                batchKey: job.data.batchKey,
+                sequenceNo: job.data.sequenceNo,
+                status: currentStatus === 'PAUSED' ? 'RETRY_WAIT' : 'FAILED_PERMANENT',
+                recordsRead: 0,
+                recordsWritten: 0,
+                recordsSkipped: 0,
+                recordsFailed: 0,
+                hasMore: false,
+              };
+            }
+          }
+        }
+
         // Dynamically resolve connectors from connection vault in database
         const activeSourceConnector = await getSourceConnector(job.data);
         const activeDestinationConnector = await getDestinationConnector(job.data);
 
-        // Instantiate QueueHandler with dynamic connectors and transformers
+        // Recovery Engine integration: check for incomplete/ambiguous previous batch outcomes
+        const recoveryEngine = new RecoveryEngine({
+          destinationConnector: activeDestinationConnector,
+          manifestTracker,
+          checkpointManager,
+          idTracker,
+        });
+
+        const existingBatch = await manifestTracker.getBatch(job.data.migrationRunId, job.data.batchKey);
+        if (
+          existingBatch &&
+          (existingBatch.status === 'OUTCOME_UNKNOWN' ||
+            existingBatch.subStage === 'DESTINATION_WRITTEN' ||
+            existingBatch.subStage === 'MANIFEST_COMMITTED')
+        ) {
+          console.log(`[Worker] Detected uncommitted/ambiguous batch ${job.data.batchKey} (status: ${existingBatch.status}, subStage: ${existingBatch.subStage}). Running RecoveryEngine.`);
+          const reconciled = await recoveryEngine.reconcileBatch(existingBatch, job.data.destinationObject);
+          if (reconciled && reconciled.resolvedStatus === 'COMMITTED') {
+            console.log(`[Worker] ✔ Batch ${job.data.batchKey} was already committed and successfully recovered.`);
+            return {
+              migrationRunId: job.data.migrationRunId,
+              batchKey: job.data.batchKey,
+              sequenceNo: job.data.sequenceNo,
+              status: 'COMMITTED',
+              recordsRead: existingBatch.recordsRead,
+              recordsWritten: existingBatch.recordsWritten,
+              recordsSkipped: existingBatch.recordsSkipped,
+              recordsFailed: existingBatch.recordsFailed,
+              hasMore: false,
+            };
+          }
+        }
+
+        // Load mapping version and instantiate TransformationEngine if available
+        let transformationEngine: TransformationEngine | null = null;
+        if (job.data.mappingVersionId && dbPool) {
+          const mapRes = await dbPool.query(
+            `SELECT mapping_json, mapping_hash FROM mapping_versions WHERE id = $1`,
+            [job.data.mappingVersionId],
+          );
+          if (mapRes.rows.length === 0) {
+            throw new Error(`[Worker Security] Mapping version ${job.data.mappingVersionId} not found in database. Fails closed.`);
+          }
+          const mappingRow = mapRes.rows[0];
+          const mappingJson =
+            typeof mappingRow.mapping_json === 'string'
+              ? JSON.parse(mappingRow.mapping_json)
+              : mappingRow.mapping_json;
+
+          let matchedMapping: ObjectMapping | null = null;
+          if (Array.isArray(mappingJson.objects)) {
+            matchedMapping =
+              mappingJson.objects.find(
+                (o: any) =>
+                  o.source?.collection === job.data.sourceObject ||
+                  o.destination?.table === job.data.destinationObject,
+              ) || mappingJson.objects[0];
+          } else if (mappingJson.source) {
+            matchedMapping = mappingJson as ObjectMapping;
+          }
+
+          if (matchedMapping) {
+            transformationEngine = new TransformationEngine(matchedMapping);
+          }
+        }
+
+        // Instantiate QueueHandler with dynamic connectors, recovery, and streaming scheduler
         const queueHandler = new QueueHandler({
           sourceConnector: activeSourceConnector,
           destinationConnector: activeDestinationConnector,
@@ -591,8 +689,28 @@ async function startWorker() {
           checkpointManager,
           idTracker,
           transformFn: async (envelope: SourceRecordEnvelope): Promise<TransformedRecord> => {
-            const raw = ((envelope.payload || {}) as Record<string, any>);
+            const raw = (envelope.payload || {}) as Record<string, any>;
             const destObj = job.data.destinationObject || envelope.sourceObject;
+
+            // Execute real mapping DSL via TransformationEngine when available
+            if (transformationEngine) {
+              const transformed = transformationEngine.transform((envelope.payload || envelope) as any);
+              return {
+                destinationKey: transformed.destinationKey,
+                sourceKey: transformed.sourceKey,
+                sourceObject: transformed.sourceObject,
+                destinationObject: transformed.destinationObject,
+                data: transformed.payload,
+                contentHash: transformed.canonicalHash || calculateCanonicalHash(raw),
+              };
+            }
+
+            if (process.env.NODE_ENV === 'production' && !process.env.ALLOW_DEMO_MAPPING) {
+              throw new Error(
+                `[Worker Security] Production execution strictly requires an approved mapping version for ${envelope.sourceObject}.`,
+              );
+            }
+
             let data: Record<string, any>;
 
             if (destObj === 'orders') {
@@ -647,14 +765,51 @@ async function startWorker() {
               contentHash: calculateCanonicalHash(raw),
             };
           },
+          onNextBatchScheduled: async (nextPayload: MigrationJobPayload) => {
+            console.log(`[Worker] Scheduling streaming batch: ${nextPayload.batchKey} (seq: ${nextPayload.sequenceNo})`);
+            if (dbPool) {
+              await dbPool.query(
+                `INSERT INTO migration_batches (
+                   id, migration_run_id, batch_key, sequence_no, status,
+                   source_cursor_start, records_read, records_written, records_skipped, records_failed, attempt_count
+                 ) VALUES (
+                   gen_random_uuid(), $1, $2, $3, 'QUEUED', $4, 0, 0, 0, 0, 0
+                 ) ON CONFLICT (migration_run_id, batch_key) DO UPDATE SET status = 'QUEUED'`,
+                [
+                  nextPayload.migrationRunId,
+                  nextPayload.batchKey,
+                  nextPayload.sequenceNo,
+                  JSON.stringify(nextPayload.cursorStart || {}),
+                ],
+              );
+            }
+            if (executionQueue) {
+              const jobId = `${nextPayload.migrationRunId}_${nextPayload.batchKey}`;
+              await executionQueue.add('execute-batch', nextPayload, {
+                jobId,
+                removeOnComplete: false,
+                removeOnFail: false,
+              });
+            }
+          },
         });
 
         // Execute real batch migration, write to destination, track manifests and checkpoint
         const result = await queueHandler.processJob(job.data);
 
-        // Update run progress in PostgreSQL
+        // Update run progress in PostgreSQL idempotently from migration_batches
         if (dbPool) {
           try {
+            const totalsRes = await dbPool.query(
+              `SELECT COALESCE(SUM(records_written), 0) AS total_written,
+                      COALESCE(SUM(records_read), 0) AS total_read
+               FROM migration_batches
+               WHERE migration_run_id = $1`,
+              [job.data.migrationRunId],
+            );
+            const totalWritten = Number(totalsRes.rows[0]?.total_written || 0);
+            const totalRead = Number(totalsRes.rows[0]?.total_read || 0);
+
             await dbPool.query(
               `UPDATE migration_runs 
                SET status = 'RUNNING',
@@ -662,15 +817,41 @@ async function startWorker() {
                      jsonb_set(
                        COALESCE(progress_json, '{}'::jsonb),
                        '{recordsWritten}',
-                       (COALESCE((progress_json->>'recordsWritten')::int, 0) + $1)::text::jsonb
+                       $1::text::jsonb
                      ),
                      '{recordsRead}',
-                     (COALESCE((progress_json->>'recordsRead')::int, 0) + $2)::text::jsonb
+                     $2::text::jsonb
                    ),
                    updated_at = NOW()
-               WHERE id = $3`,
-              [result.recordsWritten, result.recordsRead, job.data.migrationRunId],
+               WHERE id = $3 AND status NOT IN ('PAUSED', 'CANCELLED', 'COMPLETED', 'FAILED')`,
+              [totalWritten, totalRead, job.data.migrationRunId],
             );
+
+            // Check if entire run is finished (source exhausted and no batches active)
+            if (!result.hasMore) {
+              const activeRes = await dbPool.query(
+                `SELECT COUNT(*) AS active_count
+                 FROM migration_batches
+                 WHERE migration_run_id = $1 AND status IN ('PENDING', 'QUEUED', 'RUNNING')`,
+                [job.data.migrationRunId],
+              );
+              const activeCount = Number(activeRes.rows[0]?.active_count || 0);
+              if (activeCount === 0) {
+                const failRes = await dbPool.query(
+                  `SELECT COUNT(*) AS fail_count
+                   FROM migration_batches
+                   WHERE migration_run_id = $1 AND status IN ('FAILED_PERMANENT', 'FAILED_RETRYABLE', 'OUTCOME_UNKNOWN')`,
+                  [job.data.migrationRunId],
+                );
+                const failCount = Number(failRes.rows[0]?.fail_count || 0);
+                const finalStatus = failCount > 0 ? 'FAILED' : 'COMPLETED';
+                await dbPool.query(
+                  `UPDATE migration_runs SET status = $1, completed_at = NOW(), updated_at = NOW() WHERE id = $2 AND status = 'RUNNING'`,
+                  [finalStatus, job.data.migrationRunId],
+                );
+                console.log(`[Worker] Migration run ${job.data.migrationRunId} reached terminal state: ${finalStatus}`);
+              }
+            }
           } catch (err: any) {
             console.warn(`[Worker] Notice updating progress: ${err.message}`);
           }
@@ -750,6 +931,10 @@ async function shutdown() {
   if (executionWorker) {
     await executionWorker.close();
     console.log('[Worker] Execution worker closed.');
+  }
+  if (executionQueue) {
+    await executionQueue.close();
+    console.log('[Worker] Execution queue closed.');
   }
   if (redisClient) {
     redisClient.disconnect();

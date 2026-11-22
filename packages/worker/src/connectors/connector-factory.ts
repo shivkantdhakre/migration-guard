@@ -1,5 +1,5 @@
 import pg from 'pg';
-import { MongoClient } from 'mongodb';
+import { MongoClient, ObjectId } from 'mongodb';
 import {
   DestinationConnector,
   SourceConnector,
@@ -11,6 +11,13 @@ import {
   SourceBatch,
   ReadBatchOptions,
 } from '../types.js';
+
+export function quoteIdent(name: string): string {
+  if (!name || !/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name)) {
+    throw new Error(`[Security] Invalid SQL identifier: '${name}'. Must be alphanumeric and underscore only.`);
+  }
+  return `"${name.replace(/"/g, '""')}"`;
+}
 
 export function normalizeIpHost(host: string): string {
   if (!host) return '';
@@ -165,24 +172,31 @@ export class PostgresDestinationConnector implements DestinationConnector {
           if (cols.length === 0) return;
 
           const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ');
-          const colNames = cols.map((c) => `"${c}"`).join(', ');
+          const colNames = cols.map((c) => quoteIdent(c)).join(', ');
           const values = cols.map((c) => data[c]);
+          const quotedTable = quoteIdent(tableName);
 
-          let sql = `INSERT INTO "${tableName}" (${colNames}) VALUES (${placeholders})`;
+          let sql = `INSERT INTO ${quotedTable} (${colNames}) VALUES (${placeholders})`;
+
+          const conflictCols = options.conflictColumns && options.conflictColumns.length > 0
+            ? options.conflictColumns
+            : ['id'];
+          const conflictTarget = conflictCols.map((c) => quoteIdent(c)).join(', ');
 
           if (options.writeMode === 'upsert') {
-            const updateCols = options.updateColumns || cols.filter((c) => c !== 'id');
+            const updateCols = options.updateColumns || cols.filter((c) => !conflictCols.includes(c));
             if (updateCols.length > 0) {
               const updateAssignments = updateCols
-                .map((c) => `"${c}" = EXCLUDED."${c}"`)
+                .map((c) => `${quoteIdent(c)} = EXCLUDED.${quoteIdent(c)}`)
                 .join(', ');
-              sql += ` ON CONFLICT ("id") DO UPDATE SET ${updateAssignments}`;
+              sql += ` ON CONFLICT (${conflictTarget}) DO UPDATE SET ${updateAssignments}`;
             } else {
-              sql += ` ON CONFLICT ("id") DO NOTHING`;
+              sql += ` ON CONFLICT (${conflictTarget}) DO NOTHING`;
             }
           } else if (options.writeMode === 'skip_existing') {
-            sql += ` ON CONFLICT ("id") DO NOTHING`;
+            sql += ` ON CONFLICT (${conflictTarget}) DO NOTHING`;
           }
+          // 'insert_only' has no ON CONFLICT clause
 
           try {
             const res = await this.pool.query(sql, values);
@@ -216,8 +230,9 @@ export class PostgresDestinationConnector implements DestinationConnector {
   async readByKeys(destinationObject: string, keys: string[]): Promise<DestinationRecord[]> {
     if (!keys || keys.length === 0) return [];
 
+    const quotedTable = quoteIdent(destinationObject);
     const res = await this.pool.query(
-      `SELECT * FROM "${destinationObject}" WHERE "id" = ANY($1)`,
+      `SELECT * FROM ${quotedTable} WHERE "id" = ANY($1)`,
       [keys],
     );
 
@@ -269,7 +284,16 @@ export class MongoSourceConnector implements SourceConnector {
     const filter: Record<string, unknown> = {};
 
     if (cursor?.lastId !== undefined && cursor?.lastId !== null) {
-      filter._id = { $gt: cursor.lastId };
+      const lastIdStr = String(cursor.lastId);
+      if (/^[0-9a-fA-F]{24}$/.test(lastIdStr)) {
+        try {
+          filter._id = { $gt: new ObjectId(lastIdStr) };
+        } catch {
+          filter._id = { $gt: cursor.lastId };
+        }
+      } else {
+        filter._id = { $gt: cursor.lastId };
+      }
     }
 
     const limit = options.batchSize || 1000;

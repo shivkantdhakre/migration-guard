@@ -127,10 +127,29 @@ CREATE TABLE IF NOT EXISTS migration_plan_versions (
     plan_id UUID NOT NULL REFERENCES migration_plans(id) ON DELETE CASCADE,
     version INTEGER NOT NULL DEFAULT 1,
     source_connection_id UUID NOT NULL REFERENCES connections(id),
+    source_schema_snapshot_id UUID REFERENCES schema_snapshots(id),
     destination_connection_id UUID NOT NULL REFERENCES connections(id),
+    destination_schema_snapshot_id UUID REFERENCES schema_snapshots(id),
+    mapping_version_id UUID REFERENCES mapping_versions(id),
+    scope_json JSONB NOT NULL DEFAULT '{}',
+    execution_config_json JSONB NOT NULL DEFAULT '{}',
+    validation_profile_json JSONB NOT NULL DEFAULT '{}',
     plan_hash TEXT NOT NULL,
     created_by UUID REFERENCES users(id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Approvals
+CREATE TABLE IF NOT EXISTS approvals (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    resource_type TEXT NOT NULL, -- 'PLAN_VERSION'
+    resource_id UUID NOT NULL,
+    resource_hash TEXT NOT NULL,
+    approval_status TEXT NOT NULL DEFAULT 'PENDING', -- 'PENDING', 'APPROVE', 'REJECT'
+    approver_user_id UUID NOT NULL REFERENCES users(id),
+    comment TEXT,
+    approved_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- Migration Runs

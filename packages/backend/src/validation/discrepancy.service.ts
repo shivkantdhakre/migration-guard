@@ -1,5 +1,11 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+  ForbiddenException,
+} from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
+import { WorkspaceService } from '../workspace/workspace.service';
 
 export interface DiscrepancyFilter {
   category?: string;
@@ -11,9 +17,19 @@ export interface DiscrepancyFilter {
 
 @Injectable()
 export class DiscrepancyService {
-  constructor(private db: DatabaseService) {}
+  constructor(
+    private db: DatabaseService,
+    private workspaceService: WorkspaceService,
+  ) {}
 
-  async listDiscrepancies(validationRunId: string, filter: DiscrepancyFilter = {}) {
+  async listDiscrepancies(validationRunId: string, filter: DiscrepancyFilter = {}, userId?: string) {
+    if (userId) {
+      const vRunRes = await this.db.query('SELECT workspace_id FROM validation_runs WHERE id = $1', [validationRunId]);
+      if (vRunRes.rows.length === 0) {
+        throw new NotFoundException('Validation run not found.');
+      }
+      await this.workspaceService.assertWorkspaceAccess(vRunRes.rows[0].workspace_id, userId, 'Viewer');
+    }
     const page = filter.page || 1;
     const limit = filter.limit || 20;
     const offset = (page - 1) * limit;
@@ -89,26 +105,68 @@ export class DiscrepancyService {
     };
   }
 
-  async getDiscrepancy(discrepancyId: string) {
-    const res = await this.db.query('SELECT * FROM discrepancies WHERE id = $1', [discrepancyId]);
+  async getDiscrepancy(discrepancyId: string, userId?: string) {
+    const res = await this.db.query(
+      `SELECT d.*, vr.workspace_id
+       FROM discrepancies d
+       JOIN validation_runs vr ON d.validation_run_id = vr.id
+       WHERE d.id = $1`,
+      [discrepancyId],
+    );
     if (res.rows.length === 0) {
       throw new NotFoundException('Discrepancy not found.');
     }
-    return res.rows[0];
+    const discrepancy = res.rows[0];
+    if (userId) {
+      await this.workspaceService.assertWorkspaceAccess(discrepancy.workspace_id, userId, 'Viewer');
+    }
+    return discrepancy;
   }
 
   async updateDiscrepancyStatus(
     discrepancyId: string,
     status: 'OPEN' | 'ACKNOWLEDGED' | 'RESOLVED' | 'IGNORED',
     comment?: string,
+    userId?: string,
   ) {
-    const existing = await this.getDiscrepancy(discrepancyId);
+    const existing = await this.getDiscrepancy(discrepancyId, userId);
+    if (userId) {
+      await this.workspaceService.assertWorkspaceAccess(existing.workspace_id, userId, 'Engineer');
+    }
+
+    const validStatuses = ['OPEN', 'ACKNOWLEDGED', 'RESOLVED', 'IGNORED'];
+    if (!validStatuses.includes(status)) {
+      throw new BadRequestException(`Invalid discrepancy status '${status}'. Must be one of: ${validStatuses.join(', ')}.`);
+    }
+
+    // Enforce valid state transitions (Section 1.3)
+    if (existing.status === 'RESOLVED' && status === 'ACKNOWLEDGED') {
+      throw new BadRequestException('Cannot transition a RESOLVED discrepancy to ACKNOWLEDGED; reopen to OPEN first.');
+    }
+    if (existing.status === 'IGNORED' && status === 'ACKNOWLEDGED') {
+      throw new BadRequestException('Cannot transition an IGNORED discrepancy to ACKNOWLEDGED; reopen to OPEN first.');
+    }
+
     const summary = comment ? `${existing.summary} [Note: ${comment}]` : existing.summary;
 
     const res = await this.db.query(
       'UPDATE discrepancies SET status = $1, summary = $2, updated_at = NOW() WHERE id = $3 RETURNING *',
       [status, summary, discrepancyId],
     );
+
+    if (userId) {
+      await this.db.query(
+        `INSERT INTO audit_events (workspace_id, actor_type, actor_id, action, resource_type, resource_id, details_json)
+         VALUES ($1, 'USER', $2, $3, 'DISCREPANCY', $4, $5)`,
+        [
+          existing.workspace_id,
+          userId,
+          `DISCREPANCY_STATUS_${status}`,
+          discrepancyId,
+          { previousStatus: existing.status, newStatus: status, comment },
+        ],
+      );
+    }
 
     return res.rows[0];
   }

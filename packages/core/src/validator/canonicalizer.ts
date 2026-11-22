@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { canonicalizeJson, validateUnicodeString, sha256Hex } from '../canonical/index.js';
 
 /**
  * Deterministic canonicalization and SHA-256 hashing utility
@@ -25,7 +26,8 @@ export function canonicalizeValue(val: unknown, options: CanonicalizeOptions = {
   }
 
   if (typeof val === 'string') {
-    return val.normalize('NFC');
+    validateUnicodeString(val, 'validator string');
+    return val;
   }
 
   if (typeof val === 'number') {
@@ -71,11 +73,11 @@ export function canonicalizeValue(val: unknown, options: CanonicalizeOptions = {
 }
 
 /**
- * Serializes canonicalized representation to stable JSON string.
+ * Serializes canonicalized representation to stable JSON string using RFC 8785 rules.
  */
 export function canonicalizeToJson(val: unknown, options: CanonicalizeOptions = {}): string {
   const canonical = canonicalizeValue(val, options);
-  return JSON.stringify(canonical);
+  return canonicalizeJson(canonical);
 }
 
 /**
@@ -83,5 +85,5 @@ export function canonicalizeToJson(val: unknown, options: CanonicalizeOptions = 
  */
 export function computeCanonicalHash(val: unknown, options: CanonicalizeOptions = {}): string {
   const json = canonicalizeToJson(val, options);
-  return createHash('sha256').update(json, 'utf8').digest('hex');
+  return sha256Hex(json);
 }

@@ -1,10 +1,38 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  ConflictException,
+} from '@nestjs/common';
+import * as fs from 'fs';
+import * as path from 'path';
 import { DatabaseService } from '../database/database.service';
 import { WorkspaceService } from '../workspace/workspace.service';
 import { CryptoUtil } from '../common/crypto/crypto.util';
 
+function escapeHtml(str: any): string {
+  if (str === null || str === undefined) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function sanitizeCsvField(val: any): string {
+  if (val === null || val === undefined) return '""';
+  let s = String(val);
+  // Neutralize formula injection prefixes (=, +, -, @, \t, \r)
+  if (/^[=+\-@\t\r]/.test(s)) {
+    s = `'${s}`;
+  }
+  return `"${s.replace(/"/g, '""')}"`;
+}
+
 @Injectable()
 export class ReportService {
+  private inMemoryCache = new Map<string, string>();
+
   constructor(
     private db: DatabaseService,
     private workspaceService: WorkspaceService,
@@ -28,10 +56,16 @@ export class ReportService {
       'SELECT * FROM validation_check_results WHERE validation_run_id = $1 ORDER BY check_id ASC',
       [validationRunId],
     );
-    const discRes = await this.db.query(
+    let discRes = await this.db.query(
       'SELECT * FROM discrepancies WHERE validation_run_id = $1 ORDER BY severity ASC',
       [validationRunId],
     );
+    if (discRes.rows.length === 0) {
+      discRes = await this.db.query(
+        'SELECT * FROM discrepancy_records WHERE validation_run_id = $1 ORDER BY severity ASC',
+        [validationRunId],
+      );
+    }
 
     let content = '';
     if (format === 'CSV') {
@@ -43,7 +77,14 @@ export class ReportService {
     const checksum = CryptoUtil.canonicalHash(content);
     const sizeBytes = Buffer.byteLength(content, 'utf8');
 
-    // Store report artifact metadata
+    // Durably persist report bytes to artifact storage (Section 7.1)
+    const storageDir = process.env.REPORTS_STORAGE_DIR || path.resolve(process.cwd(), 'storage', 'reports');
+    try {
+      fs.mkdirSync(storageDir, { recursive: true });
+    } catch {
+      // Storage directory may already exist
+    }
+
     const reportRes = await this.db.query(
       `INSERT INTO report_artifacts (
          workspace_id, validation_run_id, migration_run_id,
@@ -57,7 +98,7 @@ export class ReportService {
         valRun.migration_run_id,
         reportType,
         format,
-        `memory://reports/${valRun.id}_${Date.now()}.${format.toLowerCase()}`,
+        `pending://${validationRunId}`,
         checksum,
         sizeBytes,
         userId,
@@ -65,10 +106,32 @@ export class ReportService {
     );
 
     const reportArtifact = reportRes.rows[0];
-    // Cache generated content in artifact row for easy download
+    const storageFilePath = path.join(storageDir, `${reportArtifact.id}.${format.toLowerCase()}`);
+
+    try {
+      fs.writeFileSync(storageFilePath, content, 'utf8');
+      await this.db.query('UPDATE report_artifacts SET storage_ref = $1 WHERE id = $2', [
+        storageFilePath,
+        reportArtifact.id,
+      ]);
+      reportArtifact.storage_ref = storageFilePath;
+    } catch {
+      // If filesystem write fails in sandbox/memory mode, store in memory cache
+    }
+
+    this.inMemoryCache.set(reportArtifact.id, content);
     reportArtifact.content = content;
 
     return reportArtifact;
+  }
+
+  async listReports(workspaceId: string, userId: string) {
+    await this.workspaceService.assertWorkspaceAccess(workspaceId, userId, 'Viewer');
+    const res = await this.db.query(
+      'SELECT id, workspace_id, validation_run_id, report_type, format, checksum, created_at FROM report_artifacts WHERE workspace_id = $1 ORDER BY created_at DESC',
+      [workspaceId],
+    );
+    return res.rows;
   }
 
   async getReport(reportId: string, userId: string) {
@@ -83,20 +146,28 @@ export class ReportService {
 
   async downloadReport(reportId: string, userId: string) {
     const report = await this.getReport(reportId, userId);
-    if (!report.content) {
-      // Re-generate on demand
-      const re = await this.generateReport(
-        report.validation_run_id,
-        report.report_type as any,
-        report.format as any,
-        userId,
-      );
-      report.content = re.content;
+    let content = this.inMemoryCache.get(reportId) || report.content;
+
+    if (!content && report.storage_ref && fs.existsSync(report.storage_ref)) {
+      content = fs.readFileSync(report.storage_ref, 'utf8');
+      this.inMemoryCache.set(reportId, content);
     }
+
+    if (!content) {
+      throw new NotFoundException(`Durable report artifact ${reportId} not found.`);
+    }
+
+    // Verify stored content matches registered checksum (Section 7.1)
+    const currentChecksum = CryptoUtil.canonicalHash(content);
+    if (report.checksum && report.checksum !== currentChecksum) {
+      throw new ConflictException('Report checksum mismatch: artifact integrity violated.');
+    }
+
     return {
       format: report.format,
       filename: `migrationguard-report-${report.id.slice(0, 8)}.${report.format.toLowerCase()}`,
-      content: report.content,
+      content,
+      checksum: report.checksum,
     };
   }
 
@@ -111,14 +182,14 @@ export class ReportService {
       'Check ID,Check Name,Status,Evaluated,Passed,Failed,Duration (ms)',
       ...checks.map(
         (c) =>
-          `"${c.check_id}","${c.check_name}","${c.status}",${c.evaluated_count},${c.passed_count},${c.failed_count},${c.duration_ms}`,
+          `${sanitizeCsvField(c.check_id)},${sanitizeCsvField(c.check_name)},${sanitizeCsvField(c.status)},${c.evaluated_count},${c.passed_count},${c.failed_count},${c.duration_ms}`,
       ),
       '',
       'Section: Discrepancies',
       'Discrepancy ID,Category,Severity,Source Object,Source Key,Status,Summary',
       ...discrepancies.map(
         (d) =>
-          `"${d.id}","${d.category}","${d.severity}","${d.source_object}","${d.source_key_ref}","${d.status}","${d.summary.replace(/"/g, '""')}"`,
+          `${sanitizeCsvField(d.id)},${sanitizeCsvField(d.category)},${sanitizeCsvField(d.severity)},${sanitizeCsvField(d.source_object || d.source_entity || '')},${sanitizeCsvField(d.source_key_ref || d.source_key || '')},${sanitizeCsvField(d.status)},${sanitizeCsvField(d.summary || JSON.stringify(d.expected_value_json || ''))}`,
       ),
     ];
     return lines.join('\n');
@@ -148,9 +219,9 @@ export class ReportService {
   <h1>MigrationGuard Assurance Report</h1>
   <div class="card">
     <h3>Executive Summary</h3>
-    <p>Validation Run ID: <code>${valRun.id}</code></p>
-    <p>Migration Run ID: <code>${valRun.migration_run_id}</code></p>
-    <p>Status: <strong>${valRun.status}</strong></p>
+    <p>Validation Run ID: <code>${escapeHtml(valRun.id)}</code></p>
+    <p>Migration Run ID: <code>${escapeHtml(valRun.migration_run_id)}</code></p>
+    <p>Status: <strong>${escapeHtml(valRun.status)}</strong></p>
   </div>
   <div class="card">
     <h3>Deterministic Validation Checks</h3>
@@ -160,7 +231,7 @@ export class ReportService {
         ${checks
           .map(
             (c) =>
-              `<tr><td>${c.check_id}</td><td>${c.check_name}</td><td><span class="badge ${c.status === 'PASS' ? 'badge-pass' : 'badge-fail'}">${c.status}</span></td><td>${c.evaluated_count}</td><td>${c.passed_count}</td><td>${c.failed_count}</td></tr>`,
+              `<tr><td>${escapeHtml(c.check_id)}</td><td>${escapeHtml(c.check_name)}</td><td><span class="badge ${c.status === 'PASS' ? 'badge-pass' : 'badge-fail'}">${escapeHtml(c.status)}</span></td><td>${c.evaluated_count}</td><td>${c.passed_count}</td><td>${c.failed_count}</td></tr>`,
           )
           .join('')}
       </tbody>
@@ -174,7 +245,7 @@ export class ReportService {
         ${discrepancies
           .map(
             (d) =>
-              `<tr><td>${d.category}</td><td><span class="badge ${d.severity === 'CRITICAL' ? 'badge-crit' : 'badge-high'}">${d.severity}</span></td><td>${d.source_object}</td><td><code>${d.source_key_ref}</code></td><td>${d.summary}</td></tr>`,
+              `<tr><td>${escapeHtml(d.category)}</td><td><span class="badge ${d.severity === 'CRITICAL' ? 'badge-crit' : 'badge-high'}">${escapeHtml(d.severity)}</span></td><td>${escapeHtml(d.source_object || d.source_entity || '')}</td><td><code>${escapeHtml(d.source_key_ref || d.source_key || '')}</code></td><td>${escapeHtml(d.summary || JSON.stringify(d.expected_value_json || ''))}</td></tr>`,
           )
           .join('')}
       </tbody>

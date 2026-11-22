@@ -599,12 +599,34 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   }
 
   private handleMemoryInsert<T>(sql: string, params: any[]): QueryResult<T> {
-    const match = /INSERT\s+INTO\s+([a-zA-Z0-9_]+)\s*\(([\s\S]*?)\)\s*VALUES\s*\(([\s\S]*?)\)/i.exec(sql);
-    if (!match) return { rows: [], rowCount: 0 };
+    const insertMatch = /INSERT\s+INTO\s+([a-zA-Z0-9_]+)\s*\(([\s\S]*?)\)\s*VALUES\s*\(/i.exec(sql);
+    if (!insertMatch) return { rows: [], rowCount: 0 };
 
-    const tableName = match[1].toLowerCase();
-    const columns = match[2].split(',').map((c) => c.trim().toLowerCase());
-    const rawValues = this.splitSqlCsv(match[3]);
+    const tableName = insertMatch[1].toLowerCase();
+    const columns = insertMatch[2].split(',').map((c) => c.trim().toLowerCase());
+    const valuesStartIndex = insertMatch.index + insertMatch[0].length;
+    
+    // Balanced parentheses extraction for VALUES (...)
+    let depth = 1;
+    let valuesEndIndex = -1;
+    let inQuotes = false;
+    for (let i = valuesStartIndex; i < sql.length; i++) {
+      const ch = sql[i];
+      if (ch === "'" && sql[i - 1] !== '\\') {
+        inQuotes = !inQuotes;
+      } else if (!inQuotes) {
+        if (ch === '(') depth++;
+        else if (ch === ')') {
+          depth--;
+          if (depth === 0) {
+            valuesEndIndex = i;
+            break;
+          }
+        }
+      }
+    }
+    const valuesPart = valuesEndIndex !== -1 ? sql.slice(valuesStartIndex, valuesEndIndex) : sql.slice(valuesStartIndex);
+    const rawValues = this.splitSqlCsv(valuesPart);
 
     const table = this.memoryStore.get(tableName);
     if (!table) {
@@ -620,6 +642,8 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         row[col] = params[pIdx];
       } else if (valToken === 'NOW()' || valToken.toUpperCase() === 'CURRENT_TIMESTAMP') {
         row[col] = new Date().toISOString();
+      } else if (valToken === 'gen_random_uuid()') {
+        row[col] = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2);
       } else if (valToken.startsWith("'") && valToken.endsWith("'")) {
         row[col] = valToken.slice(1, -1);
       } else if (!isNaN(Number(valToken)) && valToken !== '') {

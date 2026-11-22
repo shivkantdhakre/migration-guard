@@ -624,28 +624,23 @@ async function startWorker() {
         });
 
         const existingBatch = await manifestTracker.getBatch(job.data.migrationRunId, job.data.batchKey);
-        if (
-          existingBatch &&
-          (existingBatch.status === 'OUTCOME_UNKNOWN' ||
-            existingBatch.subStage === 'DESTINATION_WRITTEN' ||
-            existingBatch.subStage === 'MANIFEST_COMMITTED')
-        ) {
-          console.log(`[Worker] Detected uncommitted/ambiguous batch ${job.data.batchKey} (status: ${existingBatch.status}, subStage: ${existingBatch.subStage}). Running RecoveryEngine.`);
-          const reconciled = await recoveryEngine.reconcileBatch(existingBatch, job.data.destinationObject);
-          if (reconciled && reconciled.resolvedStatus === 'COMMITTED') {
-            console.log(`[Worker] ✔ Batch ${job.data.batchKey} was already committed and successfully recovered.`);
-            return {
-              migrationRunId: job.data.migrationRunId,
-              batchKey: job.data.batchKey,
-              sequenceNo: job.data.sequenceNo,
-              status: 'COMMITTED',
-              recordsRead: existingBatch.recordsRead,
-              recordsWritten: existingBatch.recordsWritten,
-              recordsSkipped: existingBatch.recordsSkipped,
-              recordsFailed: existingBatch.recordsFailed,
-              hasMore: false,
-            };
-          }
+        if (existingBatch && existingBatch.status === 'COMMITTED') {
+          console.log(`[Worker] ✔ Batch ${job.data.batchKey} was already committed.`);
+          return {
+            migrationRunId: job.data.migrationRunId,
+            batchKey: job.data.batchKey,
+            sequenceNo: job.data.sequenceNo,
+            status: 'COMMITTED',
+            recordsRead: existingBatch.recordsRead,
+            recordsWritten: existingBatch.recordsWritten,
+            recordsSkipped: existingBatch.recordsSkipped,
+            recordsFailed: existingBatch.recordsFailed,
+            hasMore: false,
+          };
+        }
+        if (existingBatch && existingBatch.status === 'OUTCOME_UNKNOWN') {
+          console.log(`[Worker] Detected OUTCOME_UNKNOWN batch ${job.data.batchKey}. Reconciling via RecoveryEngine.`);
+          await recoveryEngine.reconcileBatch(existingBatch, job.data.destinationObject);
         }
 
         // Load mapping version and instantiate TransformationEngine if available

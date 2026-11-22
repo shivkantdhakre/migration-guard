@@ -11,7 +11,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const run00514DdlPath = path.resolve(__dirname, 'fixtures/run-005-14-schema.sql');
 
-describe('Manifest Schema Upgrade & Historical Reconciliation (Run 005.19 Complete Schema Parity)', () => {
+describe('Manifest Schema Upgrade & Historical Reconciliation (Run 005.20 Added-Table Parity & Catalog Completeness)', () => {
   let rawPool: pg.Pool;
   const isCi = process.env.CI === 'true';
   const initialEnv = { ...process.env };
@@ -25,7 +25,7 @@ describe('Manifest Schema Upgrade & Historical Reconciliation (Run 005.19 Comple
   const schemaConcurrency = `test_upgrade_concurrency_${testSuffix}`;
 
   // =========================================================================
-  // Schema Catalog Interfaces & Expected Delta Definitions (Run 005.19)
+  // Schema Catalog Interfaces & Expected Delta Definitions (Run 005.20)
   // =========================================================================
 
   interface ColumnCatalogEntry {
@@ -39,6 +39,12 @@ describe('Manifest Schema Upgrade & Historical Reconciliation (Run 005.19 Comple
     character_maximum_length: number | null;
     numeric_precision: number | null;
     numeric_scale: number | null;
+    datetime_precision: number | null;
+    is_identity: string | null;
+    identity_generation: string | null;
+    is_generated: string | null;
+    generation_expression: string | null;
+    collation_name: string | null;
   }
 
   interface ConstraintCatalogEntry {
@@ -64,11 +70,509 @@ describe('Manifest Schema Upgrade & Historical Reconciliation (Run 005.19 Comple
     indexes: Map<string, IndexCatalogEntry[]>;
   }
 
+  interface ExpectedColumnSpec {
+    column_name: string;
+    ordinal_position: number;
+    data_type: string;
+    udt_name: string;
+    is_nullable: 'YES' | 'NO';
+    column_default?: string | RegExp | null;
+    character_maximum_length?: number | null;
+    numeric_precision?: number | null;
+    numeric_scale?: number | null;
+    datetime_precision?: number | null;
+    is_identity?: string | null;
+    identity_generation?: string | null;
+    is_generated?: string | null;
+    generation_expression?: string | null;
+    collation_name?: string | null;
+  }
+
+  interface ExpectedConstraintSpec {
+    constraint_name: string;
+    constraint_type: 'PRIMARY KEY' | 'UNIQUE' | 'FOREIGN KEY' | 'CHECK';
+    definitionPattern: RegExp;
+  }
+
+  interface ExpectedIndexSpec {
+    index_name: string;
+    indexPattern?: RegExp;
+  }
+
+  interface ExpectedAddedTableSpec {
+    columns: ExpectedColumnSpec[];
+    primaryKey: {
+      constraint_name: string;
+      definitionPattern: RegExp;
+    };
+    uniqueConstraints: ExpectedConstraintSpec[];
+    foreignKeys: ExpectedConstraintSpec[];
+    checkConstraints: ExpectedConstraintSpec[];
+    indexes: ExpectedIndexSpec[];
+  }
+
+  interface ExpectedModifiedTableSpec {
+    nullabilityChanges?: Record<string, { from: 'YES' | 'NO'; to: 'YES' | 'NO' }>;
+    addedConstraints?: ExpectedConstraintSpec[];
+    removedConstraints?: { constraint_name: string; constraint_type: 'PRIMARY KEY' | 'UNIQUE' | 'FOREIGN KEY' | 'CHECK' }[];
+    addedIndexes?: ExpectedIndexSpec[];
+    removedIndexes?: { index_name: string }[];
+  }
+
   const EXPECTED_SCHEMA_DELTA = {
-    addedTables: [
-      'record_manifest_historical_archive',
-      'manifest_reconciliation_reports',
-    ],
+    addedTables: {
+      record_manifest_historical_archive: {
+        columns: [
+          {
+            column_name: 'id',
+            ordinal_position: 1,
+            data_type: 'uuid',
+            udt_name: 'uuid',
+            is_nullable: 'NO',
+            column_default: /uuid_generate_v4\(\)|gen_random_uuid\(\)/,
+            character_maximum_length: null,
+            numeric_precision: null,
+            numeric_scale: null,
+            datetime_precision: null,
+            is_identity: 'NO',
+            identity_generation: null,
+            is_generated: 'NEVER',
+            generation_expression: null,
+          },
+          {
+            column_name: 'original_manifest_id',
+            ordinal_position: 2,
+            data_type: 'uuid',
+            udt_name: 'uuid',
+            is_nullable: 'YES',
+            column_default: null,
+            character_maximum_length: null,
+            numeric_precision: null,
+            numeric_scale: null,
+            datetime_precision: null,
+            is_identity: 'NO',
+            identity_generation: null,
+            is_generated: 'NEVER',
+            generation_expression: null,
+          },
+          {
+            column_name: 'migration_run_id',
+            ordinal_position: 3,
+            data_type: 'uuid',
+            udt_name: 'uuid',
+            is_nullable: 'NO',
+            column_default: null,
+            character_maximum_length: null,
+            numeric_precision: null,
+            numeric_scale: null,
+            datetime_precision: null,
+            is_identity: 'NO',
+            identity_generation: null,
+            is_generated: 'NEVER',
+            generation_expression: null,
+          },
+          {
+            column_name: 'migration_batch_id',
+            ordinal_position: 4,
+            data_type: 'uuid',
+            udt_name: 'uuid',
+            is_nullable: 'YES',
+            column_default: null,
+            character_maximum_length: null,
+            numeric_precision: null,
+            numeric_scale: null,
+            datetime_precision: null,
+            is_identity: 'NO',
+            identity_generation: null,
+            is_generated: 'NEVER',
+            generation_expression: null,
+          },
+          {
+            column_name: 'batch_key',
+            ordinal_position: 5,
+            data_type: 'text',
+            udt_name: 'text',
+            is_nullable: 'YES',
+            column_default: null,
+            character_maximum_length: null,
+            numeric_precision: null,
+            numeric_scale: null,
+            datetime_precision: null,
+            is_identity: 'NO',
+            identity_generation: null,
+            is_generated: 'NEVER',
+            generation_expression: null,
+          },
+          {
+            column_name: 'source_object',
+            ordinal_position: 6,
+            data_type: 'text',
+            udt_name: 'text',
+            is_nullable: 'NO',
+            column_default: null,
+            character_maximum_length: null,
+            numeric_precision: null,
+            numeric_scale: null,
+            datetime_precision: null,
+            is_identity: 'NO',
+            identity_generation: null,
+            is_generated: 'NEVER',
+            generation_expression: null,
+          },
+          {
+            column_name: 'source_key',
+            ordinal_position: 7,
+            data_type: 'text',
+            udt_name: 'text',
+            is_nullable: 'NO',
+            column_default: null,
+            character_maximum_length: null,
+            numeric_precision: null,
+            numeric_scale: null,
+            datetime_precision: null,
+            is_identity: 'NO',
+            identity_generation: null,
+            is_generated: 'NEVER',
+            generation_expression: null,
+          },
+          {
+            column_name: 'destination_object',
+            ordinal_position: 8,
+            data_type: 'text',
+            udt_name: 'text',
+            is_nullable: 'YES',
+            column_default: null,
+            character_maximum_length: null,
+            numeric_precision: null,
+            numeric_scale: null,
+            datetime_precision: null,
+            is_identity: 'NO',
+            identity_generation: null,
+            is_generated: 'NEVER',
+            generation_expression: null,
+          },
+          {
+            column_name: 'destination_key',
+            ordinal_position: 9,
+            data_type: 'text',
+            udt_name: 'text',
+            is_nullable: 'YES',
+            column_default: null,
+            character_maximum_length: null,
+            numeric_precision: null,
+            numeric_scale: null,
+            datetime_precision: null,
+            is_identity: 'NO',
+            identity_generation: null,
+            is_generated: 'NEVER',
+            generation_expression: null,
+          },
+          {
+            column_name: 'content_hash',
+            ordinal_position: 10,
+            data_type: 'text',
+            udt_name: 'text',
+            is_nullable: 'YES',
+            column_default: null,
+            character_maximum_length: null,
+            numeric_precision: null,
+            numeric_scale: null,
+            datetime_precision: null,
+            is_identity: 'NO',
+            identity_generation: null,
+            is_generated: 'NEVER',
+            generation_expression: null,
+          },
+          {
+            column_name: 'status',
+            ordinal_position: 11,
+            data_type: 'text',
+            udt_name: 'text',
+            is_nullable: 'YES',
+            column_default: null,
+            character_maximum_length: null,
+            numeric_precision: null,
+            numeric_scale: null,
+            datetime_precision: null,
+            is_identity: 'NO',
+            identity_generation: null,
+            is_generated: 'NEVER',
+            generation_expression: null,
+          },
+          {
+            column_name: 'error_details',
+            ordinal_position: 12,
+            data_type: 'text',
+            udt_name: 'text',
+            is_nullable: 'YES',
+            column_default: null,
+            character_maximum_length: null,
+            numeric_precision: null,
+            numeric_scale: null,
+            datetime_precision: null,
+            is_identity: 'NO',
+            identity_generation: null,
+            is_generated: 'NEVER',
+            generation_expression: null,
+          },
+          {
+            column_name: 'reconciliation_reason',
+            ordinal_position: 13,
+            data_type: 'text',
+            udt_name: 'text',
+            is_nullable: 'NO',
+            column_default: /'DUPLICATE_SUPERSEDED_HISTORICAL_EVIDENCE'::text/,
+            character_maximum_length: null,
+            numeric_precision: null,
+            numeric_scale: null,
+            datetime_precision: null,
+            is_identity: 'NO',
+            identity_generation: null,
+            is_generated: 'NEVER',
+            generation_expression: null,
+          },
+          {
+            column_name: 'reconciliation_policy',
+            ordinal_position: 14,
+            data_type: 'text',
+            udt_name: 'text',
+            is_nullable: 'NO',
+            column_default: /'PRESERVE_LATEST_AND_ARCHIVE_SUPERSEDED'::text/,
+            character_maximum_length: null,
+            numeric_precision: null,
+            numeric_scale: null,
+            datetime_precision: null,
+            is_identity: 'NO',
+            identity_generation: null,
+            is_generated: 'NEVER',
+            generation_expression: null,
+          },
+          {
+            column_name: 'reconciliation_timestamp',
+            ordinal_position: 15,
+            data_type: 'timestamp with time zone',
+            udt_name: 'timestamptz',
+            is_nullable: 'NO',
+            column_default: /now\(\)/,
+            character_maximum_length: null,
+            numeric_precision: null,
+            numeric_scale: null,
+            datetime_precision: 6,
+            is_identity: 'NO',
+            identity_generation: null,
+            is_generated: 'NEVER',
+            generation_expression: null,
+          },
+          {
+            column_name: 'reconciled_by',
+            ordinal_position: 16,
+            data_type: 'text',
+            udt_name: 'text',
+            is_nullable: 'NO',
+            column_default: /'SYSTEM_SCHEMA_UPGRADE'::text/,
+            character_maximum_length: null,
+            numeric_precision: null,
+            numeric_scale: null,
+            datetime_precision: null,
+            is_identity: 'NO',
+            identity_generation: null,
+            is_generated: 'NEVER',
+            generation_expression: null,
+          },
+          {
+            column_name: 'original_created_at',
+            ordinal_position: 17,
+            data_type: 'timestamp with time zone',
+            udt_name: 'timestamptz',
+            is_nullable: 'YES',
+            column_default: null,
+            character_maximum_length: null,
+            numeric_precision: null,
+            numeric_scale: null,
+            datetime_precision: 6,
+            is_identity: 'NO',
+            identity_generation: null,
+            is_generated: 'NEVER',
+            generation_expression: null,
+          },
+        ],
+        primaryKey: {
+          constraint_name: 'record_manifest_historical_archive_pkey',
+          definitionPattern: /PRIMARY KEY \(id\)/,
+        },
+        uniqueConstraints: [],
+        foreignKeys: [],
+        checkConstraints: [],
+        indexes: [
+          {
+            index_name: 'record_manifest_historical_archive_pkey',
+            indexPattern: /CREATE UNIQUE INDEX record_manifest_historical_archive_pkey ON .* USING btree \(id\)/,
+          },
+        ],
+      } as ExpectedAddedTableSpec,
+
+      manifest_reconciliation_reports: {
+        columns: [
+          {
+            column_name: 'id',
+            ordinal_position: 1,
+            data_type: 'uuid',
+            udt_name: 'uuid',
+            is_nullable: 'NO',
+            column_default: /uuid_generate_v4\(\)|gen_random_uuid\(\)/,
+            character_maximum_length: null,
+            numeric_precision: null,
+            numeric_scale: null,
+            datetime_precision: null,
+            is_identity: 'NO',
+            identity_generation: null,
+            is_generated: 'NEVER',
+            generation_expression: null,
+          },
+          {
+            column_name: 'migration_run_id',
+            ordinal_position: 2,
+            data_type: 'uuid',
+            udt_name: 'uuid',
+            is_nullable: 'YES',
+            column_default: null,
+            character_maximum_length: null,
+            numeric_precision: null,
+            numeric_scale: null,
+            datetime_precision: null,
+            is_identity: 'NO',
+            identity_generation: null,
+            is_generated: 'NEVER',
+            generation_expression: null,
+          },
+          {
+            column_name: 'total_duplicates_detected',
+            ordinal_position: 3,
+            data_type: 'integer',
+            udt_name: 'int4',
+            is_nullable: 'NO',
+            column_default: /0/,
+            character_maximum_length: null,
+            numeric_precision: 32,
+            numeric_scale: 0,
+            datetime_precision: null,
+            is_identity: 'NO',
+            identity_generation: null,
+            is_generated: 'NEVER',
+            generation_expression: null,
+          },
+          {
+            column_name: 'distinct_identities_affected',
+            ordinal_position: 4,
+            data_type: 'integer',
+            udt_name: 'int4',
+            is_nullable: 'NO',
+            column_default: /0/,
+            character_maximum_length: null,
+            numeric_precision: 32,
+            numeric_scale: 0,
+            datetime_precision: null,
+            is_identity: 'NO',
+            identity_generation: null,
+            is_generated: 'NEVER',
+            generation_expression: null,
+          },
+          {
+            column_name: 'archived_record_count',
+            ordinal_position: 5,
+            data_type: 'integer',
+            udt_name: 'int4',
+            is_nullable: 'NO',
+            column_default: /0/,
+            character_maximum_length: null,
+            numeric_precision: 32,
+            numeric_scale: 0,
+            datetime_precision: null,
+            is_identity: 'NO',
+            identity_generation: null,
+            is_generated: 'NEVER',
+            generation_expression: null,
+          },
+          {
+            column_name: 'reconciliation_policy',
+            ordinal_position: 6,
+            data_type: 'text',
+            udt_name: 'text',
+            is_nullable: 'NO',
+            column_default: /'PRESERVE_LATEST_AND_ARCHIVE_SUPERSEDED'::text/,
+            character_maximum_length: null,
+            numeric_precision: null,
+            numeric_scale: null,
+            datetime_precision: null,
+            is_identity: 'NO',
+            identity_generation: null,
+            is_generated: 'NEVER',
+            generation_expression: null,
+          },
+          {
+            column_name: 'report_json',
+            ordinal_position: 7,
+            data_type: 'jsonb',
+            udt_name: 'jsonb',
+            is_nullable: 'NO',
+            column_default: /'\{\}'::jsonb/,
+            character_maximum_length: null,
+            numeric_precision: null,
+            numeric_scale: null,
+            datetime_precision: null,
+            is_identity: 'NO',
+            identity_generation: null,
+            is_generated: 'NEVER',
+            generation_expression: null,
+          },
+          {
+            column_name: 'status',
+            ordinal_position: 8,
+            data_type: 'text',
+            udt_name: 'text',
+            is_nullable: 'NO',
+            column_default: /'COMPLETED'::text/,
+            character_maximum_length: null,
+            numeric_precision: null,
+            numeric_scale: null,
+            datetime_precision: null,
+            is_identity: 'NO',
+            identity_generation: null,
+            is_generated: 'NEVER',
+            generation_expression: null,
+          },
+          {
+            column_name: 'created_at',
+            ordinal_position: 9,
+            data_type: 'timestamp with time zone',
+            udt_name: 'timestamptz',
+            is_nullable: 'NO',
+            column_default: /now\(\)/,
+            character_maximum_length: null,
+            numeric_precision: null,
+            numeric_scale: null,
+            datetime_precision: 6,
+            is_identity: 'NO',
+            identity_generation: null,
+            is_generated: 'NEVER',
+            generation_expression: null,
+          },
+        ],
+        primaryKey: {
+          constraint_name: 'manifest_reconciliation_reports_pkey',
+          definitionPattern: /PRIMARY KEY \(id\)/,
+        },
+        uniqueConstraints: [],
+        foreignKeys: [],
+        checkConstraints: [],
+        indexes: [
+          {
+            index_name: 'manifest_reconciliation_reports_pkey',
+            indexPattern: /CREATE UNIQUE INDEX manifest_reconciliation_reports_pkey ON .* USING btree \(id\)/,
+          },
+        ],
+      } as ExpectedAddedTableSpec,
+    },
     removedTables: [] as string[],
     modifiedTables: {
       record_manifests: {
@@ -78,8 +582,40 @@ describe('Manifest Schema Upgrade & Historical Reconciliation (Run 005.19 Comple
           migration_batch_id: { from: 'YES', to: 'NO' },
           batch_key: { from: 'YES', to: 'NO' },
         },
-      },
-      migration_batches: {},
+        addedConstraints: [
+          {
+            constraint_name: 'fk_record_manifests_batch_identity',
+            constraint_type: 'FOREIGN KEY',
+            definitionPattern: /FOREIGN KEY \(migration_batch_id, migration_run_id, batch_key\) REFERENCES migration_batches\(id, migration_run_id, batch_key\) ON DELETE CASCADE/,
+          },
+        ],
+        removedConstraints: [
+          {
+            constraint_name: 'record_manifests_migration_batch_id_fkey',
+            constraint_type: 'FOREIGN KEY',
+          },
+        ],
+        addedIndexes: [],
+        removedIndexes: [],
+      } as ExpectedModifiedTableSpec,
+      migration_batches: {
+        nullabilityChanges: {},
+        addedConstraints: [
+          {
+            constraint_name: 'uq_migration_batches_identity',
+            constraint_type: 'UNIQUE',
+            definitionPattern: /UNIQUE \(id, migration_run_id, batch_key\)/,
+          },
+        ],
+        removedConstraints: [],
+        addedIndexes: [
+          {
+            index_name: 'uq_migration_batches_identity',
+            indexPattern: /CREATE UNIQUE INDEX uq_migration_batches_identity ON .* USING btree \(id, migration_run_id, batch_key\)/,
+          },
+        ],
+        removedIndexes: [],
+      } as ExpectedModifiedTableSpec,
     },
   };
 
@@ -95,12 +631,14 @@ describe('Manifest Schema Upgrade & Historical Reconciliation (Run 005.19 Comple
     `, [schemaName]);
     const tables: string[] = tablesRes.rows.map((r: any) => r.table_name);
 
-    // 2. Columns
+    // 2. Columns (with complete PostgreSQL column metadata)
     const colsRes = await client.query(`
       SELECT 
         table_name, column_name, ordinal_position, column_default,
         is_nullable, data_type, udt_name, character_maximum_length,
-        numeric_precision, numeric_scale
+        numeric_precision, numeric_scale, datetime_precision,
+        is_identity, identity_generation, is_generated,
+        generation_expression, collation_name
       FROM information_schema.columns
       WHERE table_schema = $1
       ORDER BY table_name, ordinal_position
@@ -118,9 +656,15 @@ describe('Manifest Schema Upgrade & Historical Reconciliation (Run 005.19 Comple
         is_nullable: r.is_nullable,
         data_type: r.data_type,
         udt_name: r.udt_name,
-        character_maximum_length: r.character_maximum_length,
-        numeric_precision: r.numeric_precision,
-        numeric_scale: r.numeric_scale,
+        character_maximum_length: r.character_maximum_length !== null && r.character_maximum_length !== undefined ? Number(r.character_maximum_length) : null,
+        numeric_precision: r.numeric_precision !== null && r.numeric_precision !== undefined ? Number(r.numeric_precision) : null,
+        numeric_scale: r.numeric_scale !== null && r.numeric_scale !== undefined ? Number(r.numeric_scale) : null,
+        datetime_precision: r.datetime_precision !== null && r.datetime_precision !== undefined ? Number(r.datetime_precision) : null,
+        is_identity: r.is_identity ?? null,
+        identity_generation: r.identity_generation ?? null,
+        is_generated: r.is_generated ?? null,
+        generation_expression: r.generation_expression ?? null,
+        collation_name: r.collation_name ?? null,
       });
     }
 
@@ -212,22 +756,30 @@ describe('Manifest Schema Upgrade & Historical Reconciliation (Run 005.19 Comple
     postUpgrade: SchemaCatalog,
     schemaName: string,
   ) {
+    const expectedAddedTables = Object.keys(EXPECTED_SCHEMA_DELTA.addedTables);
+    const expectedRemovedTables = EXPECTED_SCHEMA_DELTA.removedTables;
+
     // 1. Table Parity & Delta Verification
     expect(baseline.tables.length, 'Baseline must contain all 22 Run 005.14 historical tables').toBe(22);
-    expect(postUpgrade.tables.length, 'Post-upgrade catalog must contain exactly 24 tables (22 historical + 2 archive/reconciliation)').toBe(24);
+    expect(
+      postUpgrade.tables.length,
+      `Post-upgrade catalog must contain exactly ${baseline.tables.length + expectedAddedTables.length - expectedRemovedTables.length} tables`,
+    ).toBe(baseline.tables.length + expectedAddedTables.length - expectedRemovedTables.length);
 
-    // Assert every historical table exists in post-upgrade
+    // Assert every non-removed historical table exists in post-upgrade
     for (const tbl of baseline.tables) {
-      expect(postUpgrade.tables.includes(tbl), `Historical table ${tbl} must be preserved post-upgrade`).toBe(true);
+      if (!expectedRemovedTables.includes(tbl)) {
+        expect(postUpgrade.tables.includes(tbl), `Historical table ${tbl} must be preserved post-upgrade`).toBe(true);
+      }
     }
 
     // Assert new tables match expected additions exactly
     const addedTables = postUpgrade.tables.filter((t) => !baseline.tables.includes(t));
-    expect(addedTables.sort()).toEqual([...EXPECTED_SCHEMA_DELTA.addedTables].sort());
+    expect(addedTables.sort()).toEqual([...expectedAddedTables].sort());
 
     // Assert no unexpected tables were removed
     const removedTables = baseline.tables.filter((t) => !postUpgrade.tables.includes(t));
-    expect(removedTables).toEqual(EXPECTED_SCHEMA_DELTA.removedTables);
+    expect(removedTables).toEqual(expectedRemovedTables);
 
     // 2. Comprehensive Column Definitions Across ALL 22 Historical Tables
     for (const tbl of baseline.tables) {
@@ -252,16 +804,22 @@ describe('Manifest Schema Upgrade & Historical Reconciliation (Run 005.19 Comple
         const postCol = postColMap.get(colName)!;
         expect(postCol, `Column ${tbl}.${colName} must exist in post-upgrade catalog`).toBeDefined();
 
-        // Invariant column attributes
+        // Invariant column attributes (including complete PostgreSQL column metadata)
         expect(postCol.ordinal_position, `Column ${tbl}.${colName} ordinal position mismatch`).toBe(baseCol.ordinal_position);
         expect(postCol.data_type, `Column ${tbl}.${colName} data type mismatch`).toBe(baseCol.data_type);
         expect(postCol.udt_name, `Column ${tbl}.${colName} UDT mismatch`).toBe(baseCol.udt_name);
         expect(postCol.character_maximum_length, `Column ${tbl}.${colName} max length mismatch`).toBe(baseCol.character_maximum_length);
         expect(postCol.numeric_precision, `Column ${tbl}.${colName} numeric precision mismatch`).toBe(baseCol.numeric_precision);
         expect(postCol.numeric_scale, `Column ${tbl}.${colName} numeric scale mismatch`).toBe(baseCol.numeric_scale);
+        expect(postCol.datetime_precision, `Column ${tbl}.${colName} datetime precision mismatch`).toBe(baseCol.datetime_precision);
+        expect(postCol.is_identity, `Column ${tbl}.${colName} is_identity mismatch`).toBe(baseCol.is_identity);
+        expect(postCol.identity_generation, `Column ${tbl}.${colName} identity_generation mismatch`).toBe(baseCol.identity_generation);
+        expect(postCol.is_generated, `Column ${tbl}.${colName} is_generated mismatch`).toBe(baseCol.is_generated);
+        expect(postCol.generation_expression, `Column ${tbl}.${colName} generation_expression mismatch`).toBe(baseCol.generation_expression);
+        expect(postCol.collation_name, `Column ${tbl}.${colName} collation_name mismatch`).toBe(baseCol.collation_name);
         expect(postCol.column_default, `Column ${tbl}.${colName} default value mismatch`).toBe(baseCol.column_default);
 
-        // Nullability: check whether this column has an explicit intended change
+        // Nullability: check whether this column has an explicit intended change in EXPECTED_SCHEMA_DELTA
         const nullDelta = (EXPECTED_SCHEMA_DELTA.modifiedTables as any)[tbl]?.nullabilityChanges?.[colName];
         if (nullDelta) {
           expect(baseCol.is_nullable, `Baseline nullability for ${tbl}.${colName} must match expected delta 'from'`).toBe(nullDelta.from);
@@ -272,7 +830,118 @@ describe('Manifest Schema Upgrade & Historical Reconciliation (Run 005.19 Comple
       }
     }
 
-    // 3. Primary Key Preservation Across ALL 22 Historical Tables
+    // 3. Fully Verify Newly Added Tables (Requirement 1: Complete Schema Parity)
+    for (const [addedTbl, tblSpec] of Object.entries(EXPECTED_SCHEMA_DELTA.addedTables)) {
+      const postCols = postUpgrade.columns.get(addedTbl) || [];
+      expect(
+        postCols.length,
+        `Added table ${addedTbl} column count mismatch (expected ${tblSpec.columns.length}, got ${postCols.length})`,
+      ).toBe(tblSpec.columns.length);
+
+      // Verify exact column names and ordinal positions
+      expect(
+        postCols.map((c) => c.column_name),
+        `Added table ${addedTbl} column names and ordering mismatch`,
+      ).toEqual(tblSpec.columns.map((c) => c.column_name));
+
+      for (const expCol of tblSpec.columns) {
+        const postCol = postCols.find((c) => c.column_name === expCol.column_name);
+        expect(postCol, `Column ${addedTbl}.${expCol.column_name} missing from post-upgrade catalog`).toBeDefined();
+
+        expect(postCol!.ordinal_position, `Column ${addedTbl}.${expCol.column_name} ordinal position mismatch`).toBe(expCol.ordinal_position);
+        expect(postCol!.data_type, `Column ${addedTbl}.${expCol.column_name} data type mismatch`).toBe(expCol.data_type);
+        expect(postCol!.udt_name, `Column ${addedTbl}.${expCol.column_name} UDT mismatch`).toBe(expCol.udt_name);
+        expect(postCol!.is_nullable, `Column ${addedTbl}.${expCol.column_name} nullability mismatch`).toBe(expCol.is_nullable);
+        expect(postCol!.character_maximum_length, `Column ${addedTbl}.${expCol.column_name} max length mismatch`).toBe(expCol.character_maximum_length ?? null);
+        expect(postCol!.numeric_precision, `Column ${addedTbl}.${expCol.column_name} numeric precision mismatch`).toBe(expCol.numeric_precision ?? null);
+        expect(postCol!.numeric_scale, `Column ${addedTbl}.${expCol.column_name} numeric scale mismatch`).toBe(expCol.numeric_scale ?? null);
+        expect(postCol!.datetime_precision, `Column ${addedTbl}.${expCol.column_name} datetime precision mismatch`).toBe(expCol.datetime_precision ?? null);
+
+        if (expCol.is_identity !== undefined) {
+          expect(postCol!.is_identity, `Column ${addedTbl}.${expCol.column_name} identity mismatch`).toBe(expCol.is_identity);
+        }
+        if (expCol.identity_generation !== undefined) {
+          expect(postCol!.identity_generation, `Column ${addedTbl}.${expCol.column_name} identity generation mismatch`).toBe(expCol.identity_generation);
+        }
+        if (expCol.is_generated !== undefined) {
+          expect(postCol!.is_generated, `Column ${addedTbl}.${expCol.column_name} is_generated mismatch`).toBe(expCol.is_generated);
+        }
+        if (expCol.generation_expression !== undefined) {
+          expect(postCol!.generation_expression, `Column ${addedTbl}.${expCol.column_name} generation expression mismatch`).toBe(expCol.generation_expression);
+        }
+        if (expCol.collation_name !== undefined) {
+          expect(postCol!.collation_name, `Column ${addedTbl}.${expCol.column_name} collation mismatch`).toBe(expCol.collation_name);
+        }
+
+        if (expCol.column_default !== undefined) {
+          if (expCol.column_default === null) {
+            expect(postCol!.column_default, `Column ${addedTbl}.${expCol.column_name} default value must be null`).toBeNull();
+          } else if (expCol.column_default instanceof RegExp) {
+            expect(postCol!.column_default, `Column ${addedTbl}.${expCol.column_name} default value mismatch`).toMatch(expCol.column_default);
+          } else {
+            expect(postCol!.column_default, `Column ${addedTbl}.${expCol.column_name} default value mismatch`).toBe(expCol.column_default);
+          }
+        }
+      }
+
+      // Verify Primary Key on added table
+      const postPk = postUpgrade.primaryKeys.get(addedTbl);
+      expect(postPk, `Added table ${addedTbl} must have primary key`).toBeDefined();
+      expect(postPk!.constraint_name, `Primary key name mismatch on added table ${addedTbl}`).toBe(tblSpec.primaryKey.constraint_name);
+      expect(postPk!.definition, `Primary key definition mismatch on added table ${addedTbl}`).toMatch(tblSpec.primaryKey.definitionPattern);
+
+      // Verify Unique Constraints on added table (fail closed on unexpected)
+      const postUniq = postUpgrade.uniqueConstraints.get(addedTbl) || [];
+      expect(
+        postUniq.length,
+        `Added table ${addedTbl} unique constraints count mismatch (expected ${tblSpec.uniqueConstraints.length}, got ${postUniq.length})`,
+      ).toBe(tblSpec.uniqueConstraints.length);
+      for (const expU of tblSpec.uniqueConstraints) {
+        const found = postUniq.find((u) => u.constraint_name === expU.constraint_name);
+        expect(found, `Unique constraint ${expU.constraint_name} on added table ${addedTbl} missing`).toBeDefined();
+        expect(found!.definition).toMatch(expU.definitionPattern);
+      }
+
+      // Verify Foreign Keys on added table (fail closed on unexpected)
+      const postFks = postUpgrade.foreignKeys.get(addedTbl) || [];
+      expect(
+        postFks.length,
+        `Added table ${addedTbl} foreign keys count mismatch (expected ${tblSpec.foreignKeys.length}, got ${postFks.length})`,
+      ).toBe(tblSpec.foreignKeys.length);
+      for (const expF of tblSpec.foreignKeys) {
+        const found = postFks.find((f) => f.constraint_name === expF.constraint_name);
+        expect(found, `Foreign key ${expF.constraint_name} on added table ${addedTbl} missing`).toBeDefined();
+        expect(found!.definition).toMatch(expF.definitionPattern);
+      }
+
+      // Verify Check Constraints on added table (fail closed on unexpected)
+      const postChks = postUpgrade.checkConstraints.get(addedTbl) || [];
+      expect(
+        postChks.length,
+        `Added table ${addedTbl} check constraints count mismatch (expected ${tblSpec.checkConstraints.length}, got ${postChks.length})`,
+      ).toBe(tblSpec.checkConstraints.length);
+      for (const expC of tblSpec.checkConstraints) {
+        const found = postChks.find((c) => c.constraint_name === expC.constraint_name);
+        expect(found, `Check constraint ${expC.constraint_name} on added table ${addedTbl} missing`).toBeDefined();
+        expect(found!.definition).toMatch(expC.definitionPattern);
+      }
+
+      // Verify Indexes on added table (fail closed on unexpected)
+      const postIdxs = postUpgrade.indexes.get(addedTbl) || [];
+      expect(
+        postIdxs.length,
+        `Added table ${addedTbl} index count mismatch (expected ${tblSpec.indexes.length}, got ${postIdxs.length})`,
+      ).toBe(tblSpec.indexes.length);
+      for (const expIdx of tblSpec.indexes) {
+        const found = postIdxs.find((idx) => idx.index_name === expIdx.index_name);
+        expect(found, `Index ${expIdx.index_name} on added table ${addedTbl} missing`).toBeDefined();
+        if (expIdx.indexPattern) {
+          expect(found!.index_definition).toMatch(expIdx.indexPattern);
+        }
+      }
+    }
+
+    // 4. Primary Key Preservation Across ALL 22 Historical Tables
     for (const tbl of baseline.tables) {
       const basePk = baseline.primaryKeys.get(tbl);
       const postPk = postUpgrade.primaryKeys.get(tbl);
@@ -283,89 +952,71 @@ describe('Manifest Schema Upgrade & Historical Reconciliation (Run 005.19 Comple
       expect(postPk!.definition, `Primary key definition mismatch on table ${tbl}`).toBe(basePk!.definition);
     }
 
-    // Verify primary keys on newly added tables
-    for (const addedTbl of EXPECTED_SCHEMA_DELTA.addedTables) {
-      expect(
-        postUpgrade.primaryKeys.get(addedTbl),
-        `Newly added table ${addedTbl} must have primary key`,
-      ).toBeDefined();
-    }
-
-    // 4. Unique Constraints Across ALL 22 Historical Tables
+    // 5. Unique Constraints Across ALL 22 Historical Tables (Consuming EXPECTED_SCHEMA_DELTA)
     for (const tbl of baseline.tables) {
       const baseUniq = baseline.uniqueConstraints.get(tbl) || [];
       const postUniq = postUpgrade.uniqueConstraints.get(tbl) || [];
+      const modSpec = (EXPECTED_SCHEMA_DELTA.modifiedTables as any)[tbl];
+      const addedUniq = modSpec?.addedConstraints?.filter((c: any) => c.constraint_type === 'UNIQUE') || [];
+      const removedUniq = modSpec?.removedConstraints?.filter((c: any) => c.constraint_type === 'UNIQUE') || [];
 
-      if (tbl === 'migration_batches') {
-        // Exactly 1 added unique constraint: uq_migration_batches_identity
-        expect(baseUniq.length, 'migration_batches must have exactly 1 unique constraint in baseline').toBe(1);
-        expect(postUniq.length, 'migration_batches must have exactly 2 unique constraints post-upgrade').toBe(2);
+      expect(
+        postUniq.length,
+        `Table ${tbl} unique constraint count changed unexpectedly (expected ${baseUniq.length + addedUniq.length - removedUniq.length}, got ${postUniq.length})`,
+      ).toBe(baseUniq.length + addedUniq.length - removedUniq.length);
 
-        const baseRunKey = baseUniq.find((u) => u.constraint_name === 'uq_batch_run_key');
-        const postRunKey = postUniq.find((u) => u.constraint_name === 'uq_batch_run_key');
-        expect(postRunKey, 'uq_batch_run_key must be preserved').toBeDefined();
-        expect(postRunKey!.definition).toBe(baseRunKey!.definition);
+      for (const expAdd of addedUniq) {
+        const postU = postUniq.find((u) => u.constraint_name === expAdd.constraint_name);
+        expect(postU, `Expected added unique constraint ${expAdd.constraint_name} on ${tbl} missing`).toBeDefined();
+        expect(postU!.definition).toMatch(expAdd.definitionPattern);
+      }
 
-        const postIdentity = postUniq.find((u) => u.constraint_name === 'uq_migration_batches_identity');
-        expect(postIdentity, 'uq_migration_batches_identity must be added').toBeDefined();
-        expect(postIdentity!.definition).toMatch(/UNIQUE \(id, migration_run_id, batch_key\)/);
-      } else {
-        // Unaffected tables: exact unique constraint preservation
-        expect(
-          postUniq.length,
-          `Table ${tbl} unique constraint count changed unexpectedly`,
-        ).toBe(baseUniq.length);
+      for (const expRem of removedUniq) {
+        const postU = postUniq.find((u) => u.constraint_name === expRem.constraint_name);
+        expect(postU, `Removed unique constraint ${expRem.constraint_name} must not exist on ${tbl}`).toBeUndefined();
+      }
 
-        for (const baseU of baseUniq) {
-          const postU = postUniq.find((u) => u.constraint_name === baseU.constraint_name);
-          expect(postU, `Unique constraint ${baseU.constraint_name} on ${tbl} missing post-upgrade`).toBeDefined();
-          expect(postU!.definition, `Unique constraint ${baseU.constraint_name} definition mismatch`).toBe(baseU.definition);
-        }
+      for (const baseU of baseUniq) {
+        if (removedUniq.some((r: any) => r.constraint_name === baseU.constraint_name)) continue;
+        const postU = postUniq.find((u) => u.constraint_name === baseU.constraint_name);
+        expect(postU, `Unique constraint ${baseU.constraint_name} on ${tbl} missing post-upgrade`).toBeDefined();
+        expect(postU!.definition, `Unique constraint ${baseU.constraint_name} definition mismatch`).toBe(baseU.definition);
       }
     }
 
-    // 5. Foreign Key Constraints Across ALL 22 Historical Tables
+    // 6. Foreign Key Constraints Across ALL 22 Historical Tables (Consuming EXPECTED_SCHEMA_DELTA)
     for (const tbl of baseline.tables) {
       const baseFks = baseline.foreignKeys.get(tbl) || [];
       const postFks = postUpgrade.foreignKeys.get(tbl) || [];
+      const modSpec = (EXPECTED_SCHEMA_DELTA.modifiedTables as any)[tbl];
+      const addedFks = modSpec?.addedConstraints?.filter((c: any) => c.constraint_type === 'FOREIGN KEY') || [];
+      const removedFks = modSpec?.removedConstraints?.filter((c: any) => c.constraint_type === 'FOREIGN KEY') || [];
 
-      if (tbl === 'record_manifests') {
-        // Intended FK change: legacy FK dropped, composite FK added, run FK preserved
-        expect(baseFks.length, 'record_manifests baseline foreign keys').toBe(2);
-        expect(postFks.length, 'record_manifests post-upgrade foreign keys').toBe(2);
+      expect(
+        postFks.length,
+        `Table ${tbl} foreign key count changed unexpectedly (expected ${baseFks.length + addedFks.length - removedFks.length}, got ${postFks.length})`,
+      ).toBe(baseFks.length + addedFks.length - removedFks.length);
 
-        // Legacy single FK must be dropped
-        const postLegacyFk = postFks.find((f) => f.constraint_name === 'record_manifests_migration_batch_id_fkey');
-        expect(postLegacyFk, 'Legacy single-column FK must be dropped').toBeUndefined();
+      for (const expAdd of addedFks) {
+        const postFk = postFks.find((f) => f.constraint_name === expAdd.constraint_name);
+        expect(postFk, `Expected added foreign key ${expAdd.constraint_name} on ${tbl} missing`).toBeDefined();
+        expect(postFk!.definition).toMatch(expAdd.definitionPattern);
+      }
 
-        // Composite FK must be added
-        const postCompositeFk = postFks.find((f) => f.constraint_name === 'fk_record_manifests_batch_identity');
-        expect(postCompositeFk, 'Composite FK fk_record_manifests_batch_identity must exist').toBeDefined();
-        expect(postCompositeFk!.definition).toMatch(
-          /FOREIGN KEY \(migration_batch_id, migration_run_id, batch_key\) REFERENCES migration_batches\(id, migration_run_id, batch_key\) ON DELETE CASCADE/,
-        );
+      for (const expRem of removedFks) {
+        const postFk = postFks.find((f) => f.constraint_name === expRem.constraint_name);
+        expect(postFk, `Removed foreign key ${expRem.constraint_name} must not exist on ${tbl}`).toBeUndefined();
+      }
 
-        // Run FK must be preserved
-        const baseRunFk = baseFks.find((f) => f.constraint_name === 'record_manifests_migration_run_id_fkey');
-        const postRunFk = postFks.find((f) => f.constraint_name === 'record_manifests_migration_run_id_fkey');
-        expect(postRunFk, 'record_manifests_migration_run_id_fkey must be preserved').toBeDefined();
-        expect(postRunFk!.definition).toBe(baseRunFk!.definition);
-      } else {
-        // Unaffected tables: exact foreign key preservation
-        expect(
-          postFks.length,
-          `Table ${tbl} foreign key count changed unexpectedly`,
-        ).toBe(baseFks.length);
-
-        for (const baseFk of baseFks) {
-          const postFk = postFks.find((f) => f.constraint_name === baseFk.constraint_name);
-          expect(postFk, `Foreign key ${baseFk.constraint_name} on ${tbl} missing post-upgrade`).toBeDefined();
-          expect(postFk!.definition, `Foreign key ${baseFk.constraint_name} definition mismatch`).toBe(baseFk.definition);
-        }
+      for (const baseFk of baseFks) {
+        if (removedFks.some((r: any) => r.constraint_name === baseFk.constraint_name)) continue;
+        const postFk = postFks.find((f) => f.constraint_name === baseFk.constraint_name);
+        expect(postFk, `Foreign key ${baseFk.constraint_name} on ${tbl} missing post-upgrade`).toBeDefined();
+        expect(postFk!.definition, `Foreign key ${baseFk.constraint_name} definition mismatch`).toBe(baseFk.definition);
       }
     }
 
-    // 6. Check Constraints Across ALL 22 Historical Tables
+    // 7. Check Constraints Across ALL 22 Historical Tables
     for (const tbl of baseline.tables) {
       const baseChks = baseline.checkConstraints.get(tbl) || [];
       const postChks = postUpgrade.checkConstraints.get(tbl) || [];
@@ -377,7 +1028,40 @@ describe('Manifest Schema Upgrade & Historical Reconciliation (Run 005.19 Comple
       }
     }
 
-    // 7. Index Definitions Across ALL 22 Historical Tables
+    // 8. Index Definitions Across ALL 22 Historical Tables (Consuming EXPECTED_SCHEMA_DELTA)
+    for (const tbl of baseline.tables) {
+      const baseIdxs = baseline.indexes.get(tbl) || [];
+      const postIdxs = postUpgrade.indexes.get(tbl) || [];
+      const modSpec = (EXPECTED_SCHEMA_DELTA.modifiedTables as any)[tbl];
+      const addedIdxs = modSpec?.addedIndexes || [];
+      const removedIdxs = modSpec?.removedIndexes || [];
+
+      expect(
+        postIdxs.length,
+        `Table ${tbl} index count mismatch (expected ${baseIdxs.length + addedIdxs.length - removedIdxs.length}, got ${postIdxs.length})`,
+      ).toBe(baseIdxs.length + addedIdxs.length - removedIdxs.length);
+
+      for (const expAdd of addedIdxs) {
+        const postIdx = postIdxs.find((idx) => idx.index_name === expAdd.index_name);
+        expect(postIdx, `Expected added index ${expAdd.index_name} on ${tbl} missing`).toBeDefined();
+        if (expAdd.indexPattern) {
+          expect(postIdx!.index_definition).toMatch(expAdd.indexPattern);
+        }
+      }
+
+      for (const expRem of removedIdxs) {
+        const postIdx = postIdxs.find((idx) => idx.index_name === expRem.index_name);
+        expect(postIdx, `Removed index ${expRem.index_name} must not exist on ${tbl}`).toBeUndefined();
+      }
+
+      for (const baseIdx of baseIdxs) {
+        if (removedIdxs.some((r: any) => r.index_name === baseIdx.index_name)) continue;
+        const postIdx = postIdxs.find((idx) => idx.index_name === baseIdx.index_name);
+        expect(postIdx, `Index ${baseIdx.index_name} on ${tbl} must be preserved`).toBeDefined();
+        expect(postIdx!.index_definition).toBe(baseIdx.index_definition);
+      }
+    }
+
     const expectedSecondaryIndexes = [
       'ix_workspaces_status',
       'ix_members_user',
@@ -397,36 +1081,6 @@ describe('Manifest Schema Upgrade & Historical Reconciliation (Run 005.19 Comple
     for (const idxName of expectedSecondaryIndexes) {
       expect(allPostIndexNames.has(idxName), `Secondary index ${idxName} must exist post-upgrade`).toBe(true);
     }
-
-    for (const tbl of baseline.tables) {
-      const baseIdxs = baseline.indexes.get(tbl) || [];
-      const postIdxs = postUpgrade.indexes.get(tbl) || [];
-
-      if (tbl === 'migration_batches') {
-        // Exactly 1 new index added for uq_migration_batches_identity
-        expect(postIdxs.length, 'migration_batches index count').toBe(baseIdxs.length + 1);
-        const addedIdx = postIdxs.find((idx) => idx.index_name === 'uq_migration_batches_identity');
-        expect(addedIdx, 'uq_migration_batches_identity index must be present').toBeDefined();
-        for (const baseIdx of baseIdxs) {
-          const postIdx = postIdxs.find((idx) => idx.index_name === baseIdx.index_name);
-          expect(postIdx, `Index ${baseIdx.index_name} on ${tbl} must be preserved`).toBeDefined();
-          expect(postIdx!.index_definition).toBe(baseIdx.index_definition);
-        }
-      } else {
-        expect(postIdxs.length, `Table ${tbl} index count mismatch`).toBe(baseIdxs.length);
-        for (const baseIdx of baseIdxs) {
-          const postIdx = postIdxs.find((idx) => idx.index_name === baseIdx.index_name);
-          expect(postIdx, `Index ${baseIdx.index_name} on ${tbl} must be preserved`).toBeDefined();
-          expect(postIdx!.index_definition).toBe(baseIdx.index_definition);
-        }
-      }
-    }
-
-    // 8. New Archive & Report Table Structure Assertions
-    const archiveCols = postUpgrade.columns.get('record_manifest_historical_archive') || [];
-    expect(archiveCols.length, 'record_manifest_historical_archive column count').toBe(17);
-    const reportCols = postUpgrade.columns.get('manifest_reconciliation_reports') || [];
-    expect(reportCols.length, 'manifest_reconciliation_reports column count').toBe(9);
   }
 
   // Helper to setup isolated schema with uuid helper
@@ -1053,5 +1707,222 @@ describe('Manifest Schema Upgrade & Historical Reconciliation (Run 005.19 Comple
       await Promise.all([dbServiceC1.onModuleDestroy(), dbServiceC2.onModuleDestroy()]);
       await rawPool.query(`DROP SCHEMA IF EXISTS ${schemaConcurrency} CASCADE`);
     }
+  });
+
+  it('Requirement 4: demonstrates that a timestamp precision difference (TIMESTAMPTZ vs TIMESTAMPTZ(3)) is detected by the parity assertion', () => {
+    // Build a complete, valid mock baseline catalog with all 22 historical tables
+    const makeMockCatalog = (datetimePrecision: number | null): SchemaCatalog => {
+      const cat: SchemaCatalog = {
+        tables: [
+          'workspaces', 'users', 'workspace_members', 'projects', 'connections',
+          'connection_secrets', 'schema_snapshots', 'profile_runs', 'migration_plans',
+          'mapping_versions', 'migration_plan_versions', 'approvals', 'migration_runs',
+          'migration_batches', 'id_mappings', 'record_manifests', 'validation_runs',
+          'validation_check_results', 'discrepancies', 'audit_events', 'report_artifacts',
+          'ai_traces',
+        ],
+        columns: new Map(),
+        primaryKeys: new Map(),
+        uniqueConstraints: new Map(),
+        foreignKeys: new Map(),
+        checkConstraints: new Map(),
+        indexes: new Map(),
+      };
+
+      for (const t of cat.tables) {
+        cat.columns.set(t, []);
+        cat.primaryKeys.set(t, {
+          table_name: t,
+          constraint_name: `${t}_pkey`,
+          constraint_type: 'PRIMARY KEY',
+          definition: 'PRIMARY KEY (id)',
+        });
+        cat.uniqueConstraints.set(t, []);
+        cat.foreignKeys.set(t, []);
+        cat.checkConstraints.set(t, []);
+        cat.indexes.set(t, []);
+      }
+
+      // Add uq_batch_run_key to migration_batches
+      cat.uniqueConstraints.get('migration_batches')!.push({
+        table_name: 'migration_batches',
+        constraint_name: 'uq_batch_run_key',
+        constraint_type: 'UNIQUE',
+        definition: 'UNIQUE (migration_run_id, batch_key)',
+      });
+
+      // Add baseline foreign keys to record_manifests
+      cat.foreignKeys.get('record_manifests')!.push(
+        {
+          table_name: 'record_manifests',
+          constraint_name: 'record_manifests_migration_batch_id_fkey',
+          constraint_type: 'FOREIGN KEY',
+          definition: 'FOREIGN KEY (migration_batch_id) REFERENCES migration_batches(id)',
+        },
+        {
+          table_name: 'record_manifests',
+          constraint_name: 'record_manifests_migration_run_id_fkey',
+          constraint_type: 'FOREIGN KEY',
+          definition: 'FOREIGN KEY (migration_run_id) REFERENCES migration_runs(id)',
+        },
+      );
+
+      // Add a temporal column to audit_events
+      cat.columns.get('audit_events')!.push({
+        table_name: 'audit_events',
+        column_name: 'created_at',
+        ordinal_position: 1,
+        column_default: 'now()',
+        is_nullable: 'NO',
+        data_type: 'timestamp with time zone',
+        udt_name: 'timestamptz',
+        character_maximum_length: null,
+        numeric_precision: null,
+        numeric_scale: null,
+        datetime_precision: datetimePrecision,
+        is_identity: 'NO',
+        identity_generation: null,
+        is_generated: 'NEVER',
+        generation_expression: null,
+        collation_name: null,
+      });
+
+      return cat;
+    };
+
+    // Baseline has standard PostgreSQL TIMESTAMPTZ (precision 6)
+    const baseline = makeMockCatalog(6);
+
+    // Build matching postUpgrade catalog with expected deltas applied
+    const postUpgrade = makeMockCatalog(6);
+    // Add the 2 new tables to postUpgrade
+    postUpgrade.tables.push('record_manifest_historical_archive', 'manifest_reconciliation_reports');
+
+    // Populate added tables according to EXPECTED_SCHEMA_DELTA
+    for (const [tblName, tblSpec] of Object.entries(EXPECTED_SCHEMA_DELTA.addedTables)) {
+      postUpgrade.columns.set(
+        tblName,
+        tblSpec.columns.map((c) => {
+          let resolvedDefault: string | null = null;
+          if (typeof c.column_default === 'string') {
+            resolvedDefault = c.column_default;
+          } else if (c.column_default instanceof RegExp) {
+            if (c.column_name === 'id') resolvedDefault = 'uuid_generate_v4()';
+            else if (c.column_name === 'report_json') resolvedDefault = "'{}'::jsonb";
+            else if (c.column_name.includes('timestamp') || c.column_name === 'created_at') resolvedDefault = 'now()';
+            else if (c.column_name === 'reconciliation_reason') resolvedDefault = "'DUPLICATE_SUPERSEDED_HISTORICAL_EVIDENCE'::text";
+            else if (c.column_name === 'reconciliation_policy') resolvedDefault = "'PRESERVE_LATEST_AND_ARCHIVE_SUPERSEDED'::text";
+            else if (c.column_name === 'reconciled_by') resolvedDefault = "'SYSTEM_SCHEMA_UPGRADE'::text";
+            else if (c.column_name === 'status') resolvedDefault = "'COMPLETED'::text";
+            else if (c.column_name === 'total_duplicates_detected' || c.column_name === 'distinct_identities_affected' || c.column_name === 'archived_record_count') resolvedDefault = '0';
+            else resolvedDefault = 'mock_default';
+          }
+          return {
+            ...c,
+            column_default: resolvedDefault,
+            character_maximum_length: c.character_maximum_length ?? null,
+            numeric_precision: c.numeric_precision ?? null,
+            numeric_scale: c.numeric_scale ?? null,
+            datetime_precision: c.datetime_precision ?? null,
+            is_identity: c.is_identity ?? 'NO',
+            identity_generation: c.identity_generation ?? null,
+            is_generated: c.is_generated ?? 'NEVER',
+            generation_expression: c.generation_expression ?? null,
+            collation_name: c.collation_name ?? null,
+          };
+        }),
+      );
+      postUpgrade.primaryKeys.set(tblName, {
+        table_name: tblName,
+        constraint_name: tblSpec.primaryKey.constraint_name,
+        constraint_type: 'PRIMARY KEY',
+        definition: 'PRIMARY KEY (id)',
+      });
+      postUpgrade.uniqueConstraints.set(tblName, []);
+      postUpgrade.foreignKeys.set(tblName, []);
+      postUpgrade.checkConstraints.set(tblName, []);
+      postUpgrade.indexes.set(
+        tblName,
+        tblSpec.indexes.map((idx) => ({
+          table_name: tblName,
+          index_name: idx.index_name,
+          index_definition: `CREATE UNIQUE INDEX ${idx.index_name} ON ${tblName} USING btree (id)`,
+        })),
+      );
+    }
+
+    // Apply modified tables delta in postUpgrade
+    postUpgrade.uniqueConstraints.get('migration_batches')!.push({
+      table_name: 'migration_batches',
+      constraint_name: 'uq_migration_batches_identity',
+      constraint_type: 'UNIQUE',
+      definition: 'UNIQUE (id, migration_run_id, batch_key)',
+    });
+    postUpgrade.indexes.get('migration_batches')!.push({
+      table_name: 'migration_batches',
+      index_name: 'uq_migration_batches_identity',
+      index_definition: 'CREATE UNIQUE INDEX uq_migration_batches_identity ON migration_batches USING btree (id, migration_run_id, batch_key)',
+    });
+
+    // Replace single FK with composite FK on record_manifests
+    postUpgrade.foreignKeys.set('record_manifests', [
+      {
+        table_name: 'record_manifests',
+        constraint_name: 'fk_record_manifests_batch_identity',
+        constraint_type: 'FOREIGN KEY',
+        definition: 'FOREIGN KEY (migration_batch_id, migration_run_id, batch_key) REFERENCES migration_batches(id, migration_run_id, batch_key) ON DELETE CASCADE',
+      },
+      {
+        table_name: 'record_manifests',
+        constraint_name: 'record_manifests_migration_run_id_fkey',
+        constraint_type: 'FOREIGN KEY',
+        definition: 'FOREIGN KEY (migration_run_id) REFERENCES migration_runs(id)',
+      },
+    ]);
+
+    // Ensure secondary indexes exist in both baseline and postUpgrade
+    const secondaryIdxNames = [
+      'ix_workspaces_status', 'ix_members_user', 'ix_projects_workspace',
+      'ix_connections_workspace', 'ix_snapshots_connection', 'ix_plans_workspace_project',
+      'ix_runs_workspace_status', 'ix_batches_run_seq', 'ix_discrepancies_validation_status',
+      'ix_audit_workspace_date',
+    ];
+    for (const sIdx of secondaryIdxNames) {
+      baseline.indexes.get('workspaces')!.push({
+        table_name: 'workspaces',
+        index_name: sIdx,
+        index_definition: `CREATE INDEX ${sIdx} ON workspaces (id)`,
+      });
+      postUpgrade.indexes.get('workspaces')!.push({
+        table_name: 'workspaces',
+        index_name: sIdx,
+        index_definition: `CREATE INDEX ${sIdx} ON workspaces (id)`,
+      });
+    }
+
+    // Verify that without mutation, parity assertion succeeds
+    expect(() => {
+      assertSchemaCatalogParity(baseline, postUpgrade, 'mock_schema');
+    }).not.toThrow();
+
+    // Mutate historical table column: change created_at datetime_precision to 3 (TIMESTAMPTZ(3))
+    postUpgrade.columns.get('audit_events')![0].datetime_precision = 3;
+
+    // The parity assertion must fail closed with an explicit datetime precision mismatch error
+    expect(() => {
+      assertSchemaCatalogParity(baseline, postUpgrade, 'mock_schema');
+    }).toThrow(/datetime precision/i);
+
+    // Restore audit_events precision
+    postUpgrade.columns.get('audit_events')![0].datetime_precision = 6;
+
+    // Mutate added table column: change reconciliation_timestamp datetime_precision to 3
+    const archiveTsCol = postUpgrade.columns.get('record_manifest_historical_archive')!.find((c) => c.column_name === 'reconciliation_timestamp')!;
+    archiveTsCol.datetime_precision = 3;
+
+    // The parity assertion must fail closed with an explicit datetime precision mismatch error
+    expect(() => {
+      assertSchemaCatalogParity(baseline, postUpgrade, 'mock_schema');
+    }).toThrow(/datetime precision/i);
   });
 });

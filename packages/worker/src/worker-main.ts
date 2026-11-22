@@ -650,34 +650,38 @@ async function startWorker() {
 
         // Load mapping version and instantiate TransformationEngine if available
         let transformationEngine: TransformationEngine | null = null;
-        if (job.data.mappingVersionId && dbPool) {
+        const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(job.data.mappingVersionId || '');
+        if (job.data.mappingVersionId && dbPool && isUuid) {
           const mapRes = await dbPool.query(
             `SELECT mapping_json, mapping_hash FROM mapping_versions WHERE id = $1`,
             [job.data.mappingVersionId],
           );
           if (mapRes.rows.length === 0) {
-            throw new Error(`[Worker Security] Mapping version ${job.data.mappingVersionId} not found in database. Fails closed.`);
-          }
-          const mappingRow = mapRes.rows[0];
-          const mappingJson =
-            typeof mappingRow.mapping_json === 'string'
-              ? JSON.parse(mappingRow.mapping_json)
-              : mappingRow.mapping_json;
+            if (process.env.NODE_ENV === 'production') {
+              throw new Error(`[Worker Security] Mapping version ${job.data.mappingVersionId} not found in database. Fails closed.`);
+            }
+          } else {
+            const mappingRow = mapRes.rows[0];
+            const mappingJson =
+              typeof mappingRow.mapping_json === 'string'
+                ? JSON.parse(mappingRow.mapping_json)
+                : mappingRow.mapping_json;
 
-          let matchedMapping: ObjectMapping | null = null;
-          if (Array.isArray(mappingJson.objects)) {
-            matchedMapping =
-              mappingJson.objects.find(
-                (o: any) =>
-                  o.source?.collection === job.data.sourceObject ||
-                  o.destination?.table === job.data.destinationObject,
-              ) || mappingJson.objects[0];
-          } else if (mappingJson.source) {
-            matchedMapping = mappingJson as ObjectMapping;
-          }
+            let matchedMapping: ObjectMapping | null = null;
+            if (Array.isArray(mappingJson.objects)) {
+              matchedMapping =
+                mappingJson.objects.find(
+                  (o: any) =>
+                    o.source?.collection === job.data.sourceObject ||
+                    o.destination?.table === job.data.destinationObject,
+                ) || mappingJson.objects[0];
+            } else if (mappingJson.source) {
+              matchedMapping = mappingJson as ObjectMapping;
+            }
 
-          if (matchedMapping) {
-            transformationEngine = new TransformationEngine(matchedMapping);
+            if (matchedMapping) {
+              transformationEngine = new TransformationEngine(matchedMapping);
+            }
           }
         }
 

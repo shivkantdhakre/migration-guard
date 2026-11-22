@@ -56,6 +56,9 @@ export class InMemoryBatchManifestStorage implements BatchManifestStorageAdapter
 
   public async saveRecordManifests(manifests: RecordManifest[]): Promise<void> {
     for (const m of manifests) {
+      if (!m.batchKey || m.batchKey.trim() === '') {
+        throw new Error(`Record manifest for source key '${m.sourceKey}' is missing batchKey.`);
+      }
       if (!m.destinationObject || m.destinationObject.trim() === '') {
         throw new Error(`Record manifest for source key '${m.sourceKey}' is missing destinationObject.`);
       }

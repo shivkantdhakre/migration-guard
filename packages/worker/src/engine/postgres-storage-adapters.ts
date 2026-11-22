@@ -134,8 +134,11 @@ export class PostgresStorageAdapters
   async saveRecordManifests(manifests: RecordManifest[]): Promise<void> {
     if (manifests.length === 0) return;
 
-    // Enforce non-null destination object and destination key
+    // Enforce non-null destination coordinates and batch key
     for (const m of manifests) {
+      if (!m.batchKey || m.batchKey.trim() === '') {
+        throw new Error(`Record manifest for source key '${m.sourceKey}' is missing batchKey.`);
+      }
       if (!m.destinationObject || m.destinationObject.trim() === '') {
         throw new Error(`Record manifest for source key '${m.sourceKey}' is missing destinationObject.`);
       }
@@ -148,18 +151,37 @@ export class PostgresStorageAdapters
     try {
       await client.query('BEGIN');
 
-      // Pre-resolve batch IDs for manifests by batchKey
-      const batchKeyToId = new Map<string, string>();
+      // Pre-resolve batch IDs for manifests by (migrationRunId, batchKey)
+      const batchMap = new Map<string, { id: string; migrationRunId: string; batchKey: string }>();
       const batchKeysToLookup = Array.from(
-        new Set(manifests.filter((m) => m.batchKey).map((m) => m.batchKey)),
+        new Set(manifests.map((m) => m.batchKey)),
       );
       if (batchKeysToLookup.length > 0) {
         const batchRes = await client.query(
-          `SELECT id, batch_key FROM migration_batches WHERE migration_run_id = $1 AND batch_key = ANY($2::text[])`,
+          `SELECT id, migration_run_id, batch_key FROM migration_batches WHERE migration_run_id = $1 AND batch_key = ANY($2::text[])`,
           [manifests[0].migrationRunId, batchKeysToLookup],
         );
         for (const r of batchRes.rows) {
-          batchKeyToId.set(r.batch_key, r.id);
+          batchMap.set(r.batch_key, {
+            id: r.id,
+            migrationRunId: r.migration_run_id,
+            batchKey: r.batch_key,
+          });
+        }
+      }
+
+      // Enforce exact manifest-to-batch relationship and reject invalid references
+      for (const m of manifests) {
+        const resolvedBatch = batchMap.get(m.batchKey);
+        if (!resolvedBatch) {
+          throw new Error(
+            `Batch '${m.batchKey}' does not exist for migration run '${m.migrationRunId}'. Missing batch resolution is rejected.`,
+          );
+        }
+        if (m.migrationBatchId && m.migrationBatchId !== resolvedBatch.id) {
+          throw new Error(
+            `Mismatched batch relationship: manifest specifies migrationBatchId '${m.migrationBatchId}', but batch '${m.batchKey}' resolves to '${resolvedBatch.id}'.`,
+          );
         }
       }
 
@@ -171,7 +193,7 @@ export class PostgresStorageAdapters
           COALESCE($1::uuid, gen_random_uuid()), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW()
         )
         ON CONFLICT (migration_run_id, source_object, source_key) DO UPDATE SET
-          migration_batch_id = COALESCE(EXCLUDED.migration_batch_id, record_manifests.migration_batch_id),
+          migration_batch_id = EXCLUDED.migration_batch_id,
           batch_key = EXCLUDED.batch_key,
           destination_object = EXCLUDED.destination_object,
           destination_key = EXCLUDED.destination_key,
@@ -182,12 +204,12 @@ export class PostgresStorageAdapters
       `;
 
       for (const m of manifests) {
-        const batchId = (m.batchKey ? batchKeyToId.get(m.batchKey) : null) || m.migrationBatchId || null;
+        const resolvedBatch = batchMap.get(m.batchKey)!;
         await client.query(query, [
           m.id || null,
           m.migrationRunId,
-          batchId,
-          m.batchKey || '',
+          resolvedBatch.id,
+          m.batchKey,
           m.sourceObject,
           m.sourceKey,
           m.destinationObject,

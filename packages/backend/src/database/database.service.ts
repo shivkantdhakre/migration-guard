@@ -209,35 +209,46 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
 
   public async runMigrations() {
     if (!this.isConnected || !this.pool) return;
+    const client = await this.pool.connect();
     try {
-      const candidates = [
-        path.join(__dirname, 'schema.sql'),
-        path.join(__dirname, '..', 'src', 'database', 'schema.sql'),
-        path.resolve(process.cwd(), 'packages/backend/src/database/schema.sql'),
-        path.resolve(process.cwd(), 'src/database/schema.sql'),
-      ];
-      const sqlPath = candidates.find((p) => fs.existsSync(p));
-      if (sqlPath) {
-        const sql = fs.readFileSync(sqlPath, 'utf8');
-        await this.pool.query(sql);
-        console.log('[DatabaseService] Migrations executed successfully.');
+      await client.query('SELECT pg_advisory_lock(hashtext($1))', ['migrationguard_schema_migrations']);
+      try {
+        const candidates = [
+          path.join(__dirname, 'schema.sql'),
+          path.join(__dirname, '..', 'src', 'database', 'schema.sql'),
+          path.resolve(process.cwd(), 'packages/backend/src/database/schema.sql'),
+          path.resolve(process.cwd(), 'src/database/schema.sql'),
+        ];
+        const sqlPath = candidates.find((p) => fs.existsSync(p));
+        if (sqlPath) {
+          const sql = fs.readFileSync(sqlPath, 'utf8');
+          await client.query(sql);
+          console.log('[DatabaseService] Migrations executed successfully.');
+        }
+      } finally {
+        await client.query('SELECT pg_advisory_unlock(hashtext($1))', ['migrationguard_schema_migrations']).catch(() => {});
       }
     } catch (err: any) {
       console.error('[DatabaseService] Migration failed:', err.message);
       throw err;
+    } finally {
+      client.release();
     }
   }
 
   /**
-   * Run 005.15: Safe Manifest Uniqueness Upgrade & Historical Reconciliation (PRESERVE_LATEST_AND_ARCHIVE_SUPERSEDED)
-   * Detects duplicate (migration_run_id, source_object, source_key) manifest identities,
-   * generates an explicit reconciliation report, archives historical evidence without data loss,
-   * and ensures constraint safety.
+   * Run 005.16: Safe Manifest Uniqueness Upgrade & Historical Reconciliation (PRESERVE_LATEST_AND_ARCHIVE_SUPERSEDED)
+   * Recovers exact destination coordinates from authoritative id_mappings (without fabrication),
+   * recovers and validates batch relationships, detects duplicates, archives unresolvable and superseded
+   * evidence without data loss, and records explicit audit reports.
    */
   public async reconcileManifestDuplicates(migrationRunId?: string): Promise<{
     duplicatesDetected: number;
     distinctIdentitiesAffected: number;
     archivedCount: number;
+    resolvedCoordinatesCount: number;
+    unresolvedCoordinatesArchived: number;
+    unresolvedBatchArchived: number;
     reportId?: string;
     details: any[];
   }> {
@@ -246,12 +257,127 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         duplicatesDetected: 0,
         distinctIdentitiesAffected: 0,
         archivedCount: 0,
+        resolvedCoordinatesCount: 0,
+        unresolvedCoordinatesArchived: 0,
+        unresolvedBatchArchived: 0,
         details: [],
       };
     }
 
     return this.transaction(async (client) => {
-      // 1. Detect existing duplicate identities
+      // Step 0: Acquire PostgreSQL advisory transaction lock for serialization
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['migrationguard_schema_migrations']);
+      await client.query('LOCK TABLE record_manifests IN EXCLUSIVE MODE');
+      await client.query('LOCK TABLE migration_batches IN EXCLUSIVE MODE');
+
+      // Step 1: Recover exact destination coordinates from authoritative id_mappings (Requirement 1)
+      const coordRecoveryQuery = `
+        WITH recovered_coords AS (
+          UPDATE record_manifests rm
+          SET destination_object = im.destination_object,
+              destination_key = im.destination_key
+          FROM id_mappings im
+          WHERE (rm.destination_object IS NULL OR rm.destination_key IS NULL)
+            AND rm.migration_run_id = im.migration_run_id
+            AND rm.source_object = im.source_object
+            AND rm.source_key = im.source_key
+            ${migrationRunId ? 'AND rm.migration_run_id = $1' : ''}
+          RETURNING rm.id
+        )
+        SELECT COUNT(*)::int as count FROM recovered_coords;
+      `;
+      const coordRecovRes = await client.query(coordRecoveryQuery, migrationRunId ? [migrationRunId] : []);
+      const resolvedCoordinatesCount = coordRecovRes.rows[0]?.count || 0;
+
+      // Step 2: Archive unresolved incomplete legacy coordinates
+      const archiveUnresolvedCoordsQuery = `
+        WITH archived_unresolved_coords AS (
+          INSERT INTO record_manifest_historical_archive (
+            original_manifest_id, migration_run_id, migration_batch_id, batch_key,
+            source_object, source_key, destination_object, destination_key,
+            content_hash, status, error_details, reconciliation_reason, original_created_at
+          )
+          SELECT 
+            id, migration_run_id, migration_batch_id, batch_key,
+            source_object, source_key, destination_object, destination_key,
+            content_hash, status, error_details, 'UNRESOLVED_INCOMPLETE_LEGACY_COORDINATES', created_at
+          FROM record_manifests
+          WHERE (destination_object IS NULL OR destination_key IS NULL)
+            ${migrationRunId ? 'AND migration_run_id = $1' : ''}
+          RETURNING original_manifest_id
+        )
+        DELETE FROM record_manifests
+        WHERE id IN (SELECT original_manifest_id FROM archived_unresolved_coords)
+        RETURNING id;
+      `;
+      const archiveUnresolvedCoordsRes = await client.query(
+        archiveUnresolvedCoordsQuery,
+        migrationRunId ? [migrationRunId] : [],
+      );
+      const unresolvedCoordinatesArchived = archiveUnresolvedCoordsRes.rows.length;
+
+      // Step 3: Handle legacy batch relationships (Requirement 3)
+      // Backfill batch_key if missing
+      await client.query(
+        `UPDATE record_manifests rm
+         SET batch_key = mb.batch_key
+         FROM migration_batches mb
+         WHERE rm.batch_key IS NULL
+           AND rm.migration_batch_id IS NOT NULL
+           AND rm.migration_batch_id = mb.id
+           AND rm.migration_run_id = mb.migration_run_id
+           ${migrationRunId ? 'AND rm.migration_run_id = $1' : ''}`,
+        migrationRunId ? [migrationRunId] : [],
+      );
+
+      // Backfill migration_batch_id if missing
+      await client.query(
+        `UPDATE record_manifests rm
+         SET migration_batch_id = mb.id
+         FROM migration_batches mb
+         WHERE rm.migration_batch_id IS NULL
+           AND rm.batch_key IS NOT NULL
+           AND rm.migration_run_id = mb.migration_run_id
+           AND rm.batch_key = mb.batch_key
+           ${migrationRunId ? 'AND rm.migration_run_id = $1' : ''}`,
+        migrationRunId ? [migrationRunId] : [],
+      );
+
+      // Archive genuinely unresolvable batch relationships
+      const archiveUnresolvedBatchQuery = `
+        WITH archived_unresolved_batch AS (
+          INSERT INTO record_manifest_historical_archive (
+            original_manifest_id, migration_run_id, migration_batch_id, batch_key,
+            source_object, source_key, destination_object, destination_key,
+            content_hash, status, error_details, reconciliation_reason, original_created_at
+          )
+          SELECT 
+            rm.id, rm.migration_run_id, rm.migration_batch_id, rm.batch_key,
+            rm.source_object, rm.source_key, rm.destination_object, rm.destination_key,
+            rm.content_hash, rm.status, rm.error_details, 'UNRESOLVED_INCOMPLETE_LEGACY_BATCH_RELATION', rm.created_at
+          FROM record_manifests rm
+          WHERE (rm.migration_batch_id IS NULL 
+             OR rm.batch_key IS NULL
+             OR NOT EXISTS (
+               SELECT 1 FROM migration_batches mb
+               WHERE mb.id = rm.migration_batch_id
+                 AND mb.migration_run_id = rm.migration_run_id
+                 AND mb.batch_key = rm.batch_key
+             ))
+             ${migrationRunId ? 'AND rm.migration_run_id = $1' : ''}
+          RETURNING original_manifest_id
+        )
+        DELETE FROM record_manifests
+        WHERE id IN (SELECT original_manifest_id FROM archived_unresolved_batch)
+        RETURNING id;
+      `;
+      const archiveUnresolvedBatchRes = await client.query(
+        archiveUnresolvedBatchQuery,
+        migrationRunId ? [migrationRunId] : [],
+      );
+      const unresolvedBatchArchived = archiveUnresolvedBatchRes.rows.length;
+
+      // Step 4: Detect existing duplicate identities
       let findDupsQuery = `
         SELECT migration_run_id, source_object, source_key, COUNT(*) as dup_count
         FROM record_manifests
@@ -268,90 +394,101 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
 
       const dupsRes = await client.query(findDupsQuery, queryParams);
       const distinctIdentitiesAffected = dupsRes.rows.length;
-      if (distinctIdentitiesAffected === 0) {
-        return {
-          duplicatesDetected: 0,
-          distinctIdentitiesAffected: 0,
-          archivedCount: 0,
-          details: [],
-        };
+      let totalDuplicates = 0;
+      let duplicateArchivedCount = 0;
+      let archivedDetails: any[] = [];
+
+      if (distinctIdentitiesAffected > 0) {
+        totalDuplicates = dupsRes.rows.reduce(
+          (acc: number, row: any) => acc + (parseInt(row.dup_count, 10) - 1),
+          0,
+        );
+
+        // Archive superseded duplicates into record_manifest_historical_archive
+        const archiveQuery = `
+          WITH ranked_manifests AS (
+            SELECT 
+              rm.*,
+              ROW_NUMBER() OVER (
+                PARTITION BY migration_run_id, source_object, source_key
+                ORDER BY 
+                  CASE status WHEN 'WRITTEN' THEN 1 WHEN 'SKIPPED' THEN 2 ELSE 3 END,
+                  created_at DESC,
+                  id DESC
+              ) as rank_order
+            FROM record_manifests rm
+            WHERE (migration_run_id, source_object, source_key) IN (
+              SELECT migration_run_id, source_object, source_key
+              FROM record_manifests
+              ${migrationRunId ? 'WHERE migration_run_id = $1' : ''}
+              GROUP BY migration_run_id, source_object, source_key
+              HAVING COUNT(*) > 1
+            )
+          ),
+          archived_rows AS (
+            INSERT INTO record_manifest_historical_archive (
+              original_manifest_id, migration_run_id, migration_batch_id, batch_key,
+              source_object, source_key, destination_object, destination_key,
+              content_hash, status, error_details, reconciliation_reason, original_created_at
+            )
+            SELECT 
+              id, migration_run_id, migration_batch_id, batch_key,
+              source_object, source_key, destination_object, destination_key,
+              content_hash, status, error_details, 'DUPLICATE_SUPERSEDED_HISTORICAL_EVIDENCE', created_at
+            FROM ranked_manifests
+            WHERE rank_order > 1
+            RETURNING original_manifest_id, migration_run_id, source_object, source_key
+          )
+          DELETE FROM record_manifests
+          WHERE id IN (SELECT original_manifest_id FROM archived_rows)
+          RETURNING id, migration_run_id, source_object, source_key;
+        `;
+
+        const archiveRes = await client.query(archiveQuery, queryParams);
+        duplicateArchivedCount = archiveRes.rows.length;
+        archivedDetails = archiveRes.rows;
       }
 
-      const totalDuplicates = dupsRes.rows.reduce(
-        (acc: number, row: any) => acc + (parseInt(row.dup_count, 10) - 1),
-        0,
-      );
+      const totalArchived = duplicateArchivedCount + unresolvedCoordinatesArchived + unresolvedBatchArchived;
 
-      // 2. Archive superseded duplicates into record_manifest_historical_archive
-      const archiveQuery = `
-        WITH ranked_manifests AS (
-          SELECT 
-            rm.*,
-            ROW_NUMBER() OVER (
-              PARTITION BY migration_run_id, source_object, source_key
-              ORDER BY 
-                CASE status WHEN 'WRITTEN' THEN 1 WHEN 'SKIPPED' THEN 2 ELSE 3 END,
-                created_at DESC,
-                id DESC
-            ) as rank_order
-          FROM record_manifests rm
-          WHERE (migration_run_id, source_object, source_key) IN (
-            SELECT migration_run_id, source_object, source_key
-            FROM record_manifests
-            ${migrationRunId ? 'WHERE migration_run_id = $1' : ''}
-            GROUP BY migration_run_id, source_object, source_key
-            HAVING COUNT(*) > 1
-          )
-        ),
-        archived_rows AS (
-          INSERT INTO record_manifest_historical_archive (
-            original_manifest_id, migration_run_id, migration_batch_id, batch_key,
-            source_object, source_key, destination_object, destination_key,
-            content_hash, status, error_details, reconciliation_reason, original_created_at
-          )
-          SELECT 
-            id, migration_run_id, migration_batch_id, batch_key,
-            source_object, source_key, destination_object, destination_key,
-            content_hash, status, error_details, 'DUPLICATE_SUPERSEDED_HISTORICAL_EVIDENCE', created_at
-          FROM ranked_manifests
-          WHERE rank_order > 1
-          RETURNING original_manifest_id, migration_run_id, source_object, source_key
-        )
-        DELETE FROM record_manifests
-        WHERE id IN (SELECT original_manifest_id FROM archived_rows)
-        RETURNING id, migration_run_id, source_object, source_key;
-      `;
-
-      const archiveRes = await client.query(archiveQuery, queryParams);
-      const archivedCount = archiveRes.rows.length;
-
-      // 3. Record explicit reconciliation report in manifest_reconciliation_reports
-      const reportRes = await client.query(
-        `INSERT INTO manifest_reconciliation_reports (
-           migration_run_id, total_duplicates_detected, distinct_identities_affected,
-           archived_record_count, reconciliation_policy, report_json, status
-         ) VALUES ($1, $2, $3, $4, 'PRESERVE_LATEST_AND_ARCHIVE_SUPERSEDED', $5, 'COMPLETED')
-         RETURNING id`,
-        [
-          migrationRunId || null,
-          totalDuplicates,
-          distinctIdentitiesAffected,
-          archivedCount,
-          JSON.stringify({
-            timestamp: new Date().toISOString(),
-            distinctIdentitiesCount: distinctIdentitiesAffected,
-            reconciledRecords: archiveRes.rows,
-            policy: 'PRESERVE_LATEST_AND_ARCHIVE_SUPERSEDED',
-          }),
-        ],
-      );
+      let reportId: string | undefined;
+      if (totalArchived > 0 || resolvedCoordinatesCount > 0) {
+        // Record explicit reconciliation report in manifest_reconciliation_reports
+        const reportRes = await client.query(
+          `INSERT INTO manifest_reconciliation_reports (
+             migration_run_id, total_duplicates_detected, distinct_identities_affected,
+             archived_record_count, reconciliation_policy, report_json, status
+           ) VALUES ($1, $2, $3, $4, 'PRESERVE_LATEST_AND_ARCHIVE_SUPERSEDED', $5, 'COMPLETED')
+           RETURNING id`,
+          [
+            migrationRunId || null,
+            totalDuplicates,
+            distinctIdentitiesAffected,
+            totalArchived,
+            JSON.stringify({
+              timestamp: new Date().toISOString(),
+              distinctIdentitiesCount: distinctIdentitiesAffected,
+              duplicatesArchived: duplicateArchivedCount,
+              resolvedCoordinatesCount,
+              unresolvedCoordinatesArchived,
+              unresolvedBatchArchived,
+              reconciledRecords: archivedDetails,
+              policy: 'PRESERVE_LATEST_AND_ARCHIVE_SUPERSEDED',
+            }),
+          ],
+        );
+        reportId = reportRes.rows[0]?.id;
+      }
 
       return {
         duplicatesDetected: totalDuplicates,
         distinctIdentitiesAffected,
-        archivedCount,
-        reportId: reportRes.rows[0]?.id,
-        details: archiveRes.rows,
+        archivedCount: totalArchived,
+        resolvedCoordinatesCount,
+        unresolvedCoordinatesArchived,
+        unresolvedBatchArchived,
+        reportId,
+        details: archivedDetails,
       };
     });
   }

@@ -18,6 +18,7 @@ import { BatchManifestTracker } from './engine/batch-manifest.js';
 import { CheckpointManager } from './engine/checkpoint.js';
 import { IdTracker } from './engine/id-tracker.js';
 import { PostgresStorageAdapters } from './engine/postgres-storage-adapters.js';
+import { calculateCanonicalHash } from '@migrationguard/core';
 import { ConnectorFactory, resolvePostgresSsl } from './connectors/connector-factory.js';
 import {
   MigrationJobPayload,
@@ -643,7 +644,7 @@ async function startWorker() {
               destinationObject: destObj,
               destinationKey: envelope.sourceKey,
               data,
-              contentHash: `sha256:${Buffer.from(JSON.stringify(raw)).toString('base64').substring(0, 32)}`,
+              contentHash: calculateCanonicalHash(raw),
             };
           },
         });

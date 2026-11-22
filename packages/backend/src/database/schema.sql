@@ -127,29 +127,10 @@ CREATE TABLE IF NOT EXISTS migration_plan_versions (
     plan_id UUID NOT NULL REFERENCES migration_plans(id) ON DELETE CASCADE,
     version INTEGER NOT NULL DEFAULT 1,
     source_connection_id UUID NOT NULL REFERENCES connections(id),
-    source_schema_snapshot_id UUID REFERENCES schema_snapshots(id),
     destination_connection_id UUID NOT NULL REFERENCES connections(id),
-    destination_schema_snapshot_id UUID REFERENCES schema_snapshots(id),
-    mapping_version_id UUID REFERENCES mapping_versions(id),
-    scope_json JSONB NOT NULL DEFAULT '{}',
-    execution_config_json JSONB NOT NULL DEFAULT '{}',
-    validation_profile_json JSONB NOT NULL DEFAULT '{}',
     plan_hash TEXT NOT NULL,
     created_by UUID REFERENCES users(id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
--- Approvals
-CREATE TABLE IF NOT EXISTS approvals (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-    resource_type TEXT NOT NULL, -- 'PLAN_VERSION'
-    resource_id UUID NOT NULL,
-    resource_hash TEXT NOT NULL,
-    approval_status TEXT NOT NULL DEFAULT 'PENDING', -- 'PENDING', 'APPROVE', 'REJECT'
-    approver_user_id UUID NOT NULL REFERENCES users(id),
-    comment TEXT,
-    approved_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- Migration Runs
@@ -158,13 +139,14 @@ CREATE TABLE IF NOT EXISTS migration_runs (
     workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
     project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     plan_version_id UUID NOT NULL REFERENCES migration_plan_versions(id),
-    status TEXT NOT NULL DEFAULT 'QUEUED', -- 'QUEUED', 'RUNNING', 'PAUSED', 'CANCELLED', 'COMPLETED', 'FAILED'
+    status TEXT NOT NULL DEFAULT 'PENDING', -- 'PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'PAUSED'
+    execution_mode TEXT NOT NULL DEFAULT 'FULL', -- 'FULL', 'INCREMENTAL', 'VALIDATE_ONLY'
     source_boundary_json JSONB NOT NULL DEFAULT '{}',
+    progress_json JSONB NOT NULL DEFAULT '{"recordsRead": 0, "recordsWritten": 0, "batchesTotal": 0, "batchesCompleted": 0}',
+    error_summary JSONB,
+    created_by UUID REFERENCES users(id),
     started_at TIMESTAMPTZ,
     completed_at TIMESTAMPTZ,
-    progress_json JSONB NOT NULL DEFAULT '{"recordsRead": 0, "recordsWritten": 0, "recordsSkipped": 0, "recordsFailed": 0, "recordsPerSecond": 0}',
-    last_error_code TEXT,
-    created_by UUID REFERENCES users(id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -186,7 +168,8 @@ CREATE TABLE IF NOT EXISTS migration_batches (
     started_at TIMESTAMPTZ,
     completed_at TIMESTAMPTZ,
     error_summary JSONB,
-    CONSTRAINT uq_batch_run_key UNIQUE (migration_run_id, batch_key)
+    CONSTRAINT uq_batch_run_key UNIQUE (migration_run_id, batch_key),
+    CONSTRAINT uq_migration_batches_identity UNIQUE (id, migration_run_id, batch_key)
 );
 
 -- ID Mappings
@@ -205,7 +188,7 @@ CREATE TABLE IF NOT EXISTS id_mappings (
 CREATE TABLE IF NOT EXISTS record_manifests (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     migration_run_id UUID NOT NULL REFERENCES migration_runs(id) ON DELETE CASCADE,
-    migration_batch_id UUID REFERENCES migration_batches(id) ON DELETE CASCADE,
+    migration_batch_id UUID NOT NULL,
     batch_key TEXT NOT NULL,
     source_object TEXT NOT NULL,
     source_key TEXT NOT NULL,
@@ -214,10 +197,13 @@ CREATE TABLE IF NOT EXISTS record_manifests (
     content_hash TEXT,
     status TEXT NOT NULL DEFAULT 'WRITTEN', -- 'WRITTEN', 'SKIPPED', 'FAILED'
     error_details TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_record_manifests_run_source UNIQUE (migration_run_id, source_object, source_key),
+    CONSTRAINT fk_record_manifests_batch_identity FOREIGN KEY (migration_batch_id, migration_run_id, batch_key)
+        REFERENCES migration_batches(id, migration_run_id, batch_key) ON DELETE CASCADE
 );
 
--- Historical Archive for Reconciled Manifest Duplicates (Preserves historical evidence without data loss)
+-- Historical Archive for Reconciled Manifest Duplicates and Unresolved Legacy Records
 CREATE TABLE IF NOT EXISTS record_manifest_historical_archive (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     original_manifest_id UUID,
@@ -251,27 +237,83 @@ CREATE TABLE IF NOT EXISTS manifest_reconciliation_reports (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Safe Schema Upgrade, Legacy Backfill, and Constraint Enforcement Block
+-- Safe Schema Upgrade, Authoritative Backfill, and Constraint Enforcement Block
 DO $$ 
 DECLARE
   dup_count INTEGER := 0;
   distinct_dup_count INTEGER := 0;
+  resolved_coords_count INTEGER := 0;
+  unresolved_coords_count INTEGER := 0;
+  unresolved_batch_count INTEGER := 0;
+  total_archived INTEGER := 0;
 BEGIN 
-  -- 1. Ensure required columns exist for legacy databases
+  -- Step 0: Acquire PostgreSQL advisory transaction lock and table locks for exclusive migration serialization
+  PERFORM pg_advisory_xact_lock(hashtext('migrationguard_schema_migrations'));
+  LOCK TABLE record_manifests IN EXCLUSIVE MODE;
+  LOCK TABLE migration_batches IN EXCLUSIVE MODE;
+
+  -- Step 1: Ensure columns exist on legacy tables
   ALTER TABLE record_manifests ADD COLUMN IF NOT EXISTS batch_key TEXT;
   ALTER TABLE record_manifests ADD COLUMN IF NOT EXISTS destination_object TEXT;
+  ALTER TABLE record_manifests ADD COLUMN IF NOT EXISTS destination_key TEXT;
+  ALTER TABLE record_manifests ADD COLUMN IF NOT EXISTS migration_batch_id UUID;
   ALTER TABLE record_manifests ADD COLUMN IF NOT EXISTS error_details TEXT;
 
-  -- 2. Backfill legacy destination_object and destination_key if missing
-  UPDATE record_manifests
-  SET destination_object = source_object
-  WHERE destination_object IS NULL;
+  -- Step 2: Ensure migration_batches has composite unique constraint needed for foreign key
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint 
+    WHERE conname = 'uq_migration_batches_identity'
+      AND conrelid = 'migration_batches'::regclass
+      AND contype = 'u'
+  ) THEN
+    ALTER TABLE migration_batches ADD CONSTRAINT uq_migration_batches_identity UNIQUE (id, migration_run_id, batch_key);
+  END IF;
 
-  UPDATE record_manifests
-  SET destination_key = source_key
-  WHERE destination_key IS NULL;
+  -- Step 3: Handle incomplete destination coordinates (Requirement 1)
+  -- A) Recover exact destination coordinates from authoritative id_mappings records
+  WITH recovered_coords AS (
+    UPDATE record_manifests rm
+    SET destination_object = im.destination_object,
+        destination_key = im.destination_key
+    FROM id_mappings im
+    WHERE (rm.destination_object IS NULL OR rm.destination_key IS NULL)
+      AND rm.migration_run_id = im.migration_run_id
+      AND rm.source_object = im.source_object
+      AND rm.source_key = im.source_key
+    RETURNING rm.id
+  )
+  SELECT COUNT(*) INTO resolved_coords_count FROM recovered_coords;
 
-  -- 3. Backfill legacy migration_batch_id from migration_batches if batch_key matches
+  -- B) Archive unresolved incomplete legacy coordinates (where destination_object or destination_key is still null)
+  WITH archived_unresolved_coords AS (
+    INSERT INTO record_manifest_historical_archive (
+      original_manifest_id, migration_run_id, migration_batch_id, batch_key,
+      source_object, source_key, destination_object, destination_key,
+      content_hash, status, error_details, reconciliation_reason, original_created_at
+    )
+    SELECT 
+      id, migration_run_id, migration_batch_id, batch_key,
+      source_object, source_key, destination_object, destination_key,
+      content_hash, status, error_details, 'UNRESOLVED_INCOMPLETE_LEGACY_COORDINATES', created_at
+    FROM record_manifests
+    WHERE destination_object IS NULL OR destination_key IS NULL
+    RETURNING original_manifest_id
+  )
+  DELETE FROM record_manifests
+  WHERE id IN (SELECT original_manifest_id FROM archived_unresolved_coords);
+  GET DIAGNOSTICS unresolved_coords_count = ROW_COUNT;
+
+  -- Step 4: Handle legacy batch relationships (Requirement 3)
+  -- A) Backfill batch_key from authoritative migration_batches if batch_key is missing
+  UPDATE record_manifests rm
+  SET batch_key = mb.batch_key
+  FROM migration_batches mb
+  WHERE rm.batch_key IS NULL
+    AND rm.migration_batch_id IS NOT NULL
+    AND rm.migration_batch_id = mb.id
+    AND rm.migration_run_id = mb.migration_run_id;
+
+  -- B) Backfill migration_batch_id from authoritative migration_batches if migration_batch_id is missing
   UPDATE record_manifests rm
   SET migration_batch_id = mb.id
   FROM migration_batches mb
@@ -280,7 +322,33 @@ BEGIN
     AND rm.migration_run_id = mb.migration_run_id
     AND rm.batch_key = mb.batch_key;
 
-  -- 4. Detect existing duplicate (migration_run_id, source_object, source_key) identities
+  -- C) Archive genuinely unresolved batch relationships
+  WITH archived_unresolved_batch AS (
+    INSERT INTO record_manifest_historical_archive (
+      original_manifest_id, migration_run_id, migration_batch_id, batch_key,
+      source_object, source_key, destination_object, destination_key,
+      content_hash, status, error_details, reconciliation_reason, original_created_at
+    )
+    SELECT 
+      rm.id, rm.migration_run_id, rm.migration_batch_id, rm.batch_key,
+      rm.source_object, rm.source_key, rm.destination_object, rm.destination_key,
+      rm.content_hash, rm.status, rm.error_details, 'UNRESOLVED_INCOMPLETE_LEGACY_BATCH_RELATION', rm.created_at
+    FROM record_manifests rm
+    WHERE rm.migration_batch_id IS NULL 
+       OR rm.batch_key IS NULL
+       OR NOT EXISTS (
+         SELECT 1 FROM migration_batches mb
+         WHERE mb.id = rm.migration_batch_id
+           AND mb.migration_run_id = rm.migration_run_id
+           AND mb.batch_key = rm.batch_key
+       )
+    RETURNING original_manifest_id
+  )
+  DELETE FROM record_manifests
+  WHERE id IN (SELECT original_manifest_id FROM archived_unresolved_batch);
+  GET DIAGNOSTICS unresolved_batch_count = ROW_COUNT;
+
+  -- Step 5: Detect and reconcile duplicate manifest identities (PRESERVE_LATEST_AND_ARCHIVE_SUPERSEDED)
   SELECT COALESCE(SUM(c - 1), 0), COUNT(*)
   INTO dup_count, distinct_dup_count
   FROM (
@@ -290,10 +358,7 @@ BEGIN
     HAVING COUNT(*) > 1
   ) dups;
 
-  -- 5. If duplicates exist, execute reconciliation policy PRESERVE_LATEST_AND_ARCHIVE_SUPERSEDED
   IF dup_count > 0 THEN
-    -- Archive all superseded duplicates into record_manifest_historical_archive
-    -- Authoritative rank: 'WRITTEN' > 'SKIPPED' > 'FAILED', then created_at DESC, id DESC
     WITH ranked_manifests AS (
       SELECT 
         rm.*,
@@ -326,11 +391,13 @@ BEGIN
       WHERE rank_order > 1
       RETURNING original_manifest_id
     )
-    -- Remove superseded records from active table now that historical evidence is securely preserved
     DELETE FROM record_manifests
     WHERE id IN (SELECT original_manifest_id FROM archived_rows);
+  END IF;
 
-    -- Record explicit reconciliation audit report
+  -- Step 6: Record explicit reconciliation audit report
+  total_archived := dup_count + unresolved_coords_count + unresolved_batch_count;
+  IF total_archived > 0 OR resolved_coords_count > 0 THEN
     INSERT INTO manifest_reconciliation_reports (
       total_duplicates_detected,
       distinct_identities_affected,
@@ -341,27 +408,57 @@ BEGIN
     ) VALUES (
       dup_count,
       distinct_dup_count,
-      dup_count,
+      total_archived,
       'PRESERVE_LATEST_AND_ARCHIVE_SUPERSEDED',
       jsonb_build_object(
         'timestamp', NOW(),
         'duplicateIdentitiesCount', distinct_dup_count,
-        'action', 'Archived superseded historical evidence to record_manifest_historical_archive'
+        'duplicatesArchived', dup_count,
+        'resolvedCoordinatesCount', resolved_coords_count,
+        'unresolvedCoordinatesArchived', unresolved_coords_count,
+        'unresolvedBatchArchived', unresolved_batch_count,
+        'action', 'Reconciled legacy manifests: recovered authoritative coordinates, archived unresolved and superseded records'
       ),
       'COMPLETED'
     );
   END IF;
 
-  -- 6. Enforce NOT NULL constraints on destination_object and destination_key
+  -- Step 7: Enforce NOT NULL constraints (now 100% clean across all active rows)
   ALTER TABLE record_manifests ALTER COLUMN destination_object SET NOT NULL;
   ALTER TABLE record_manifests ALTER COLUMN destination_key SET NOT NULL;
+  ALTER TABLE record_manifests ALTER COLUMN migration_batch_id SET NOT NULL;
+  ALTER TABLE record_manifests ALTER COLUMN batch_key SET NOT NULL;
 
-  -- 7. Add uniqueness constraint only after reconciliation succeeds
+  -- Step 8: Apply Unique Constraint on record_manifests
   IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint WHERE conname = 'uq_record_manifests_run_source'
+    SELECT 1 FROM pg_constraint 
+    WHERE conname = 'uq_record_manifests_run_source'
+      AND conrelid = 'record_manifests'::regclass
+      AND contype = 'u'
   ) THEN 
     ALTER TABLE record_manifests ADD CONSTRAINT uq_record_manifests_run_source UNIQUE (migration_run_id, source_object, source_key);
-  END IF; 
+  END IF;
+
+  -- Step 9: Drop legacy single-column FK if present and add composite foreign key
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'record_manifests_migration_batch_id_fkey'
+      AND conrelid = 'record_manifests'::regclass
+  ) THEN
+    ALTER TABLE record_manifests DROP CONSTRAINT record_manifests_migration_batch_id_fkey;
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'fk_record_manifests_batch_identity'
+      AND conrelid = 'record_manifests'::regclass
+      AND contype = 'f'
+  ) THEN
+    ALTER TABLE record_manifests ADD CONSTRAINT fk_record_manifests_batch_identity 
+      FOREIGN KEY (migration_batch_id, migration_run_id, batch_key) 
+      REFERENCES migration_batches(id, migration_run_id, batch_key) 
+      ON DELETE CASCADE;
+  END IF;
 END $$;
 
 -- Validation Runs

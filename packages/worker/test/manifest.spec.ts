@@ -238,6 +238,10 @@ describe('Batch Manifest & State Machine (FR-EXEC-003)', () => {
         if (text.includes('FAIL_ME') || params?.includes('FAIL_ME')) {
           throw new Error('Simulated database deadlock during manifest insert');
         }
+        if (text.includes('SELECT id, migration_run_id, batch_key FROM migration_batches')) {
+          const key = params?.[1]?.[0] || 'batch_tx_1';
+          return { rows: [{ id: 'mock-batch-id', migration_run_id: 'run_tx', batch_key: key }] };
+        }
         return { rows: [] };
       }),
       release: vi.fn(() => {
@@ -441,30 +445,108 @@ describe('PostgresStorageAdapters Real PostgreSQL Integration (Run 005.15)', () 
     }
   });
 
-  it('enforces foreign key constraint when saving manifest with non-existent migration_batch_id', async (ctx) => {
+  it('rejects manifests with non-existent or unresolvable batchKey', async (ctx) => {
     if (!pool) return ctx.skip();
     const adapter = new PostgresStorageAdapters(pool);
 
-    const nonExistentBatchId = '00000000-0000-0000-0000-000000000099';
     await expect(
       adapter.saveRecordManifests([
         {
           id: crypto.randomUUID(),
           migrationRunId: runId,
-          migrationBatchId: nonExistentBatchId,
-          batchKey: 'batch_invalid',
+          batchKey: 'batch_non_existent',
           sourceObject: 'customers',
-          sourceKey: 'c_fk_fail',
+          sourceKey: 'c_non_existent_batch',
           destinationObject: 'customers_dest',
-          destinationKey: 'c_fk_fail',
+          destinationKey: 'c_non_existent_batch',
           status: 'WRITTEN',
           createdAt: new Date().toISOString(),
         },
       ]),
-    ).rejects.toThrow(/violates foreign key constraint/);
+    ).rejects.toThrow(/does not exist for migration run/);
   });
 
-  it('persists migration_batch_id relationship, preserves batch-key filtering, and round-trips all fields', async (ctx) => {
+  it('rejects manifests with mismatched migrationBatchId and batchKey', async (ctx) => {
+    if (!pool) return ctx.skip();
+    const adapter = new PostgresStorageAdapters(pool);
+
+    // batch_rel_001 resolves to batch1Id, but manifest passes batch2Id
+    await expect(
+      adapter.saveRecordManifests([
+        {
+          id: crypto.randomUUID(),
+          migrationRunId: runId,
+          migrationBatchId: batch2Id,
+          batchKey: 'batch_rel_001',
+          sourceObject: 'customers',
+          sourceKey: 'c_mismatch',
+          destinationObject: 'customers_dest',
+          destinationKey: 'c_mismatch',
+          status: 'WRITTEN',
+          createdAt: new Date().toISOString(),
+        },
+      ]),
+    ).rejects.toThrow(/Mismatched batch relationship/);
+  });
+
+  it('enforces composite foreign key preventing manifest from referencing batch in another migration run', async (ctx) => {
+    if (!pool) return ctx.skip();
+
+    // Create another run and another batch
+    const otherRunId = crypto.randomUUID();
+    const otherBatchId = crypto.randomUUID();
+
+    await pool.query(
+      `INSERT INTO migration_runs (id, workspace_id, project_id, plan_version_id, status)
+       VALUES ($1, $2, $3, $4, 'RUNNING')`,
+      [otherRunId, workspaceId, projectId, planVersionId],
+    );
+    await pool.query(
+      `INSERT INTO migration_batches (id, migration_run_id, batch_key, sequence_no, status)
+       VALUES ($1, $2, 'batch_other_001', 1, 'COMMITTED')`,
+      [otherBatchId, otherRunId],
+    );
+
+    try {
+      // Attempt to link manifest of runId to otherBatchId from otherRunId
+      let fkViolation = false;
+      try {
+        await pool.query(
+          `INSERT INTO record_manifests (
+             id, migration_run_id, migration_batch_id, batch_key, source_object, source_key,
+             destination_object, destination_key, status
+           ) VALUES ($1, $2, $3, 'batch_other_001', 'customers', 'c_cross_run', 'customers_dest', 'c_cross_run', 'WRITTEN')`,
+          [crypto.randomUUID(), runId, otherBatchId],
+        );
+      } catch (err: any) {
+        fkViolation = err.code === '23503'; // foreign_key_violation
+      }
+      expect(fkViolation).toBe(true);
+    } finally {
+      await pool.query(`DELETE FROM migration_batches WHERE migration_run_id = $1`, [otherRunId]).catch(() => {});
+      await pool.query(`DELETE FROM migration_runs WHERE id = $1`, [otherRunId]).catch(() => {});
+    }
+  });
+
+  it('enforces composite foreign key preventing batch_key and migration_batch_id mismatch in raw SQL', async (ctx) => {
+    if (!pool) return ctx.skip();
+
+    let fkViolation = false;
+    try {
+      await pool.query(
+        `INSERT INTO record_manifests (
+           id, migration_run_id, migration_batch_id, batch_key, source_object, source_key,
+           destination_object, destination_key, status
+         ) VALUES ($1, $2, $3, 'batch_rel_002', 'customers', 'c_key_mismatch', 'customers_dest', 'c_key_mismatch', 'WRITTEN')`,
+        [crypto.randomUUID(), runId, batch1Id], // batch1Id paired with batch_rel_002
+      );
+    } catch (err: any) {
+      fkViolation = err.code === '23503';
+    }
+    expect(fkViolation).toBe(true);
+  });
+
+  it('persists valid composite references, preserves batch-key filtering, and round-trips all fields', async (ctx) => {
     if (!pool) return ctx.skip();
     const adapter = new PostgresStorageAdapters(pool);
 
@@ -502,12 +584,13 @@ describe('PostgresStorageAdapters Real PostgreSQL Integration (Run 005.15)', () 
     expect(batch1Manifests.length).toBe(1);
     expect(batch1Manifests[0].sourceKey).toBe('cust_rel_1');
     expect(batch1Manifests[0].migrationBatchId).toBe(batch1Id);
+    expect(batch1Manifests[0].batchKey).toBe('batch_rel_001');
     expect(batch1Manifests[0].destinationObject).toBe('customers_dest');
 
     const allManifests = await adapter.listRecordManifests(runId);
     expect(allManifests.length).toBe(2);
 
-    // Upsert relationship maintenance check: update without specifying migrationBatchId preserves existing batchId
+    // Repeated write check (idempotency): re-saving identical record manifest updates contentHash without duplicates
     await adapter.saveRecordManifests([
       {
         id: crypto.randomUUID(),
@@ -517,21 +600,64 @@ describe('PostgresStorageAdapters Real PostgreSQL Integration (Run 005.15)', () 
         sourceKey: 'cust_rel_1',
         destinationObject: 'customers_dest',
         destinationKey: 'cust_rel_1',
-        contentHash: 'hash_rel_1_updated',
+        contentHash: 'hash_rel_1_repeated',
         status: 'WRITTEN',
         createdAt: new Date().toISOString(),
       },
     ]);
 
-    const updatedManifests = await adapter.listRecordManifests(runId, 'batch_rel_001');
-    expect(updatedManifests.length).toBe(1);
-    expect(updatedManifests[0].contentHash).toBe('hash_rel_1_updated');
-    expect(updatedManifests[0].migrationBatchId).toBe(batch1Id); // Preserved!
+    const repeatedCheck = await adapter.listRecordManifests(runId, 'batch_rel_001');
+    expect(repeatedCheck.length).toBe(1);
+    expect(repeatedCheck[0].contentHash).toBe('hash_rel_1_repeated');
+    expect(repeatedCheck[0].migrationBatchId).toBe(batch1Id);
+
+    // Upsert check: updating with changed batch identity updates both migration_batch_id and batch_key atomically
+    await adapter.saveRecordManifests([
+      {
+        id: crypto.randomUUID(),
+        migrationRunId: runId,
+        batchKey: 'batch_rel_002', // Switched from batch 1 to batch 2
+        sourceObject: 'customers',
+        sourceKey: 'cust_rel_1',
+        destinationObject: 'customers_dest',
+        destinationKey: 'cust_rel_1',
+        contentHash: 'hash_rel_1_moved',
+        status: 'WRITTEN',
+        createdAt: new Date().toISOString(),
+      },
+    ]);
+
+    const batch1AfterMove = await adapter.listRecordManifests(runId, 'batch_rel_001');
+    expect(batch1AfterMove.length).toBe(0);
+
+    const batch2AfterMove = await adapter.listRecordManifests(runId, 'batch_rel_002');
+    expect(batch2AfterMove.length).toBe(2);
+    const movedRecord = batch2AfterMove.find((r) => r.sourceKey === 'cust_rel_1');
+    expect(movedRecord).toBeDefined();
+    expect(movedRecord!.migrationBatchId).toBe(batch2Id);
+    expect(movedRecord!.batchKey).toBe('batch_rel_002');
+    expect(movedRecord!.contentHash).toBe('hash_rel_1_moved');
   });
 
-  it('rejects manifests with null or missing destinationObject or destinationKey', async (ctx) => {
+  it('rejects manifests with null or missing batchKey, destinationObject, or destinationKey', async (ctx) => {
     if (!pool) return ctx.skip();
     const adapter = new PostgresStorageAdapters(pool);
+
+    await expect(
+      adapter.saveRecordManifests([
+        {
+          id: crypto.randomUUID(),
+          migrationRunId: runId,
+          batchKey: '', // Invalid empty
+          sourceObject: 'customers',
+          sourceKey: 'cust_empty_batch_key',
+          destinationObject: 'valid_obj',
+          destinationKey: 'valid_key',
+          status: 'WRITTEN',
+          createdAt: new Date().toISOString(),
+        },
+      ]),
+    ).rejects.toThrow(/missing batchKey/);
 
     await expect(
       adapter.saveRecordManifests([
@@ -577,11 +703,11 @@ describe('PostgresStorageAdapters Real PostgreSQL Integration (Run 005.15)', () 
       `INSERT INTO record_manifests (
          id, migration_run_id, migration_batch_id, batch_key, source_object, source_key,
          destination_object, destination_key, status
-       ) VALUES ($1, $2, $3, 'batch_corrupt', 'customers', 'c_corrupt', NULL, 'cust_corrupt', 'WRITTEN')`,
+       ) VALUES ($1, $2, $3, 'batch_rel_001', 'customers', 'c_corrupt', NULL, 'cust_corrupt', 'WRITTEN')`,
       [corruptId, runId, batch1Id],
     );
 
-    await expect(adapter.listRecordManifests(runId, 'batch_corrupt')).rejects.toThrow(
+    await expect(adapter.listRecordManifests(runId, 'batch_rel_001')).rejects.toThrow(
       /Incomplete record manifest detected/,
     );
 

@@ -8,6 +8,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { calculateCanonicalHash, canonicalizeJson } from '@migrationguard/core';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -807,12 +808,12 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.15)', { t
       }
 
       // 3. Verify record_manifests table: all 20 manifests are WRITTEN, have SHA256 content hashes,
-      // non-null destination coordinates, and valid migration_batch_id foreign keys
+      // non-null destination coordinates, and valid composite foreign keys
       const manifestResult = await testPool.query(
         `SELECT m.source_key, m.destination_key, m.source_object, m.destination_object, 
                 m.status, m.content_hash, m.migration_batch_id, b.batch_key
          FROM record_manifests m
-         JOIN migration_batches b ON b.id = m.migration_batch_id
+         JOIN migration_batches b ON b.id = m.migration_batch_id AND b.batch_key = m.batch_key
          WHERE m.migration_run_id = $1 
          ORDER BY m.source_key ASC`,
         [runId],
@@ -827,7 +828,15 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.15)', { t
         expect(mRow.migration_batch_id).toBeDefined();
         expect(typeof mRow.migration_batch_id).toBe('string');
         expect(mRow.batch_key).toMatch(/^batch_customers_000[123]$/);
-        expect(mRow.content_hash).toMatch(/^sha256:.+$/);
+        expect(mRow.content_hash).toMatch(/^sha256:[a-f0-9]{64}$/);
+
+        // Independent RFC 8785 canonical SHA-256 verification (Requirement 4)
+        const originalSeed = seedCustomers.find((s) => s._id === mRow.source_key);
+        expect(originalSeed).toBeDefined();
+        const expectedCanonicalJson = canonicalizeJson(originalSeed);
+        const expectedDigest = crypto.createHash('sha256').update(expectedCanonicalJson).digest('hex');
+        const expectedContentHash = `sha256:${expectedDigest}`;
+        expect(mRow.content_hash).toBe(expectedContentHash);
       }
 
       // 4. Verify Final Checkpoint Progression

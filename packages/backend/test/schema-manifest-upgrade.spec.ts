@@ -11,7 +11,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const run00514DdlPath = path.resolve(__dirname, 'fixtures/run-005-14-schema.sql');
 
-describe('Manifest Schema Upgrade & Historical Reconciliation (Run 005.18 Complete Fixtures)', () => {
+describe('Manifest Schema Upgrade & Historical Reconciliation (Run 005.19 Complete Schema Parity)', () => {
   let rawPool: pg.Pool;
   const isCi = process.env.CI === 'true';
   const initialEnv = { ...process.env };
@@ -23,6 +23,411 @@ describe('Manifest Schema Upgrade & Historical Reconciliation (Run 005.18 Comple
   const schemaRun00514 = `test_upgrade_run00514_${testSuffix}`;
   const schemaUnconstrained = `test_upgrade_unconstrained_${testSuffix}`;
   const schemaConcurrency = `test_upgrade_concurrency_${testSuffix}`;
+
+  // =========================================================================
+  // Schema Catalog Interfaces & Expected Delta Definitions (Run 005.19)
+  // =========================================================================
+
+  interface ColumnCatalogEntry {
+    table_name: string;
+    column_name: string;
+    ordinal_position: number;
+    column_default: string | null;
+    is_nullable: string; // 'YES' | 'NO'
+    data_type: string;
+    udt_name: string;
+    character_maximum_length: number | null;
+    numeric_precision: number | null;
+    numeric_scale: number | null;
+  }
+
+  interface ConstraintCatalogEntry {
+    table_name: string;
+    constraint_name: string;
+    constraint_type: 'PRIMARY KEY' | 'UNIQUE' | 'FOREIGN KEY' | 'CHECK';
+    definition: string;
+  }
+
+  interface IndexCatalogEntry {
+    table_name: string;
+    index_name: string;
+    index_definition: string;
+  }
+
+  interface SchemaCatalog {
+    tables: string[];
+    columns: Map<string, ColumnCatalogEntry[]>;
+    primaryKeys: Map<string, ConstraintCatalogEntry>;
+    uniqueConstraints: Map<string, ConstraintCatalogEntry[]>;
+    foreignKeys: Map<string, ConstraintCatalogEntry[]>;
+    checkConstraints: Map<string, ConstraintCatalogEntry[]>;
+    indexes: Map<string, IndexCatalogEntry[]>;
+  }
+
+  const EXPECTED_SCHEMA_DELTA = {
+    addedTables: [
+      'record_manifest_historical_archive',
+      'manifest_reconciliation_reports',
+    ],
+    removedTables: [] as string[],
+    modifiedTables: {
+      record_manifests: {
+        nullabilityChanges: {
+          destination_object: { from: 'YES', to: 'NO' },
+          destination_key: { from: 'YES', to: 'NO' },
+          migration_batch_id: { from: 'YES', to: 'NO' },
+          batch_key: { from: 'YES', to: 'NO' },
+        },
+      },
+      migration_batches: {},
+    },
+  };
+
+  async function captureSchemaCatalog(client: pg.PoolClient, schemaName: string): Promise<SchemaCatalog> {
+    await client.query(`SET search_path TO ${schemaName}`);
+
+    // 1. Tables (BASE TABLE)
+    const tablesRes = await client.query(`
+      SELECT table_name 
+      FROM information_schema.tables 
+      WHERE table_schema = $1 AND table_type = 'BASE TABLE'
+      ORDER BY table_name
+    `, [schemaName]);
+    const tables: string[] = tablesRes.rows.map((r: any) => r.table_name);
+
+    // 2. Columns
+    const colsRes = await client.query(`
+      SELECT 
+        table_name, column_name, ordinal_position, column_default,
+        is_nullable, data_type, udt_name, character_maximum_length,
+        numeric_precision, numeric_scale
+      FROM information_schema.columns
+      WHERE table_schema = $1
+      ORDER BY table_name, ordinal_position
+    `, [schemaName]);
+
+    const columns = new Map<string, ColumnCatalogEntry[]>();
+    for (const r of colsRes.rows) {
+      if (!columns.has(r.table_name)) columns.set(r.table_name, []);
+      const normalizedDefault = r.column_default ? r.column_default.replaceAll(`${schemaName}.`, '') : null;
+      columns.get(r.table_name)!.push({
+        table_name: r.table_name,
+        column_name: r.column_name,
+        ordinal_position: Number(r.ordinal_position),
+        column_default: normalizedDefault,
+        is_nullable: r.is_nullable,
+        data_type: r.data_type,
+        udt_name: r.udt_name,
+        character_maximum_length: r.character_maximum_length,
+        numeric_precision: r.numeric_precision,
+        numeric_scale: r.numeric_scale,
+      });
+    }
+
+    // 3. Constraints from pg_constraint
+    const constraintsRes = await client.query(`
+      SELECT 
+        t.relname AS table_name,
+        c.conname AS constraint_name,
+        c.contype AS constraint_type_code,
+        pg_get_constraintdef(c.oid) AS raw_definition
+      FROM pg_constraint c
+      JOIN pg_class t ON c.conrelid = t.oid
+      JOIN pg_namespace n ON t.relnamespace = n.oid
+      WHERE n.nspname = $1
+      ORDER BY t.relname, c.conname
+    `, [schemaName]);
+
+    const primaryKeys = new Map<string, ConstraintCatalogEntry>();
+    const uniqueConstraints = new Map<string, ConstraintCatalogEntry[]>();
+    const foreignKeys = new Map<string, ConstraintCatalogEntry[]>();
+    const checkConstraints = new Map<string, ConstraintCatalogEntry[]>();
+
+    for (const r of constraintsRes.rows) {
+      const normalizedDef = (r.raw_definition || '')
+        .replaceAll(`${schemaName}.`, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      const entry: ConstraintCatalogEntry = {
+        table_name: r.table_name,
+        constraint_name: r.constraint_name,
+        constraint_type: r.constraint_type_code === 'p' ? 'PRIMARY KEY'
+          : r.constraint_type_code === 'u' ? 'UNIQUE'
+          : r.constraint_type_code === 'f' ? 'FOREIGN KEY'
+          : 'CHECK',
+        definition: normalizedDef,
+      };
+
+      if (r.constraint_type_code === 'p') {
+        primaryKeys.set(r.table_name, entry);
+      } else if (r.constraint_type_code === 'u') {
+        if (!uniqueConstraints.has(r.table_name)) uniqueConstraints.set(r.table_name, []);
+        uniqueConstraints.get(r.table_name)!.push(entry);
+      } else if (r.constraint_type_code === 'f') {
+        if (!foreignKeys.has(r.table_name)) foreignKeys.set(r.table_name, []);
+        foreignKeys.get(r.table_name)!.push(entry);
+      } else if (r.constraint_type_code === 'c') {
+        if (!checkConstraints.has(r.table_name)) checkConstraints.set(r.table_name, []);
+        checkConstraints.get(r.table_name)!.push(entry);
+      }
+    }
+
+    // 4. Indexes from pg_indexes
+    const idxRes = await client.query(`
+      SELECT tablename AS table_name, indexname AS index_name, indexdef AS raw_indexdef
+      FROM pg_indexes
+      WHERE schemaname = $1
+      ORDER BY tablename, indexname
+    `, [schemaName]);
+
+    const indexes = new Map<string, IndexCatalogEntry[]>();
+    for (const r of idxRes.rows) {
+      const normalizedIdxDef = (r.raw_indexdef || '')
+        .replaceAll(`${schemaName}.`, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      if (!indexes.has(r.table_name)) indexes.set(r.table_name, []);
+      indexes.get(r.table_name)!.push({
+        table_name: r.table_name,
+        index_name: r.index_name,
+        index_definition: normalizedIdxDef,
+      });
+    }
+
+    return {
+      tables,
+      columns,
+      primaryKeys,
+      uniqueConstraints,
+      foreignKeys,
+      checkConstraints,
+      indexes,
+    };
+  }
+
+  function assertSchemaCatalogParity(
+    baseline: SchemaCatalog,
+    postUpgrade: SchemaCatalog,
+    schemaName: string,
+  ) {
+    // 1. Table Parity & Delta Verification
+    expect(baseline.tables.length, 'Baseline must contain all 22 Run 005.14 historical tables').toBe(22);
+    expect(postUpgrade.tables.length, 'Post-upgrade catalog must contain exactly 24 tables (22 historical + 2 archive/reconciliation)').toBe(24);
+
+    // Assert every historical table exists in post-upgrade
+    for (const tbl of baseline.tables) {
+      expect(postUpgrade.tables.includes(tbl), `Historical table ${tbl} must be preserved post-upgrade`).toBe(true);
+    }
+
+    // Assert new tables match expected additions exactly
+    const addedTables = postUpgrade.tables.filter((t) => !baseline.tables.includes(t));
+    expect(addedTables.sort()).toEqual([...EXPECTED_SCHEMA_DELTA.addedTables].sort());
+
+    // Assert no unexpected tables were removed
+    const removedTables = baseline.tables.filter((t) => !postUpgrade.tables.includes(t));
+    expect(removedTables).toEqual(EXPECTED_SCHEMA_DELTA.removedTables);
+
+    // 2. Comprehensive Column Definitions Across ALL 22 Historical Tables
+    for (const tbl of baseline.tables) {
+      const baseCols = baseline.columns.get(tbl) || [];
+      const postCols = postUpgrade.columns.get(tbl) || [];
+
+      expect(
+        postCols.length,
+        `Table ${tbl} column count must match historical baseline (expected ${baseCols.length}, got ${postCols.length})`,
+      ).toBe(baseCols.length);
+
+      const baseColMap = new Map(baseCols.map((c) => [c.column_name, c]));
+      const postColMap = new Map(postCols.map((c) => [c.column_name, c]));
+
+      // All column names and ordinals must match
+      expect(
+        Array.from(postColMap.keys()),
+        `Table ${tbl} columns must preserve exact names and ordering`,
+      ).toEqual(Array.from(baseColMap.keys()));
+
+      for (const [colName, baseCol] of baseColMap.entries()) {
+        const postCol = postColMap.get(colName)!;
+        expect(postCol, `Column ${tbl}.${colName} must exist in post-upgrade catalog`).toBeDefined();
+
+        // Invariant column attributes
+        expect(postCol.ordinal_position, `Column ${tbl}.${colName} ordinal position mismatch`).toBe(baseCol.ordinal_position);
+        expect(postCol.data_type, `Column ${tbl}.${colName} data type mismatch`).toBe(baseCol.data_type);
+        expect(postCol.udt_name, `Column ${tbl}.${colName} UDT mismatch`).toBe(baseCol.udt_name);
+        expect(postCol.character_maximum_length, `Column ${tbl}.${colName} max length mismatch`).toBe(baseCol.character_maximum_length);
+        expect(postCol.numeric_precision, `Column ${tbl}.${colName} numeric precision mismatch`).toBe(baseCol.numeric_precision);
+        expect(postCol.numeric_scale, `Column ${tbl}.${colName} numeric scale mismatch`).toBe(baseCol.numeric_scale);
+        expect(postCol.column_default, `Column ${tbl}.${colName} default value mismatch`).toBe(baseCol.column_default);
+
+        // Nullability: check whether this column has an explicit intended change
+        const nullDelta = (EXPECTED_SCHEMA_DELTA.modifiedTables as any)[tbl]?.nullabilityChanges?.[colName];
+        if (nullDelta) {
+          expect(baseCol.is_nullable, `Baseline nullability for ${tbl}.${colName} must match expected delta 'from'`).toBe(nullDelta.from);
+          expect(postCol.is_nullable, `Post-upgrade nullability for ${tbl}.${colName} must match expected delta 'to'`).toBe(nullDelta.to);
+        } else {
+          expect(postCol.is_nullable, `Column ${tbl}.${colName} nullability unexpectedly changed`).toBe(baseCol.is_nullable);
+        }
+      }
+    }
+
+    // 3. Primary Key Preservation Across ALL 22 Historical Tables
+    for (const tbl of baseline.tables) {
+      const basePk = baseline.primaryKeys.get(tbl);
+      const postPk = postUpgrade.primaryKeys.get(tbl);
+
+      expect(basePk, `Historical table ${tbl} must have primary key in baseline`).toBeDefined();
+      expect(postPk, `Historical table ${tbl} must preserve primary key post-upgrade`).toBeDefined();
+      expect(postPk!.constraint_name, `Primary key name mismatch on table ${tbl}`).toBe(basePk!.constraint_name);
+      expect(postPk!.definition, `Primary key definition mismatch on table ${tbl}`).toBe(basePk!.definition);
+    }
+
+    // Verify primary keys on newly added tables
+    for (const addedTbl of EXPECTED_SCHEMA_DELTA.addedTables) {
+      expect(
+        postUpgrade.primaryKeys.get(addedTbl),
+        `Newly added table ${addedTbl} must have primary key`,
+      ).toBeDefined();
+    }
+
+    // 4. Unique Constraints Across ALL 22 Historical Tables
+    for (const tbl of baseline.tables) {
+      const baseUniq = baseline.uniqueConstraints.get(tbl) || [];
+      const postUniq = postUpgrade.uniqueConstraints.get(tbl) || [];
+
+      if (tbl === 'migration_batches') {
+        // Exactly 1 added unique constraint: uq_migration_batches_identity
+        expect(baseUniq.length, 'migration_batches must have exactly 1 unique constraint in baseline').toBe(1);
+        expect(postUniq.length, 'migration_batches must have exactly 2 unique constraints post-upgrade').toBe(2);
+
+        const baseRunKey = baseUniq.find((u) => u.constraint_name === 'uq_batch_run_key');
+        const postRunKey = postUniq.find((u) => u.constraint_name === 'uq_batch_run_key');
+        expect(postRunKey, 'uq_batch_run_key must be preserved').toBeDefined();
+        expect(postRunKey!.definition).toBe(baseRunKey!.definition);
+
+        const postIdentity = postUniq.find((u) => u.constraint_name === 'uq_migration_batches_identity');
+        expect(postIdentity, 'uq_migration_batches_identity must be added').toBeDefined();
+        expect(postIdentity!.definition).toMatch(/UNIQUE \(id, migration_run_id, batch_key\)/);
+      } else {
+        // Unaffected tables: exact unique constraint preservation
+        expect(
+          postUniq.length,
+          `Table ${tbl} unique constraint count changed unexpectedly`,
+        ).toBe(baseUniq.length);
+
+        for (const baseU of baseUniq) {
+          const postU = postUniq.find((u) => u.constraint_name === baseU.constraint_name);
+          expect(postU, `Unique constraint ${baseU.constraint_name} on ${tbl} missing post-upgrade`).toBeDefined();
+          expect(postU!.definition, `Unique constraint ${baseU.constraint_name} definition mismatch`).toBe(baseU.definition);
+        }
+      }
+    }
+
+    // 5. Foreign Key Constraints Across ALL 22 Historical Tables
+    for (const tbl of baseline.tables) {
+      const baseFks = baseline.foreignKeys.get(tbl) || [];
+      const postFks = postUpgrade.foreignKeys.get(tbl) || [];
+
+      if (tbl === 'record_manifests') {
+        // Intended FK change: legacy FK dropped, composite FK added, run FK preserved
+        expect(baseFks.length, 'record_manifests baseline foreign keys').toBe(2);
+        expect(postFks.length, 'record_manifests post-upgrade foreign keys').toBe(2);
+
+        // Legacy single FK must be dropped
+        const postLegacyFk = postFks.find((f) => f.constraint_name === 'record_manifests_migration_batch_id_fkey');
+        expect(postLegacyFk, 'Legacy single-column FK must be dropped').toBeUndefined();
+
+        // Composite FK must be added
+        const postCompositeFk = postFks.find((f) => f.constraint_name === 'fk_record_manifests_batch_identity');
+        expect(postCompositeFk, 'Composite FK fk_record_manifests_batch_identity must exist').toBeDefined();
+        expect(postCompositeFk!.definition).toMatch(
+          /FOREIGN KEY \(migration_batch_id, migration_run_id, batch_key\) REFERENCES migration_batches\(id, migration_run_id, batch_key\) ON DELETE CASCADE/,
+        );
+
+        // Run FK must be preserved
+        const baseRunFk = baseFks.find((f) => f.constraint_name === 'record_manifests_migration_run_id_fkey');
+        const postRunFk = postFks.find((f) => f.constraint_name === 'record_manifests_migration_run_id_fkey');
+        expect(postRunFk, 'record_manifests_migration_run_id_fkey must be preserved').toBeDefined();
+        expect(postRunFk!.definition).toBe(baseRunFk!.definition);
+      } else {
+        // Unaffected tables: exact foreign key preservation
+        expect(
+          postFks.length,
+          `Table ${tbl} foreign key count changed unexpectedly`,
+        ).toBe(baseFks.length);
+
+        for (const baseFk of baseFks) {
+          const postFk = postFks.find((f) => f.constraint_name === baseFk.constraint_name);
+          expect(postFk, `Foreign key ${baseFk.constraint_name} on ${tbl} missing post-upgrade`).toBeDefined();
+          expect(postFk!.definition, `Foreign key ${baseFk.constraint_name} definition mismatch`).toBe(baseFk.definition);
+        }
+      }
+    }
+
+    // 6. Check Constraints Across ALL 22 Historical Tables
+    for (const tbl of baseline.tables) {
+      const baseChks = baseline.checkConstraints.get(tbl) || [];
+      const postChks = postUpgrade.checkConstraints.get(tbl) || [];
+      expect(postChks.length, `Table ${tbl} check constraint count mismatch`).toBe(baseChks.length);
+      for (const baseC of baseChks) {
+        const postC = postChks.find((c) => c.constraint_name === baseC.constraint_name);
+        expect(postC, `Check constraint ${baseC.constraint_name} on ${tbl} missing`).toBeDefined();
+        expect(postC!.definition, `Check constraint ${baseC.constraint_name} definition mismatch`).toBe(baseC.definition);
+      }
+    }
+
+    // 7. Index Definitions Across ALL 22 Historical Tables
+    const expectedSecondaryIndexes = [
+      'ix_workspaces_status',
+      'ix_members_user',
+      'ix_projects_workspace',
+      'ix_connections_workspace',
+      'ix_snapshots_connection',
+      'ix_plans_workspace_project',
+      'ix_runs_workspace_status',
+      'ix_batches_run_seq',
+      'ix_discrepancies_validation_status',
+      'ix_audit_workspace_date',
+    ];
+
+    const allPostIndexes = Array.from(postUpgrade.indexes.values()).flat();
+    const allPostIndexNames = new Set(allPostIndexes.map((idx) => idx.index_name));
+
+    for (const idxName of expectedSecondaryIndexes) {
+      expect(allPostIndexNames.has(idxName), `Secondary index ${idxName} must exist post-upgrade`).toBe(true);
+    }
+
+    for (const tbl of baseline.tables) {
+      const baseIdxs = baseline.indexes.get(tbl) || [];
+      const postIdxs = postUpgrade.indexes.get(tbl) || [];
+
+      if (tbl === 'migration_batches') {
+        // Exactly 1 new index added for uq_migration_batches_identity
+        expect(postIdxs.length, 'migration_batches index count').toBe(baseIdxs.length + 1);
+        const addedIdx = postIdxs.find((idx) => idx.index_name === 'uq_migration_batches_identity');
+        expect(addedIdx, 'uq_migration_batches_identity index must be present').toBeDefined();
+        for (const baseIdx of baseIdxs) {
+          const postIdx = postIdxs.find((idx) => idx.index_name === baseIdx.index_name);
+          expect(postIdx, `Index ${baseIdx.index_name} on ${tbl} must be preserved`).toBeDefined();
+          expect(postIdx!.index_definition).toBe(baseIdx.index_definition);
+        }
+      } else {
+        expect(postIdxs.length, `Table ${tbl} index count mismatch`).toBe(baseIdxs.length);
+        for (const baseIdx of baseIdxs) {
+          const postIdx = postIdxs.find((idx) => idx.index_name === baseIdx.index_name);
+          expect(postIdx, `Index ${baseIdx.index_name} on ${tbl} must be preserved`).toBeDefined();
+          expect(postIdx!.index_definition).toBe(baseIdx.index_definition);
+        }
+      }
+    }
+
+    // 8. New Archive & Report Table Structure Assertions
+    const archiveCols = postUpgrade.columns.get('record_manifest_historical_archive') || [];
+    expect(archiveCols.length, 'record_manifest_historical_archive column count').toBe(17);
+    const reportCols = postUpgrade.columns.get('manifest_reconciliation_reports') || [];
+    expect(reportCols.length, 'manifest_reconciliation_reports column count').toBe(9);
+  }
 
   // Helper to setup isolated schema with uuid helper
   async function createIsolatedSchema(client: pg.PoolClient, schemaName: string) {
@@ -138,10 +543,14 @@ describe('Manifest Schema Upgrade & Historical Reconciliation (Run 005.18 Comple
     const runId = crypto.randomUUID();
     const batchId = crypto.randomUUID();
 
+    let baselineCatalog: SchemaCatalog;
     const client = await rawPool.connect();
     try {
       // Step 1: Initialize the isolated schema using the actual complete Run 005.14 DDL
       await createRun00514LegacySchema(client, schemaRun00514);
+
+      // Capture complete baseline schema catalog for the isolated Run 005.14 fixture (Run 005.19)
+      baselineCatalog = await captureSchemaCatalog(client, schemaRun00514);
 
       // Verify Run 005.14 baseline state before running migrations:
       // a) Pre-existing tables exist (22 tables)
@@ -326,127 +735,10 @@ describe('Manifest Schema Upgrade & Historical Reconciliation (Run 005.18 Comple
         await checkClient.query(`SET search_path TO ${schemaRun00514}`);
 
         // =====================================================================
-        // Complete Post-Upgrade Schema Fidelity & Parity Assertions
+        // Complete Post-Upgrade Schema Fidelity & Catalog Parity Assertions (Run 005.19)
         // =====================================================================
-
-        // 1. Table existence: exactly 24 tables present (22 original + 2 new archive tables)
-        const postTablesRes = await checkClient.query(`
-          SELECT table_name FROM information_schema.tables 
-          WHERE table_schema = $1 AND table_type = 'BASE TABLE'
-        `, [schemaRun00514]);
-        const postTableNames = new Set(postTablesRes.rows.map((r: any) => r.table_name));
-        expect(postTableNames.size).toBe(24);
-
-        const expectedTables = [
-          'workspaces', 'users', 'workspace_members', 'projects', 'connections',
-          'connection_secrets', 'schema_snapshots', 'profile_runs', 'migration_plans',
-          'mapping_versions', 'migration_plan_versions', 'approvals', 'migration_runs',
-          'migration_batches', 'id_mappings', 'record_manifests', 'validation_runs',
-          'validation_check_results', 'discrepancies', 'audit_events', 'report_artifacts',
-          'ai_traces', 'record_manifest_historical_archive', 'manifest_reconciliation_reports',
-        ];
-        for (const tbl of expectedTables) {
-          expect(postTableNames.has(tbl), `Expected table ${tbl} to exist post-upgrade`).toBe(true);
-        }
-
-        // 2. Column existence and types: verify pre-existing columns remain intact
-        const colsRes = await checkClient.query(`
-          SELECT table_name, column_name, data_type, is_nullable, column_default
-          FROM information_schema.columns
-          WHERE table_schema = $1
-          ORDER BY table_name, ordinal_position
-        `, [schemaRun00514]);
-
-        const colsByTable = new Map<string, Map<string, any>>();
-        for (const r of colsRes.rows) {
-          if (!colsByTable.has(r.table_name)) colsByTable.set(r.table_name, new Map());
-          colsByTable.get(r.table_name)!.set(r.column_name, r);
-        }
-
-        // Prove migration_batches retains all 15 columns
-        const mbPostCols = colsByTable.get('migration_batches')!;
-        expect(mbPostCols.size).toBe(15);
-        expect(mbPostCols.has('source_cursor_start')).toBe(true);
-        expect(mbPostCols.has('source_cursor_end')).toBe(true);
-        expect(mbPostCols.has('records_read')).toBe(true);
-        expect(mbPostCols.has('records_written')).toBe(true);
-        expect(mbPostCols.has('attempt_count')).toBe(true);
-        expect(mbPostCols.has('error_summary')).toBe(true);
-
-        // Prove connections retains config_json, secret_ref, credential_version
-        const connPostCols = colsByTable.get('connections')!;
-        expect(connPostCols.has('config_json')).toBe(true);
-        expect(connPostCols.has('secret_ref')).toBe(true);
-        expect(connPostCols.has('credential_version')).toBe(true);
-
-        // Prove projects retains description, status, created_by
-        const projPostCols = colsByTable.get('projects')!;
-        expect(projPostCols.has('description')).toBe(true);
-        expect(projPostCols.has('status')).toBe(true);
-
-        // Prove record_manifest_historical_archive has all 17 archive columns
-        const archCols = colsByTable.get('record_manifest_historical_archive')!;
-        expect(archCols.has('original_manifest_id')).toBe(true);
-        expect(archCols.has('reconciliation_reason')).toBe(true);
-        expect(archCols.has('reconciliation_policy')).toBe(true);
-        expect(archCols.has('reconciliation_timestamp')).toBe(true);
-        expect(archCols.has('reconciled_by')).toBe(true);
-        expect(archCols.has('original_created_at')).toBe(true);
-
-        // Prove manifest_reconciliation_reports has all audit columns
-        const repCols = colsByTable.get('manifest_reconciliation_reports')!;
-        expect(repCols.has('total_duplicates_detected')).toBe(true);
-        expect(repCols.has('distinct_identities_affected')).toBe(true);
-        expect(repCols.has('archived_record_count')).toBe(true);
-        expect(repCols.has('report_json')).toBe(true);
-
-        // 3. Nullability: Verify NOT NULL constraints applied to active record_manifests
-        const rmCols = colsByTable.get('record_manifests')!;
-        expect(rmCols.get('destination_object').is_nullable).toBe('NO');
-        expect(rmCols.get('destination_key').is_nullable).toBe('NO');
-        expect(rmCols.get('migration_batch_id').is_nullable).toBe('NO');
-        expect(rmCols.get('batch_key').is_nullable).toBe('NO');
-        expect(rmCols.get('source_object').is_nullable).toBe('NO');
-        expect(rmCols.get('source_key').is_nullable).toBe('NO');
-        expect(rmCols.get('migration_run_id').is_nullable).toBe('NO');
-
-        // 4. Constraints: Unique constraints and Foreign keys
-        const constraintsRes = await checkClient.query(`
-          SELECT tc.table_name, tc.constraint_name, tc.constraint_type
-          FROM information_schema.table_constraints tc
-          WHERE tc.table_schema = $1
-        `, [schemaRun00514]);
-        const constraintsByTable = new Map<string, Map<string, string>>();
-        for (const r of constraintsRes.rows) {
-          if (!constraintsByTable.has(r.table_name)) constraintsByTable.set(r.table_name, new Map());
-          constraintsByTable.get(r.table_name)!.set(r.constraint_name, r.constraint_type);
-        }
-
-        // Verify record_manifests constraints
-        const rmConstraints = constraintsByTable.get('record_manifests')!;
-        expect(rmConstraints.get('uq_record_manifests_run_source')).toBe('UNIQUE');
-        expect(rmConstraints.get('fk_record_manifests_batch_identity')).toBe('FOREIGN KEY');
-        expect(rmConstraints.has('record_manifests_migration_batch_id_fkey')).toBe(false); // Legacy FK dropped!
-
-        // Verify migration_batches constraints
-        const mbConstraints = constraintsByTable.get('migration_batches')!;
-        expect(mbConstraints.get('uq_batch_run_key')).toBe('UNIQUE');
-        expect(mbConstraints.get('uq_migration_batches_identity')).toBe('UNIQUE');
-
-        // 5. Indexes: Verify all 10 performance and isolation indexes remain intact
-        const idxRes = await checkClient.query(`
-          SELECT indexname FROM pg_indexes WHERE schemaname = $1
-        `, [schemaRun00514]);
-        const idxNames = new Set(idxRes.rows.map((r: any) => r.indexname));
-        const expectedIndexes = [
-          'ix_workspaces_status', 'ix_members_user', 'ix_projects_workspace',
-          'ix_connections_workspace', 'ix_snapshots_connection', 'ix_plans_workspace_project',
-          'ix_runs_workspace_status', 'ix_batches_run_seq', 'ix_discrepancies_validation_status',
-          'ix_audit_workspace_date',
-        ];
-        for (const idx of expectedIndexes) {
-          expect(idxNames.has(idx), `Expected index ${idx} to exist post-upgrade`).toBe(true);
-        }
+        const postUpgradeCatalog = await captureSchemaCatalog(checkClient, schemaRun00514);
+        assertSchemaCatalogParity(baselineCatalog, postUpgradeCatalog, schemaRun00514);
 
         // =====================================================================
         // Data Integrity & Active Record Resolution Assertions

@@ -2,6 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   canonicalizeJson,
+  canonicalizeValue,
   calculateCanonicalHash,
   calculateRecordHash,
   calculatePlanHash,
@@ -435,5 +436,169 @@ describe('Canonical Hashing & RFC 8785 Compliance', () => {
       objects: [{ source: { collection: 'users' }, destination: { table: 'users' } }],
     };
     assert.equal(calculateMappingHash(mapping), calculateMappingHash({ ...mapping }));
+  });
+
+  // =========================================================================
+  // canonicalizeValue Direct Regression & Recursion Integrity (Run 005.19)
+  // =========================================================================
+
+  describe('canonicalizeValue Direct Regression & Recursion Integrity', () => {
+    it('allows a shared nested object appearing under two different properties without false positive', () => {
+      const shared = { name: 'Shared Config', tier: 1 };
+      const doc = {
+        primary: shared,
+        backup: shared,
+      };
+
+      const res = canonicalizeValue(doc) as any;
+      assert.deepEqual(res, {
+        backup: { name: 'Shared Config', tier: 1 },
+        primary: { name: 'Shared Config', tier: 1 },
+      });
+    });
+
+    it('allows a shared object appearing multiple times in an array without false positive', () => {
+      const item = { id: 'item_1', active: true };
+      const doc = {
+        list: [item, item, { ...item }, item],
+      };
+
+      const res = canonicalizeValue(doc) as any;
+      assert.deepEqual(res, {
+        list: [
+          { active: true, id: 'item_1' },
+          { active: true, id: 'item_1' },
+          { active: true, id: 'item_1' },
+          { active: true, id: 'item_1' },
+        ],
+      });
+    });
+
+    it('allows reuse of the same BSON-like ObjectId and Decimal128 instances across multiple properties', () => {
+      const oid = {
+        _bsontype: 'ObjectId',
+        toString: () => '507f1f77bcf86cd799439011',
+        toHexString: () => '507f1f77bcf86cd799439011',
+      };
+      const dec = {
+        _bsontype: 'Decimal128',
+        toString: () => '999.99',
+      };
+      const doc = {
+        createdById: oid,
+        updatedById: oid,
+        amount: dec,
+        confirmedAmount: dec,
+      };
+
+      const res = canonicalizeValue(doc) as any;
+      assert.deepEqual(res, {
+        amount: '999.99',
+        confirmedAmount: '999.99',
+        createdById: '507f1f77bcf86cd799439011',
+        updatedById: '507f1f77bcf86cd799439011',
+      });
+    });
+
+    it('explicitly detects and rejects direct circular objects in canonicalizeValue', () => {
+      const circular: Record<string, any> = { a: 1 };
+      circular.self = circular;
+
+      assert.throws(
+        () => canonicalizeValue(circular),
+        /Converting circular structure to JSON|Circular reference detected/,
+      );
+    });
+
+    it('explicitly detects and rejects direct circular arrays in canonicalizeValue', () => {
+      const arr: any[] = [1, 2];
+      arr.push(arr);
+
+      assert.throws(
+        () => canonicalizeValue(arr),
+        /Converting circular structure to JSON|Circular reference detected/,
+      );
+    });
+
+    it('explicitly detects and rejects nested circular references in canonicalizeValue', () => {
+      const a: any = { name: 'A' };
+      const b: any = { name: 'B', toA: a };
+      const c: any = { name: 'C', toB: b };
+      a.toC = c;
+
+      assert.throws(
+        () => canonicalizeValue(a),
+        /Converting circular structure to JSON|Circular reference detected/,
+      );
+    });
+
+    it('explicitly rejects isolated high surrogates in string values in canonicalizeValue', () => {
+      assert.throws(
+        () => canonicalizeValue({ test: 'LoneHigh\uD800' }),
+        /Invalid Unicode string value|lone surrogate/i,
+      );
+      assert.throws(
+        () => canonicalizeValue('\uD800'),
+        /Invalid Unicode string value|lone surrogate/i,
+      );
+      assert.throws(
+        () => canonicalizeValue({ test: '\uD800\uD800' }),
+        /Invalid Unicode string value|lone surrogate/i,
+      );
+      assert.throws(
+        () => canonicalizeValue(['valid', '\uD800malformed']),
+        /Invalid Unicode string value|lone surrogate/i,
+      );
+    });
+
+    it('explicitly rejects isolated low surrogates in string values in canonicalizeValue', () => {
+      assert.throws(
+        () => canonicalizeValue({ test: 'LoneLow\uDC00' }),
+        /Invalid Unicode string value|lone surrogate/i,
+      );
+      assert.throws(
+        () => canonicalizeValue('\uDC00'),
+        /Invalid Unicode string value|lone surrogate/i,
+      );
+      assert.throws(
+        () => canonicalizeValue({ test: '\uDC00\uDC00' }),
+        /Invalid Unicode string value|lone surrogate/i,
+      );
+      assert.throws(
+        () => canonicalizeValue(['valid', 'prefix\uDC00suffix']),
+        /Invalid Unicode string value|lone surrogate/i,
+      );
+    });
+
+    it('explicitly rejects malformed surrogate pairs in object keys / property names in canonicalizeValue', () => {
+      assert.throws(
+        () => canonicalizeValue({ ['bad\uD800key']: 123 }),
+        /Invalid Unicode property name|lone surrogate/i,
+      );
+      assert.throws(
+        () => canonicalizeValue({ ['bad\uDC00key']: 456 }),
+        /Invalid Unicode property name|lone surrogate/i,
+      );
+    });
+
+    it('accepts valid BMP and supplementary Unicode characters in canonicalizeValue', () => {
+      const doc = {
+        latin: 'Café & naïve résumé',
+        cyrillic: 'Привет мир',
+        cjk: '你好世界 快適',
+        greek: 'Ελληνικά',
+        mathVar: '𝒳 \uD835\uDCB3',
+        status: '🚀 Ready 😀',
+      };
+      const res = canonicalizeValue(doc) as any;
+      assert.deepEqual(res, {
+        cjk: '你好世界 快適',
+        cyrillic: 'Привет мир',
+        greek: 'Ελληνικά',
+        latin: 'Café & naïve résumé',
+        mathVar: '𝒳 𝒳',
+        status: '🚀 Ready 😀',
+      });
+    });
   });
 });

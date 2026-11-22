@@ -8,7 +8,32 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { calculateCanonicalHash, canonicalizeJson } from '@migrationguard/core';
+
+/**
+ * Independent RFC 8785 JSON Canonicalization Oracle (Test-Only).
+ * Implemented independently of production library to verify the hash contract without shared code.
+ */
+function independentCanonicalize(value: unknown): string {
+  if (value === null || typeof value === 'boolean' || typeof value === 'string') {
+    return JSON.stringify(value);
+  }
+  if (typeof value === 'number') {
+    return Object.is(value, -0) ? '0' : JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return '[' + value.map(independentCanonicalize).join(',') + ']';
+  }
+  if (typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    // UTF-16 code unit lexicographic sort per RFC 8785 §3.2.3
+    const sortedKeys = Object.keys(obj)
+      .filter((k) => obj[k] !== undefined)
+      .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    const parts = sortedKeys.map((k) => `${JSON.stringify(k)}:${independentCanonicalize(obj[k])}`);
+    return '{' + parts.join(',') + '}';
+  }
+  return JSON.stringify(value);
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -784,8 +809,10 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.15)', { t
 
         const rowMeta = typeof destRow.metadata === 'string' ? JSON.parse(destRow.metadata) : destRow.metadata;
         expect(rowMeta).toBeDefined();
-        expect(rowMeta.seededBy).toBe(seed.metadata.seededBy);
-        expect(rowMeta.sequence).toBe(seed.metadata.sequence);
+        // Deep metadata equality
+        expect(rowMeta).toEqual(seed.metadata);
+        // Confirm no extra or missing metadata properties
+        expect(Object.keys(rowMeta).sort()).toEqual(Object.keys(seed.metadata).sort());
       }
 
       // 2. Verify id_mappings table: all 20 records mapped with correct source & destination coordinates
@@ -830,10 +857,11 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.15)', { t
         expect(mRow.batch_key).toMatch(/^batch_customers_000[123]$/);
         expect(mRow.content_hash).toMatch(/^sha256:[a-f0-9]{64}$/);
 
-        // Independent RFC 8785 canonical SHA-256 verification (Requirement 4)
+        // Independent RFC 8785 canonical SHA-256 verification (Requirement 2 & 4)
+        // Uses independent test-only oracle completely decoupled from @migrationguard/core
         const originalSeed = seedCustomers.find((s) => s._id === mRow.source_key);
         expect(originalSeed).toBeDefined();
-        const expectedCanonicalJson = canonicalizeJson(originalSeed);
+        const expectedCanonicalJson = independentCanonicalize(originalSeed);
         const expectedDigest = crypto.createHash('sha256').update(expectedCanonicalJson).digest('hex');
         const expectedContentHash = `sha256:${expectedDigest}`;
         expect(mRow.content_hash).toBe(expectedContentHash);

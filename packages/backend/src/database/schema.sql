@@ -246,6 +246,7 @@ DECLARE
   unresolved_coords_count INTEGER := 0;
   unresolved_batch_count INTEGER := 0;
   total_archived INTEGER := 0;
+  r RECORD;
 BEGIN 
   -- Step 0: Acquire PostgreSQL advisory transaction lock and table locks for exclusive migration serialization
   PERFORM pg_advisory_xact_lock(hashtext('migrationguard_schema_migrations'));
@@ -447,6 +448,19 @@ BEGIN
   ) THEN
     ALTER TABLE record_manifests DROP CONSTRAINT record_manifests_migration_batch_id_fkey;
   END IF;
+
+  FOR r IN (
+    SELECT c.conname 
+    FROM pg_constraint c
+    JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey)
+    WHERE c.conrelid = 'record_manifests'::regclass
+      AND c.contype = 'f'
+      AND c.conname != 'fk_record_manifests_batch_identity'
+      AND a.attname = 'migration_batch_id'
+      AND array_length(c.conkey, 1) = 1
+  ) LOOP
+    EXECUTE 'ALTER TABLE record_manifests DROP CONSTRAINT IF EXISTS ' || quote_ident(r.conname);
+  END LOOP;
 
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint

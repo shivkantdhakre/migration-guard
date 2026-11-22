@@ -15,9 +15,11 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   private pool: pg.Pool | null = null;
   private isConnected = false;
   private customDatabaseUrl?: string;
+  private customSearchPath?: string;
 
-  constructor(customDatabaseUrl?: string) {
+  constructor(customDatabaseUrl?: string, customSearchPath?: string) {
     this.customDatabaseUrl = customDatabaseUrl;
+    this.customSearchPath = customSearchPath;
   }
 
   // In-memory relational store fallback for unit testing or explicitly enabled offline dev
@@ -112,14 +114,27 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     const ssl = isLocal && !isProduction ? false : { rejectUnauthorized: !allowInsecureTls };
 
     try {
-      this.pool = new pg.Pool({
+      const poolConfig: pg.PoolConfig = {
         connectionString: effectiveDbUrl,
         connectionTimeoutMillis: 10000,
         max: 10,
         ssl,
-      });
+      };
+      if (this.customSearchPath) {
+        poolConfig.options = `-c search_path=${this.customSearchPath}`;
+      }
+      this.pool = new pg.Pool(poolConfig);
+
+      if (this.customSearchPath) {
+        this.pool.on('connect', (c) => {
+          c.query(`SET search_path TO ${this.customSearchPath}`).catch(() => {});
+        });
+      }
 
       const client = await this.pool.connect();
+      if (this.customSearchPath) {
+        await client.query(`SET search_path TO ${this.customSearchPath}`);
+      }
       client.release();
       this.isConnected = true;
       console.log('[DatabaseService] Connected to PostgreSQL successfully.');
@@ -211,6 +226,9 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     if (!this.isConnected || !this.pool) return;
     const client = await this.pool.connect();
     try {
+      if (this.customSearchPath) {
+        await client.query(`SET search_path TO ${this.customSearchPath}`);
+      }
       await client.query('SELECT pg_advisory_lock(hashtext($1))', ['migrationguard_schema_migrations']);
       try {
         const candidates = [
@@ -531,6 +549,9 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     }
     const client = await this.pool.connect();
     try {
+      if (this.customSearchPath) {
+        await client.query(`SET search_path TO ${this.customSearchPath}`);
+      }
       await client.query('BEGIN');
       const result = await callback(client);
       await client.query('COMMIT');
@@ -541,6 +562,14 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     } finally {
       client.release();
     }
+  }
+
+  public get searchPath(): string | undefined {
+    return this.customSearchPath;
+  }
+
+  public getRawPool(): pg.Pool | null {
+    return this.pool;
   }
 
   /**

@@ -6,7 +6,7 @@ export const CANONICALIZATION_VERSION = 'v1';
  * Normalizes any value into a canonical representation compliant with RFC 8785 (JSON Canonicalization Scheme)
  * with extensions for Date, Decimal, BigInt, and Binary/Buffer types.
  */
-export function canonicalizeValue(value: unknown): unknown {
+export function canonicalizeValue(value: unknown, seen = new WeakSet<object>()): unknown {
   if (value === null || value === undefined) {
     return null;
   }
@@ -45,6 +45,11 @@ export function canonicalizeValue(value: unknown): unknown {
 
   // Handle Mongo BSON ObjectId or Decimal128 objects with toHexString() or toString()
   if (typeof value === 'object' && value !== null) {
+    if (seen.has(value)) {
+      throw new Error('Circular reference detected in canonicalization');
+    }
+    seen.add(value);
+
     const obj = value as Record<string, unknown>;
     if (typeof obj.toHexString === 'function') {
       return (obj.toHexString as () => string)();
@@ -58,19 +63,24 @@ export function canonicalizeValue(value: unknown): unknown {
 
     // Array
     if (Array.isArray(value)) {
-      return value.map((item) => canonicalizeValue(item));
+      return value.map((item) => canonicalizeValue(item, seen));
     }
 
     // Plain or nested Object: sort keys strictly by UTF-16 code unit
     const sortedKeys = Object.keys(obj)
-      .filter((k) => obj[k] !== undefined)
+      .filter((k) => obj[k] !== undefined && typeof obj[k] !== 'function' && typeof obj[k] !== 'symbol')
       .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 
     const result: Record<string, unknown> = {};
     for (const key of sortedKeys) {
-      result[key] = canonicalizeValue(obj[key]);
+      result[key] = canonicalizeValue(obj[key], seen);
     }
     return result;
+  }
+
+  // Ignore functions and symbols
+  if (typeof value === 'function' || typeof value === 'symbol') {
+    return undefined;
   }
 
   return String(value);

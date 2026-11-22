@@ -138,14 +138,8 @@ export class MigrationService {
       }
     }
 
-    // Real BullMQ job dispatch with outbox transition to QUEUED
-    if (this.queueService && payloads.length > 0) {
-      await this.queueService.dispatchBatches(payloads);
-      await this.db.query(
-        `UPDATE migration_batches SET status = 'QUEUED' WHERE migration_run_id = $1 AND status = 'PENDING'`,
-        [run.id],
-      );
-    }
+    // Execute transactional outbox dispatch: pending batches are queued to BullMQ and transitioned to QUEUED
+    await this.dispatchPendingOutboxBatches(run.id);
 
     // Append to audit events
     await this.db.query(
@@ -166,6 +160,52 @@ export class MigrationService {
       planHash: version.plan_hash,
       createdAt: run.created_at,
     };
+  }
+
+  /**
+   * Transactional Outbox Dispatcher: queries all PENDING batches for a run,
+   * dispatches them to BullMQ, and idempotently updates their status to QUEUED.
+   */
+  async dispatchPendingOutboxBatches(runId: string): Promise<number> {
+    const res = await this.db.query(
+      `SELECT * FROM migration_batches WHERE migration_run_id = $1 AND status = 'PENDING' ORDER BY sequence_no ASC`,
+      [runId],
+    );
+    if (res.rows.length === 0 || !this.queueService) return 0;
+
+    const planRes = await this.db.query(
+      `SELECT mpv.* FROM migration_plan_versions mpv
+       JOIN migration_runs mr ON mr.plan_version_id = mpv.id
+       WHERE mr.id = $1`,
+      [runId],
+    );
+    const version = planRes.rows[0];
+    const batchSize = version?.execution_config_json?.batchSize || 1000;
+    const writeMode = version?.execution_config_json?.writeMode || 'upsert';
+
+    const payloads: MigrationJobPayload[] = res.rows.map((b: any) => ({
+      jobId: b.attempt_count > 0 ? `${runId}_${b.batch_key}_att${b.attempt_count}` : `${runId}_${b.batch_key}`,
+      migrationRunId: runId,
+      batchKey: b.batch_key,
+      sequenceNo: Number(b.sequence_no),
+      sourceObject: b.source_object || 'customers',
+      destinationObject: b.destination_object || 'customers',
+      cursorStart: b.source_cursor_start || null,
+      cursorEnd: b.source_cursor_end || null,
+      batchSize,
+      planVersionId: version?.id || '',
+      mappingVersionId: version?.mapping_version_id || 'default-mapping',
+      writeMode,
+      sourceConnectionId: version?.source_connection_id,
+      destinationConnectionId: version?.destination_connection_id,
+    }));
+
+    await this.queueService.dispatchBatches(payloads);
+    await this.db.query(
+      `UPDATE migration_batches SET status = 'QUEUED' WHERE migration_run_id = $1 AND status = 'PENDING'`,
+      [runId],
+    );
+    return payloads.length;
   }
 
   async listRuns(workspaceId: string, userId: string) {
@@ -268,6 +308,50 @@ export class MigrationService {
       runId,
     ]);
 
+    // Dispatch any pending outbox batches that were not yet queued
+    await this.dispatchPendingOutboxBatches(runId);
+
+    // Re-dispatch any paused or retry batches
+    const pausedBatches = await this.db.query(
+      `SELECT * FROM migration_batches WHERE migration_run_id = $1 AND status IN ('PAUSED', 'RETRY_WAIT') ORDER BY sequence_no ASC`,
+      [runId],
+    );
+
+    if (this.queueService && pausedBatches.rows.length > 0) {
+      const planRes = await this.db.query(
+        `SELECT mpv.* FROM migration_plan_versions mpv
+         JOIN migration_runs mr ON mr.plan_version_id = mpv.id
+         WHERE mr.id = $1`,
+        [runId],
+      );
+      const version = planRes.rows[0];
+      const batchSize = version?.execution_config_json?.batchSize || 1000;
+      const writeMode = version?.execution_config_json?.writeMode || 'upsert';
+
+      const resumePayloads: MigrationJobPayload[] = pausedBatches.rows.map((b: any) => ({
+        jobId: `${runId}_${b.batch_key}_resumed_${Date.now()}_att${b.attempt_count + 1}`,
+        migrationRunId: runId,
+        batchKey: b.batch_key,
+        sequenceNo: Number(b.sequence_no),
+        sourceObject: b.source_object || 'customers',
+        destinationObject: b.destination_object || 'customers',
+        cursorStart: b.source_cursor_start || null,
+        cursorEnd: b.source_cursor_end || null,
+        batchSize,
+        planVersionId: version?.id || '',
+        mappingVersionId: version?.mapping_version_id || 'default-mapping',
+        writeMode,
+        sourceConnectionId: version?.source_connection_id,
+        destinationConnectionId: version?.destination_connection_id,
+      }));
+
+      await this.queueService.dispatchBatches(resumePayloads);
+      await this.db.query(
+        `UPDATE migration_batches SET status = 'QUEUED', attempt_count = attempt_count + 1 WHERE migration_run_id = $1 AND status IN ('PAUSED', 'RETRY_WAIT')`,
+        [runId],
+      );
+    }
+
     await this.db.query(
       `INSERT INTO audit_events (workspace_id, project_id, actor_type, actor_id, action, resource_type, resource_id)
        VALUES ($1, $2, 'USER', $3, 'MIGRATION_RUN_RESUMED', 'MIGRATION_RUN', $4)`,
@@ -288,6 +372,11 @@ export class MigrationService {
     await this.db.query(
       'UPDATE migration_runs SET status = $1, completed_at = NOW(), updated_at = NOW() WHERE id = $2',
       ['CANCELLED', runId],
+    );
+
+    await this.db.query(
+      `UPDATE migration_batches SET status = 'CANCELLED' WHERE migration_run_id = $1 AND status NOT IN ('COMMITTED', 'FAILED_PERMANENT')`,
+      [runId],
     );
 
     await this.db.query(

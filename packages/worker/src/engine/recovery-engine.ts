@@ -179,13 +179,23 @@ export class RecoveryEngine {
       const destinationKeys = manifests.map((m) => m.destinationKey);
 
       let recordsFoundInDestination = 0;
+      let allKeysFound = false;
       if (destinationKeys.length > 0) {
         try {
           const foundRecords = await this.destinationConnector.readByKeys(
             destinationObject,
             destinationKeys,
           );
-          recordsFoundInDestination = foundRecords.length;
+          const foundKeyMap = new Map<string, Record<string, unknown>>();
+          for (const r of foundRecords) {
+            if (r && r.destinationKey && r.data && Object.keys(r.data).length > 0) {
+              foundKeyMap.set(String(r.destinationKey), r.data);
+            }
+          }
+          allKeysFound =
+            foundKeyMap.size === destinationKeys.length &&
+            destinationKeys.every((k) => foundKeyMap.has(k));
+          recordsFoundInDestination = foundKeyMap.size;
         } catch {
           // If destination cannot be read, leave for operator review
           return {
@@ -198,7 +208,7 @@ export class RecoveryEngine {
         }
       }
 
-      if (recordsFoundInDestination > 0 && recordsFoundInDestination === destinationKeys.length) {
+      if (allKeysFound && destinationKeys.length > 0) {
         // Write actually succeeded before the crash!
         await this.manifestTracker.transitionState(
           batch.migrationRunId,

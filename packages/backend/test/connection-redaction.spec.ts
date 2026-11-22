@@ -31,6 +31,15 @@ describe('Connection & Secret Redaction', () => {
     const email = `dbadmin_${Date.now()}_${Math.random().toString(36).slice(2)}@corp.com`;
     user = await authService.register(email, 'DB Admin', 'SecretPassword!');
     workspaceId = user.workspace.id;
+
+    ConnectionService.customProber = async (conn) => ({
+      reachable: true,
+      engineVersion: conn.engine === 'MONGODB' ? 'MongoDB 7.0' : 'PostgreSQL 16',
+    });
+  });
+
+  afterEach(() => {
+    ConnectionService.customProber = undefined;
   });
 
   it('should store credentials in AES-256-GCM vault and never expose them in API responses', async () => {
@@ -150,5 +159,25 @@ describe('Connection & Secret Redaction', () => {
     const updatedConn = await connectionService.getConnection(conn.id, user.user.id);
     expect(updatedConn.credential_version).toBe(2);
     expect(updatedConn.secret_ref).toBe(`vault:${conn.id}:v2`);
+  });
+
+  it('should fail closed when connection is unreachable and no custom prober is provided', async () => {
+    ConnectionService.customProber = undefined;
+    const conn = await connectionService.createConnection(
+      workspaceId,
+      {
+        name: 'Dead Postgres',
+        engine: 'POSTGRESQL',
+        connectionRole: 'DESTINATION',
+        config: { host: 'unreachable.invalid.host', port: 5432, database: 'analytics' },
+        credentials: { connectionString: 'postgresql://invalid:invalid@127.0.0.1:59999/dead' },
+      },
+      user.user.id,
+    );
+
+    const testResult = await connectionService.testConnection(conn.id, user.user.id);
+    expect(testResult.reachable).toBe(false);
+    expect(testResult.status).toBe('ERROR');
+    expect(testResult.error).toBeDefined();
   });
 });

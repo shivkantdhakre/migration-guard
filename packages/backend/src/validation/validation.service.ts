@@ -1,14 +1,16 @@
 import {
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
 import { WorkspaceService } from '../workspace/workspace.service';
+import { CredentialsService } from '../connection/credentials.service';
 import {
   ValidationEngine,
+  ValidationDataset,
   generateSyntheticDataset,
   injectFaults,
-  ValidationDataset,
 } from '@migrationguard/core';
 
 @Injectable()
@@ -16,7 +18,19 @@ export class ValidationService {
   constructor(
     private db: DatabaseService,
     private workspaceService: WorkspaceService,
+    @Optional() private credentialsService?: CredentialsService,
   ) {}
+
+  private async recordFailedValidation(workspaceId: string, runId: string, errorReason: string) {
+    await this.db.query(
+      `INSERT INTO validation_runs (
+         workspace_id, migration_run_id, status, validation_profile_version,
+         canonicalization_version, started_at, completed_at, summary_json
+       )
+       VALUES ($1, $2, 'ERROR', '1.0', '1.0', NOW(), NOW(), $3)`,
+      [workspaceId, runId, { error: errorReason, overallStatus: 'ERROR' }],
+    );
+  }
 
   async triggerValidation(runId: string, userId: string) {
     const runRes = await this.db.query('SELECT * FROM migration_runs WHERE id = $1', [runId]);
@@ -44,39 +58,110 @@ export class ValidationService {
         'SELECT status, engine FROM connections WHERE id = $1',
         [planVersion.source_connection_id],
       );
-      if (srcConnRes.rows.length > 0 && srcConnRes.rows[0].status === 'ERROR') {
-        await this.db.query(
-          `INSERT INTO validation_runs (
-             workspace_id, migration_run_id, status, validation_profile_version,
-             canonicalization_version, started_at, completed_at, summary_json
-           )
-           VALUES ($1, $2, 'ERROR', '1.0', '1.0', NOW(), NOW(), $3)`,
-          [run.workspace_id, runId, { error: 'Source connection is in ERROR state; cannot validate.' }],
-        );
+      if (srcConnRes.rows.length === 0 || srcConnRes.rows[0].status === 'ERROR') {
+        await this.recordFailedValidation(run.workspace_id, runId, 'Source connection is in ERROR state or unavailable.');
         throw new Error('Source connection is unavailable or in ERROR state. Validation failed closed.');
       }
     }
 
-    // 1. Build source & destination datasets independently (NEVER clone destination to source)
-    let destRecords: any[] = [];
-    let destOrders: any[] = [];
-    let destAttachments: any[] = [];
-
-    try {
-      const custRes = await this.db.query('SELECT * FROM customers LIMIT 10000');
-      destRecords = custRes.rows;
-
-      const orderRes = await this.db.query('SELECT * FROM orders LIMIT 10000');
-      destOrders = orderRes.rows;
-
-      const attRes = await this.db.query('SELECT * FROM customer_attachments LIMIT 10000');
-      destAttachments = attRes.rows;
-    } catch (err: any) {
-      console.warn(`[ValidationService] Notice querying destination tables: ${err.message}`);
+    // Verify destination connection is not unavailable or in ERROR state
+    if (planVersion?.destination_connection_id) {
+      const destConnRes = await this.db.query(
+        'SELECT status, engine FROM connections WHERE id = $1',
+        [planVersion.destination_connection_id],
+      );
+      if (destConnRes.rows.length === 0 || destConnRes.rows[0].status === 'ERROR') {
+        await this.recordFailedValidation(run.workspace_id, runId, 'Destination connection is in ERROR state or unavailable.');
+        throw new Error('Destination connection is unavailable or in ERROR state. Validation failed closed.');
+      }
     }
 
-    let sourceDataset: ValidationDataset;
-    let destinationDataset: ValidationDataset;
+    // Identify object mapping
+    let sourceObjectName = 'customers';
+    let destObjectName = 'customers';
+    let sourceKeyField = 'id';
+    let destKeyField = 'id';
+
+    if (planVersion?.mapping_version_id) {
+      const mapRes = await this.db.query('SELECT * FROM mapping_versions WHERE id = $1', [
+        planVersion.mapping_version_id,
+      ]);
+      if (mapRes.rows.length > 0) {
+        const mJson = mapRes.rows[0].mapping_json;
+        const parsed = typeof mJson === 'string' ? JSON.parse(mJson) : mJson;
+        const firstObj = Array.isArray(parsed.objects) ? parsed.objects[0] : (parsed.source ? parsed : null);
+        if (firstObj) {
+          sourceObjectName =
+            firstObj.source?.collection ||
+            firstObj.source?.object ||
+            (typeof firstObj.source === 'string' ? firstObj.source : 'customers');
+          destObjectName =
+            firstObj.destination?.table ||
+            firstObj.destination?.object ||
+            (typeof firstObj.destination === 'string' ? firstObj.destination : 'customers');
+          sourceKeyField = firstObj.identity?.sourceKey || firstObj.source?.key || 'id';
+          destKeyField = firstObj.identity?.destinationKey || firstObj.destination?.key || 'id';
+        }
+      }
+    }
+
+    // Load manifests scoped to this exact migration run
+    const manifestsRes = await this.db.query(
+      `SELECT * FROM record_manifests WHERE migration_run_id = $1 ORDER BY created_at ASC`,
+      [runId],
+    );
+    const manifests = manifestsRes.rows;
+
+    // Load destination records scoped to destination keys in manifests
+    let destRecords: any[] = [];
+    const destKeys = manifests
+      .map((m: any) => m.destination_key || m.source_key)
+      .filter(Boolean);
+
+    if (destKeys.length > 0) {
+      try {
+        const dRes = await this.db.query(`SELECT * FROM ${destObjectName}`);
+        destRecords = dRes.rows.filter((r: any) =>
+          destKeys.includes(String(r[destKeyField] || r.id || r.destination_key)),
+        );
+      } catch (err: any) {
+        console.warn(`[ValidationService] Destination query notice: ${err.message}`);
+      }
+    }
+
+    // Load source baseline records scoped to source keys in manifests
+    let sourceRecords: any[] = [];
+    const sourceKeys = manifests.map((m: any) => m.source_key).filter(Boolean);
+
+    if (sourceKeys.length > 0) {
+      try {
+        const sRes = await this.db.query(`SELECT * FROM source_${sourceObjectName}`);
+        sourceRecords = sRes.rows.filter((r: any) =>
+          sourceKeys.includes(String(r[sourceKeyField] || r.id || r._id || r.source_key)),
+        );
+      } catch {
+        // Fallback to direct table if separate source table is not prefixed
+        try {
+          const sRes = await this.db.query(`SELECT * FROM ${sourceObjectName}`);
+          sourceRecords = sRes.rows.filter((r: any) =>
+            sourceKeys.includes(String(r[sourceKeyField] || r.id || r._id || r.source_key)),
+          );
+        } catch {
+          // No records found in local db
+        }
+      }
+
+      if (sourceRecords.length === 0) {
+        await this.recordFailedValidation(
+          run.workspace_id,
+          runId,
+          `No source records could be retrieved from source for ${sourceObjectName}. Cannot prove migration correctness.`,
+        );
+        throw new Error(
+          `Source records could not be retrieved from source connection. Validation failed closed.`,
+        );
+      }
+    }
 
     const parseDateSafe = (d: any) => {
       if (!d) return new Date().toISOString();
@@ -84,79 +169,54 @@ export class ValidationService {
       return isNaN(parsed.getTime()) ? new Date().toISOString() : parsed.toISOString();
     };
 
-    if (destRecords.length > 0) {
-      // Build destination dataset from actual destination tables
-      destinationDataset = {
-        objectName: 'customers',
-        records: destRecords.map((r: any) => ({
-          id: String(r.id),
-          name: r.name,
-          email: r.email,
-          createdAt: parseDateSafe(r.created_at),
-          updatedAt: parseDateSafe(r.updated_at),
-          status: r.status || 'ACTIVE',
-          tier: r.tier || 'STANDARD',
-          metadata: typeof r.metadata === 'string' ? JSON.parse(r.metadata) : r.metadata || {},
-        })),
-        orders: destOrders.map((o: any) => ({
-          orderId: String(o.id),
-          customerId: String(o.customer_id),
-          totalAmount: Number(o.total_amount),
-          currency: 'USD',
-          orderDate: parseDateSafe(o.ordered_at),
-          status: o.status || 'COMPLETED',
-          itemsCount: 1,
-        })),
-        attachments: destAttachments.map((a: any) => ({
-          attachmentId: String(a.id),
-          recordId: String(a.customer_id),
-          fileName: a.file_name,
-          byteSize: Number(a.file_size),
-          contentType: a.content_type,
-          checksum: a.checksum_sha256,
-          storageKey: a.storage_path,
-        })),
-      };
+    let sourceDataset: ValidationDataset;
+    let destinationDataset: ValidationDataset;
 
-      // Load source baseline records independently from record_manifests / source store
-      const manifestsRes = await this.db.query(
-        `SELECT * FROM record_manifests WHERE migration_run_id = $1 ORDER BY created_at ASC`,
-        [runId],
-      );
-
-      if (manifestsRes.rows.length > 0) {
-        sourceDataset = {
-          objectName: 'customers',
-          records: manifestsRes.rows.map((m: any) => ({
-            id: String(m.source_key),
-            name: `Customer ${m.source_key}`,
-            email: `customer_${m.source_key}@example.com`,
-            createdAt: parseDateSafe(m.created_at),
-            updatedAt: parseDateSafe(m.created_at),
-            status: 'ACTIVE',
-            tier: 'STANDARD',
-            metadata: {},
-          })),
-          orders: [],
-          attachments: [],
-        };
-      } else {
-        sourceDataset = {
-          objectName: 'customers',
-          records: [],
-          orders: [],
-          attachments: [],
-        };
+    if (manifests.length === 0 && sourceRecords.length === 0 && destRecords.length === 0) {
+      if (process.env.NODE_ENV === 'production') {
+        await this.recordFailedValidation(
+          run.workspace_id,
+          runId,
+          'No migration manifests or destination records exist for this run. Cannot validate in production.',
+        );
+        throw new Error('No manifests or records found for migration run. Validation failed closed.');
       }
-    } else {
-      // Synthetic benchmark dataset with seeded discrepancy suite for assurance testing
+      // Non-production test harness fallback for synthetic validation test suites
       const benchmark = generateSyntheticDataset({ totalRecords: 200 });
       const faultResult = injectFaults(benchmark);
       destinationDataset = faultResult.faultedDataset;
       sourceDataset = benchmark;
+    } else {
+      sourceDataset = {
+        objectName: sourceObjectName,
+        records: sourceRecords.map((r: any) => ({
+          id: String(r[sourceKeyField] || r.id || r._id),
+          name: r.name,
+          email: r.email,
+          createdAt: parseDateSafe(r.created_at || r.createdAt),
+          updatedAt: parseDateSafe(r.updated_at || r.updatedAt),
+          ...r,
+        })),
+        orders: [],
+        attachments: [],
+      };
+
+      destinationDataset = {
+        objectName: destObjectName,
+        records: destRecords.map((r: any) => ({
+          id: String(r[destKeyField] || r.id),
+          name: r.name,
+          email: r.email,
+          createdAt: parseDateSafe(r.created_at || r.createdAt),
+          updatedAt: parseDateSafe(r.updated_at || r.updatedAt),
+          ...r,
+        })),
+        orders: [],
+        attachments: [],
+      };
     }
 
-    // 2. Execute deterministic ValidationEngine (all 9 checks)
+    // 2. Execute deterministic ValidationEngine (all checks)
     const engine = new ValidationEngine({
       migrationRunId: runId,
       workspaceId: run.workspace_id,
@@ -235,9 +295,9 @@ export class ValidationService {
           valRun.id,
           cat,
           d.severity,
-          d.sourceObject || 'customers',
+          d.sourceObject || sourceObjectName,
           d.sourceKey || d.destinationKey || d.issueId || 'N/A',
-          d.destinationObject || d.sourceObject || 'customers',
+          d.destinationObject || destObjectName,
           d.destinationKey || d.sourceKey || 'N/A',
           d.fieldPath || null,
           d.explanation || (d as any).summary || `${d.category} discrepancy detected on ${d.sourceKey}`,

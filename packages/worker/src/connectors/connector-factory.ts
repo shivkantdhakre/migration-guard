@@ -236,14 +236,9 @@ export class PostgresDestinationConnector implements DestinationConnector {
       [keys],
     );
 
-    const map = new Map<string, Record<string, unknown>>();
-    for (const row of res.rows) {
-      map.set(String(row.id), row);
-    }
-
-    return keys.map((k) => ({
-      destinationKey: k,
-      data: map.get(k) || {},
+    return res.rows.map((row: any) => ({
+      destinationKey: String(row.id),
+      data: row,
     }));
   }
 

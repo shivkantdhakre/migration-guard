@@ -19,7 +19,7 @@ import { CheckpointManager } from './engine/checkpoint.js';
 import { IdTracker } from './engine/id-tracker.js';
 import { RecoveryEngine } from './engine/recovery-engine.js';
 import { PostgresStorageAdapters } from './engine/postgres-storage-adapters.js';
-import { calculateCanonicalHash, TransformationEngine, ObjectMapping } from '@migrationguard/core';
+import { calculateCanonicalHash, canonicalizeJson, TransformationEngine, ObjectMapping } from '@migrationguard/core';
 import { ConnectorFactory, resolvePostgresSsl } from './connectors/connector-factory.js';
 import {
   MigrationJobPayload,
@@ -596,11 +596,22 @@ async function startWorker() {
             const currentStatus = runCheck.rows[0].status;
             if (currentStatus === 'PAUSED' || currentStatus === 'CANCELLED') {
               console.log(`[Worker] Run ${job.data.migrationRunId} is ${currentStatus}. Halting execution of batch ${job.data.batchKey}.`);
+              if (currentStatus === 'PAUSED') {
+                await dbPool.query(
+                  `UPDATE migration_batches SET status = 'PAUSED' WHERE migration_run_id = $1 AND batch_key = $2`,
+                  [job.data.migrationRunId, job.data.batchKey],
+                );
+                throw new Error(`[Worker] Execution paused for run ${job.data.migrationRunId}. Batch ${job.data.batchKey} marked PAUSED.`);
+              }
+              await dbPool.query(
+                `UPDATE migration_batches SET status = 'CANCELLED' WHERE migration_run_id = $1 AND batch_key = $2`,
+                [job.data.migrationRunId, job.data.batchKey],
+              );
               return {
                 migrationRunId: job.data.migrationRunId,
                 batchKey: job.data.batchKey,
                 sequenceNo: job.data.sequenceNo,
-                status: currentStatus === 'PAUSED' ? 'RETRY_WAIT' : 'FAILED_PERMANENT',
+                status: 'FAILED_PERMANENT',
                 recordsRead: 0,
                 recordsWritten: 0,
                 recordsSkipped: 0,
@@ -643,41 +654,73 @@ async function startWorker() {
           await recoveryEngine.reconcileBatch(existingBatch, job.data.destinationObject);
         }
 
+        // In production, strictly prohibit ALLOW_DEMO_MAPPING
+        if (process.env.NODE_ENV === 'production' && process.env.ALLOW_DEMO_MAPPING === 'true') {
+          throw new Error('[Worker Security] CRITICAL: ALLOW_DEMO_MAPPING=true is strictly prohibited in production.');
+        }
+
         // Load mapping version and instantiate TransformationEngine if available
         let transformationEngine: TransformationEngine | null = null;
         const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(job.data.mappingVersionId || '');
         if (job.data.mappingVersionId && dbPool && isUuid) {
           const mapRes = await dbPool.query(
-            `SELECT mapping_json, mapping_hash FROM mapping_versions WHERE id = $1`,
-            [job.data.mappingVersionId],
+            `SELECT mv.mapping_json, mv.mapping_hash, mv.workspace_id, mp.workspace_id as plan_workspace_id
+             FROM mapping_versions mv
+             LEFT JOIN migration_plans mp ON mp.id = (
+               SELECT plan_id FROM migration_plan_versions WHERE id = $2
+             )
+             WHERE mv.id = $1`,
+            [job.data.mappingVersionId, job.data.planVersionId || null],
           );
           if (mapRes.rows.length === 0) {
-            if (process.env.NODE_ENV === 'production') {
-              throw new Error(`[Worker Security] Mapping version ${job.data.mappingVersionId} not found in database. Fails closed.`);
-            }
-          } else {
-            const mappingRow = mapRes.rows[0];
-            const mappingJson =
-              typeof mappingRow.mapping_json === 'string'
-                ? JSON.parse(mappingRow.mapping_json)
-                : mappingRow.mapping_json;
+            throw new Error(`[Worker Security] Mapping version ${job.data.mappingVersionId} not found in database. Fails closed.`);
+          }
 
-            let matchedMapping: ObjectMapping | null = null;
-            if (Array.isArray(mappingJson.objects)) {
-              matchedMapping =
-                mappingJson.objects.find(
-                  (o: any) =>
-                    o.source?.collection === job.data.sourceObject ||
-                    o.destination?.table === job.data.destinationObject,
-                ) || mappingJson.objects[0];
-            } else if (mappingJson.source) {
-              matchedMapping = mappingJson as ObjectMapping;
-            }
+          const mappingRow = mapRes.rows[0];
+          if (mappingRow.plan_workspace_id && mappingRow.workspace_id && mappingRow.plan_workspace_id !== mappingRow.workspace_id) {
+            throw new Error(`[Worker Security] Cross-tenant mapping reference detected: mapping workspace does not match plan workspace.`);
+          }
 
-            if (matchedMapping) {
-              transformationEngine = new TransformationEngine(matchedMapping);
+          const mappingJson =
+            typeof mappingRow.mapping_json === 'string'
+              ? JSON.parse(mappingRow.mapping_json)
+              : mappingRow.mapping_json;
+
+          // Verify mapping hash
+          const rawHash = mappingRow.mapping_hash;
+          if (rawHash) {
+            const computedHash = 'sha256:' + require('crypto').createHash('sha256').update(canonicalizeJson(mappingJson)).digest('hex');
+            const simpleHash = 'sha256:' + require('crypto').createHash('sha256').update(JSON.stringify(mappingJson)).digest('hex');
+            if (rawHash !== computedHash && rawHash !== simpleHash) {
+              throw new Error(`[Worker Security] Approved mapping hash verification failed: content mismatch for ${job.data.mappingVersionId}.`);
             }
           }
+
+          // Exact source AND destination match required
+          let matchedMapping: ObjectMapping | null = null;
+          if (Array.isArray(mappingJson.objects)) {
+            matchedMapping = mappingJson.objects.find(
+              (o: any) =>
+                (o.source?.collection || o.sourceObject || o.source) === job.data.sourceObject &&
+                (o.destination?.table || o.destinationObject || o.destination) === job.data.destinationObject,
+            );
+          } else if (mappingJson.source && mappingJson.destination) {
+            const sMatch = (mappingJson.source?.collection || mappingJson.source) === job.data.sourceObject;
+            const dMatch = (mappingJson.destination?.table || mappingJson.destination) === job.data.destinationObject;
+            if (sMatch && dMatch) {
+              matchedMapping = mappingJson as ObjectMapping;
+            }
+          }
+
+          if (!matchedMapping) {
+            throw new Error(
+              `[Worker Security] No approved mapping object found matching source '${job.data.sourceObject}' and destination '${job.data.destinationObject}'. Fails closed.`,
+            );
+          }
+
+          transformationEngine = new TransformationEngine(matchedMapping);
+        } else if (process.env.NODE_ENV === 'production') {
+          throw new Error(`[Worker Security] Valid approved UUID mappingVersionId is strictly required in production.`);
         }
 
         // Instantiate QueueHandler with dynamic connectors, recovery, and streaming scheduler
@@ -704,9 +747,9 @@ async function startWorker() {
               };
             }
 
-            if (process.env.NODE_ENV === 'production' && !process.env.ALLOW_DEMO_MAPPING) {
+            if (!transformationEngine && process.env.NODE_ENV === 'production') {
               throw new Error(
-                `[Worker Security] Production execution strictly requires an approved mapping version for ${envelope.sourceObject}.`,
+                `[Worker Security] Production execution strictly requires an approved mapping version for ${envelope.sourceObject} -> ${destObj}.`,
               );
             }
 

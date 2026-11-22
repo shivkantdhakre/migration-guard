@@ -39,58 +39,143 @@ describe('Validation & Durable Reports Acceptance Suite (Section 9.4)', () => {
     reportService = new ReportService(db, workspaceService);
   });
 
+  async function setupRunFixture(runId: string) {
+    const srcConn = await db.query(
+      `INSERT INTO connections (workspace_id, name, engine, connection_role, status, created_by)
+       VALUES ($1, 'Source DB', 'POSTGRESQL', 'SOURCE', 'HEALTHY', $2) RETURNING id`,
+      [wsId, user.user.id],
+    );
+    const dstConn = await db.query(
+      `INSERT INTO connections (workspace_id, name, engine, connection_role, status, created_by)
+       VALUES ($1, 'Dest DB', 'POSTGRESQL', 'DESTINATION', 'HEALTHY', $2) RETURNING id`,
+      [wsId, user.user.id],
+    );
+    const proj = await db.query(
+      'INSERT INTO projects (workspace_id, name, created_by) VALUES ($1, $2, $3) RETURNING id',
+      [wsId, 'ValProj', user.user.id],
+    );
+    const plan = await db.query(
+      'INSERT INTO migration_plans (workspace_id, project_id, name, created_by) VALUES ($1, $2, $3, $4) RETURNING id',
+      [wsId, proj.rows[0].id, 'ValPlan', user.user.id],
+    );
+    const mapping = await db.query(
+      `INSERT INTO mapping_versions (workspace_id, plan_id, version, mapping_json, mapping_hash, created_by)
+       VALUES ($1, $2, 1, $3, 'map_hash', $4) RETURNING id`,
+      [
+        wsId,
+        plan.rows[0].id,
+        JSON.stringify({
+          objects: [
+            {
+              source: { object: 'customers', key: 'id' },
+              destination: { object: 'customers', key: 'id' },
+              fields: [{ source: 'name', destination: 'name' }, { source: 'email', destination: 'email' }],
+            },
+          ],
+        }),
+        user.user.id,
+      ],
+    );
+    const ver = await db.query(
+      `INSERT INTO migration_plan_versions (
+         plan_id, version, source_connection_id, destination_connection_id, mapping_version_id, plan_hash, created_by
+       ) VALUES ($1, 1, $2, $3, $4, 'plan_hash', $5) RETURNING id`,
+      [plan.rows[0].id, srcConn.rows[0].id, dstConn.rows[0].id, mapping.rows[0].id, user.user.id],
+    );
+    await db.query(
+      `INSERT INTO migration_runs (id, workspace_id, project_id, plan_version_id, status, created_by)
+       VALUES ($1, $2, $3, $4, 'RUNNING', $5)`,
+      [runId, wsId, proj.rows[0].id, ver.rows[0].id, user.user.id],
+    );
+  }
+
   it('1. Independent source and destination comparison: tampering one destination field detects discrepancy', async () => {
-    const sourceRecords = [
-      { id: '1', name: 'Alice Smith', email: 'alice@example.com' },
-      { id: '2', name: 'Bob Jones', email: 'bob@example.com' },
-    ];
+    const runId = '00000000-0000-0000-0000-000000000001';
+    await setupRunFixture(runId);
+
+    await db.query(`DROP TABLE IF EXISTS source_customers CASCADE;`);
+    await db.query(`DROP TABLE IF EXISTS customers CASCADE;`);
+
+    await db.query(`
+      CREATE TABLE source_customers (
+        id VARCHAR(64) PRIMARY KEY,
+        name VARCHAR(255),
+        email VARCHAR(255)
+      );
+    `);
+    await db.query(`
+      CREATE TABLE customers (
+        id VARCHAR(64) PRIMARY KEY,
+        name VARCHAR(255),
+        email VARCHAR(255)
+      );
+    `);
+
+    await db.query(`INSERT INTO source_customers (id, name, email) VALUES ('1', 'Alice Smith', 'alice@example.com')`);
+    await db.query(`INSERT INTO source_customers (id, name, email) VALUES ('2', 'Bob Jones', 'bob@example.com')`);
 
     // Destination record has been modified (name changed from Alice Smith to Alice Tampered)
-    const destinationRecords = [
-      { id: '1', name: 'Alice Tampered', email: 'alice@example.com' },
-      { id: '2', name: 'Bob Jones', email: 'bob@example.com' },
-    ];
+    await db.query(`INSERT INTO customers (id, name, email) VALUES ('1', 'Alice Tampered', 'alice@example.com')`);
+    await db.query(`INSERT INTO customers (id, name, email) VALUES ('2', 'Bob Jones', 'bob@example.com')`);
 
-    const engine = new ValidationEngine({
-      migrationRunId: '00000000-0000-0000-0000-000000000001',
-      workspaceId: wsId,
-      fieldRules: [{ fieldPath: 'name' }, { fieldPath: 'email' }],
-    });
+    await db.query(`INSERT INTO record_manifests (migration_run_id, source_object, source_key, destination_object, destination_key, status) VALUES ($1, 'customers', '1', 'customers', '1', 'WRITTEN')`, [runId]);
+    await db.query(`INSERT INTO record_manifests (migration_run_id, source_object, source_key, destination_object, destination_key, status) VALUES ($1, 'customers', '2', 'customers', '2', 'WRITTEN')`, [runId]);
 
-    const summary = await engine.validate(
-      { objectName: 'customers', records: sourceRecords },
-      { objectName: 'customers', records: destinationRecords },
+    // Exercise triggerValidation() directly
+    const valRun = await validationService.triggerValidation(runId, user.user.id);
+    expect(valRun).toBeDefined();
+
+    const discRes = await db.query(
+      'SELECT * FROM discrepancies WHERE validation_run_id = $1',
+      [valRun.id],
     );
-
-    expect(summary.totalDiscrepancies).toBeGreaterThan(0);
-    const fieldDiscrepancy = summary.discrepancies.find((d) => d.category === 'FIELD_VALUE_MISMATCH');
+    expect(discRes.rows.length).toBeGreaterThan(0);
+    const fieldDiscrepancy = discRes.rows.find((d: any) => d.category === 'FIELD_VALUE');
     expect(fieldDiscrepancy).toBeDefined();
-    expect(fieldDiscrepancy?.sourceKey).toBe('1');
-    expect(fieldDiscrepancy?.expectedValue).toBe('Alice Smith');
-    expect(fieldDiscrepancy?.actualValue).toBe('Alice Tampered');
+    expect(fieldDiscrepancy.source_key_ref).toBe('1');
+    expect(fieldDiscrepancy.field_path).toBe('name');
   });
 
   it('2. Missing destination record detection', async () => {
-    const sourceRecords = [
-      { id: '101', name: 'Customer 101' },
-      { id: '102', name: 'Customer 102' },
-    ];
+    const runId = '00000000-0000-0000-0000-000000000002';
+    await setupRunFixture(runId);
+
+    await db.query(`DROP TABLE IF EXISTS source_customers CASCADE;`);
+    await db.query(`DROP TABLE IF EXISTS customers CASCADE;`);
+
+    await db.query(`
+      CREATE TABLE source_customers (
+        id VARCHAR(64) PRIMARY KEY,
+        name VARCHAR(255)
+      );
+    `);
+    await db.query(`
+      CREATE TABLE customers (
+        id VARCHAR(64) PRIMARY KEY,
+        name VARCHAR(255)
+      );
+    `);
+
+    await db.query(`INSERT INTO source_customers (id, name) VALUES ('101', 'Customer 101')`);
+    await db.query(`INSERT INTO source_customers (id, name) VALUES ('102', 'Customer 102')`);
+
     // Destination is missing id 102
-    const destinationRecords = [{ id: '101', name: 'Customer 101' }];
+    await db.query(`INSERT INTO customers (id, name) VALUES ('101', 'Customer 101')`);
 
-    const engine = new ValidationEngine({
-      migrationRunId: '00000000-0000-0000-0000-000000000001',
-      workspaceId: wsId,
-    });
+    await db.query(`INSERT INTO record_manifests (migration_run_id, source_object, source_key, destination_object, destination_key, status) VALUES ($1, 'customers', '101', 'customers', '101', 'WRITTEN')`, [runId]);
+    await db.query(`INSERT INTO record_manifests (migration_run_id, source_object, source_key, destination_object, destination_key, status) VALUES ($1, 'customers', '102', 'customers', '102', 'WRITTEN')`, [runId]);
 
-    const summary = await engine.validate(
-      { objectName: 'customers', records: sourceRecords },
-      { objectName: 'customers', records: destinationRecords },
+    // Exercise triggerValidation() directly
+    const valRun = await validationService.triggerValidation(runId, user.user.id);
+    expect(valRun).toBeDefined();
+
+    const discRes = await db.query(
+      'SELECT * FROM discrepancies WHERE validation_run_id = $1',
+      [valRun.id],
     );
-
-    const missing = summary.discrepancies.find((d) => d.category === 'MISSING_RECORD');
+    const missing = discRes.rows.find((d: any) => d.category === 'MISSING_RECORD');
     expect(missing).toBeDefined();
-    expect(missing?.sourceKey).toBe('102');
+    expect(missing.source_key_ref).toBe('102');
   });
 
   it('3. Unified canonical hash verification against independent test oracle', () => {

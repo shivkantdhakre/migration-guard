@@ -163,21 +163,21 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
    * Dispatches a single migration batch job to BullMQ with deterministic Job ID
    */
   async dispatchBatchJob(payload: MigrationJobPayload): Promise<string> {
-    const deterministicJobId = `${payload.migrationRunId}_${payload.batchKey}`;
+    const jobId = payload.jobId || `${payload.migrationRunId}_${payload.batchKey}`;
 
     if (!this.queue || !this.isConnected) {
       if (process.env.NODE_ENV === 'production' || process.env.ALLOW_SIMULATED_DISPATCH !== 'true') {
         this.logger.error(
-          `[QueueService] Failed to dispatch job ${deterministicJobId}: Queue is offline or Redis is disconnected.`,
+          `[QueueService] Failed to dispatch job ${jobId}: Queue is offline or Redis is disconnected.`,
         );
         throw new Error(
           `[QueueService] Cannot dispatch batch job: Queue is offline or Redis is disconnected. Simulated dispatch is forbidden.`,
         );
       }
       this.logger.warn(
-        `[QueueService] Queue offline. Simulating dispatch for batch ${payload.batchKey} (Job: ${deterministicJobId})`,
+        `[QueueService] Queue offline. Simulating dispatch for batch ${payload.batchKey} (Job: ${jobId})`,
       );
-      return deterministicJobId;
+      return jobId;
     }
 
     try {
@@ -188,7 +188,7 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
         'process-batch',
         payload,
         {
-          jobId: deterministicJobId,
+          jobId,
           priority,
           attempts: 3,
           backoff: {
@@ -203,7 +203,7 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
       this.logger.log(`[QueueService] Dispatched job ${job.id} for run ${payload.migrationRunId}`);
       return job.id!;
     } catch (err: any) {
-      this.logger.error(`[QueueService] Failed to dispatch job ${deterministicJobId}: ${err.message}`);
+      this.logger.error(`[QueueService] Failed to dispatch job ${jobId}: ${err.message}`);
       throw err;
     }
   }

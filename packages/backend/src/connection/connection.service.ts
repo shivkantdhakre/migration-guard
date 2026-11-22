@@ -17,8 +17,15 @@ export interface CreateConnectionDto {
   credentials: Record<string, any>;
 }
 
+export type ConnectionProber = (
+  connection: any,
+  decryptedCreds: Record<string, any> | null,
+) => Promise<{ reachable: boolean; engineVersion?: string; errorMessage?: string } | null>;
+
 @Injectable()
 export class ConnectionService {
+  public static customProber?: ConnectionProber;
+
   constructor(
     private db: DatabaseService,
     private workspaceService: WorkspaceService,
@@ -142,7 +149,19 @@ export class ConnectionService {
     let engineVersion = conn.engine === 'MONGODB' ? 'MongoDB 7.0' : 'PostgreSQL 16';
     let errorMessage: string | null = null;
 
-    if (decryptedCreds) {
+    if (ConnectionService.customProber) {
+      try {
+        const probeResult = await ConnectionService.customProber(conn, decryptedCreds);
+        if (probeResult) {
+          reachable = probeResult.reachable;
+          if (probeResult.engineVersion) engineVersion = probeResult.engineVersion;
+          if (probeResult.errorMessage) errorMessage = probeResult.errorMessage;
+        }
+      } catch (proberErr: any) {
+        reachable = false;
+        errorMessage = proberErr.message;
+      }
+    } else if (decryptedCreds) {
       try {
         if (conn.engine === 'POSTGRESQL') {
           const connStr = decryptedCreds.connectionString || decryptedCreds.uri || decryptedCreds.url;
@@ -156,17 +175,14 @@ export class ConnectionService {
               reachable = true;
               engineVersion = res.rows[0]?.version || engineVersion;
             } catch (pgErr: any) {
-              if (process.env.NODE_ENV === 'test') {
-                reachable = true;
-              } else {
-                reachable = false;
-                errorMessage = pgErr.message;
-              }
+              reachable = false;
+              errorMessage = pgErr.message;
             } finally {
               await pgPool.end().catch(() => {});
             }
           } else {
-            reachable = true;
+            reachable = false;
+            errorMessage = 'No PostgreSQL connection string or credentials provided';
           }
         } else if (conn.engine === 'MONGODB') {
           const uri = decryptedCreds.uri || decryptedCreds.connectionString || decryptedCreds.url;
@@ -177,27 +193,20 @@ export class ConnectionService {
               try {
                 await client.connect();
                 const pingRes = await client.db().admin().ping();
-                reachable = Boolean(pingRes.ok);
+                reachable = Boolean(pingRes?.ok);
               } catch (mErr: any) {
-                if (process.env.NODE_ENV === 'test') {
-                  reachable = true;
-                } else {
-                  reachable = false;
-                  errorMessage = mErr.message;
-                }
+                reachable = false;
+                errorMessage = mErr.message;
               } finally {
                 await client.close().catch(() => {});
               }
             } catch (initErr: any) {
-              if (process.env.NODE_ENV === 'test') {
-                reachable = true;
-              } else {
-                reachable = false;
-                errorMessage = initErr.message;
-              }
+              reachable = false;
+              errorMessage = initErr.message;
             }
           } else {
-            reachable = true;
+            reachable = false;
+            errorMessage = 'No MongoDB URI or connection string provided';
           }
         }
       } catch (err: any) {
@@ -205,12 +214,12 @@ export class ConnectionService {
         errorMessage = err.message ? err.message.replace(/:[^:@]+@/, ':***@') : 'Connection failed';
       }
     } else {
-      if (process.env.ALLOW_SYNTHETIC_SOURCE === 'true' || process.env.NODE_ENV === 'test') {
-        reachable = true;
-      } else {
-        reachable = false;
-        errorMessage = 'No credentials found in vault for connection';
-      }
+      reachable = false;
+      errorMessage = 'No credentials found in vault for connection';
+    }
+
+    if (errorMessage) {
+      errorMessage = errorMessage.replace(/:[^:@]+@/, ':***@');
     }
 
     const latencyMs = Math.max(1, Date.now() - startTime);

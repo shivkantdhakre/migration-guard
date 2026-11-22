@@ -110,18 +110,22 @@ export class ReportService {
 
     try {
       fs.writeFileSync(storageFilePath, content, 'utf8');
+      const writtenContent = fs.readFileSync(storageFilePath, 'utf8');
+      const writtenChecksum = CryptoUtil.canonicalHash(writtenContent);
+      if (writtenChecksum !== checksum) {
+        throw new Error('Durable report write verification failed: written checksum does not match expected checksum.');
+      }
       await this.db.query('UPDATE report_artifacts SET storage_ref = $1 WHERE id = $2', [
         storageFilePath,
         reportArtifact.id,
       ]);
       reportArtifact.storage_ref = storageFilePath;
-    } catch {
-      // If filesystem write fails in sandbox/memory mode, store in memory cache
+    } catch (writeErr: any) {
+      await this.db.query('UPDATE report_artifacts SET status = $1 WHERE id = $2', ['ERROR', reportArtifact.id]);
+      throw new Error(`Failed to persist durable report to storage: ${writeErr.message}`);
     }
 
-    this.inMemoryCache.set(reportArtifact.id, content);
     reportArtifact.content = content;
-
     return reportArtifact;
   }
 
@@ -146,16 +150,11 @@ export class ReportService {
 
   async downloadReport(reportId: string, userId: string) {
     const report = await this.getReport(reportId, userId);
-    let content = this.inMemoryCache.get(reportId) || report.content;
-
-    if (!content && report.storage_ref && fs.existsSync(report.storage_ref)) {
-      content = fs.readFileSync(report.storage_ref, 'utf8');
-      this.inMemoryCache.set(reportId, content);
+    if (!report.storage_ref || !fs.existsSync(report.storage_ref)) {
+      throw new NotFoundException(`Durable report artifact ${reportId} not found in persistent storage.`);
     }
 
-    if (!content) {
-      throw new NotFoundException(`Durable report artifact ${reportId} not found.`);
-    }
+    const content = fs.readFileSync(report.storage_ref, 'utf8');
 
     // Verify stored content matches registered checksum (Section 7.1)
     const currentChecksum = CryptoUtil.canonicalHash(content);

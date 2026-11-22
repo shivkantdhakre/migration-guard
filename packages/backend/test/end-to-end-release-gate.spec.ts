@@ -68,6 +68,15 @@ describe('End-to-End 15-Step Production Release Gate (Section 9.5)', () => {
     migrationService = new MigrationService(db, workspaceService);
     validationService = new ValidationService(db, workspaceService);
     reportService = new ReportService(db, workspaceService);
+
+    ConnectionService.customProber = async (conn) => ({
+      reachable: true,
+      engineVersion: conn.engine === 'MONGODB' ? 'MongoDB 7.0' : 'PostgreSQL 16',
+    });
+  });
+
+  afterEach(() => {
+    ConnectionService.customProber = undefined;
   });
 
   it('Executes the complete 15-step deterministic lifecycle from registration to verified report', async () => {
@@ -297,7 +306,22 @@ describe('End-to-End 15-Step Production Release Gate (Section 9.5)', () => {
     // -------------------------------------------------------------
     // Step 13: Validate complete source and destination datasets
     // -------------------------------------------------------------
-    // Seed real destination customer table row
+    // Seed real source and destination customer table rows
+    await db.query(
+      `CREATE TABLE IF NOT EXISTS source_customers (
+         id VARCHAR(64) PRIMARY KEY,
+         name VARCHAR(255),
+         email VARCHAR(255),
+         created_at TIMESTAMPTZ,
+         tier VARCHAR(32)
+       )`,
+    );
+    await db.query(
+      `INSERT INTO source_customers (id, name, email, created_at, tier)
+       VALUES ('cust_001', 'Jane Doe', 'jane.doe@corp.com', NOW(), 'ENTERPRISE')
+       ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name`,
+    );
+
     await db.query(
       `CREATE TABLE IF NOT EXISTS customers (
          id VARCHAR(64) PRIMARY KEY,

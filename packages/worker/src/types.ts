@@ -98,7 +98,7 @@ export interface SourceConnector {
 export interface DestinationConnector {
   testConnection(): Promise<{ success: boolean; latencyMs: number; message?: string }>;
   writeBatch(batch: TransformedBatch, options: WriteOptions): Promise<WriteResult>;
-  readByKeys(destinationObject: string, keys: string[]): Promise<DestinationRecord[]>;
+  readByKeys(destinationObject: string, keys: string[], keyColumn?: string): Promise<DestinationRecord[]>;
   close(): Promise<void>;
 }
 

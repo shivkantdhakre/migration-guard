@@ -4,18 +4,48 @@ import {
   ConflictException,
   ForbiddenException,
   Optional,
+  OnModuleInit,
+  OnModuleDestroy,
 } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
 import { WorkspaceService } from '../workspace/workspace.service';
 import { QueueService, MigrationJobPayload } from '../queue/queue.service';
 
 @Injectable()
-export class MigrationService {
+export class MigrationService implements OnModuleInit, OnModuleDestroy {
+  private outboxTimer: NodeJS.Timeout | null = null;
+
   constructor(
     private db: DatabaseService,
     private workspaceService: WorkspaceService,
     @Optional() private queueService?: QueueService,
   ) {}
+
+  onModuleInit() {
+    this.startAutonomousOutboxPublisher();
+  }
+
+  onModuleDestroy() {
+    this.stopAutonomousOutboxPublisher();
+  }
+
+  public startAutonomousOutboxPublisher(intervalMs = 3000) {
+    if (this.outboxTimer) return;
+    this.outboxTimer = setInterval(async () => {
+      try {
+        await this.dispatchPendingOutboxBatches();
+      } catch (err: any) {
+        // Resilient autonomous background publisher
+      }
+    }, intervalMs);
+  }
+
+  public stopAutonomousOutboxPublisher() {
+    if (this.outboxTimer) {
+      clearInterval(this.outboxTimer);
+      this.outboxTimer = null;
+    }
+  }
 
   async startMigrationRun(planVersionId: string, userId: string) {
     // 1. Fetch plan version with plan details
@@ -109,14 +139,28 @@ export class MigrationService {
             ? `batch_${sourceObject}_${String(i).padStart(4, '0')}`
             : `batch_${String(i).padStart(4, '0')}`;
 
-        // Insert batch in PENDING state (Transactional Outbox Pattern)
+        const cursorStart = i === 1 ? null : { offset: (i - 1) * batchSize };
+        const cursorEnd = explicitBatchesPerTable ? { offset: i * batchSize } : undefined;
+
+        // Insert batch in PENDING state (Transactional Outbox Pattern) with complete immutable context
         await this.db.query(
           `INSERT INTO migration_batches (
              migration_run_id, batch_key, sequence_no, status,
+             source_object, destination_object, mapping_version_id,
+             source_cursor_start, source_cursor_end,
              records_read, records_written, records_skipped, records_failed
            )
-           VALUES ($1, $2, $3, 'PENDING', 0, 0, 0, 0)`,
-          [run.id, batchKey, overallSeq],
+           VALUES ($1, $2, $3, 'PENDING', $4, $5, $6, $7, $8, 0, 0, 0, 0)`,
+          [
+            run.id,
+            batchKey,
+            overallSeq,
+            sourceObject,
+            destinationObject,
+            version.mapping_version_id || null,
+            cursorStart ? JSON.stringify(cursorStart) : null,
+            cursorEnd ? JSON.stringify(cursorEnd) : null,
+          ],
         );
 
         payloads.push({
@@ -126,8 +170,8 @@ export class MigrationService {
           sequenceNo: overallSeq,
           sourceObject,
           destinationObject,
-          cursorStart: i === 1 ? null : { offset: (i - 1) * batchSize },
-          cursorEnd: explicitBatchesPerTable ? { offset: i * batchSize } : undefined,
+          cursorStart,
+          cursorEnd,
           batchSize,
           planVersionId,
           mappingVersionId: version.mapping_version_id || 'default-mapping',
@@ -163,48 +207,67 @@ export class MigrationService {
   }
 
   /**
-   * Transactional Outbox Dispatcher: queries all PENDING batches for a run,
+   * Transactional Outbox Dispatcher: queries all PENDING batches (for a specific run or across all runs),
    * dispatches them to BullMQ, and idempotently updates their status to QUEUED.
+   * Serves both synchronous post-creation dispatch and the autonomous background publisher.
    */
-  async dispatchPendingOutboxBatches(runId: string): Promise<number> {
-    const res = await this.db.query(
-      `SELECT * FROM migration_batches WHERE migration_run_id = $1 AND status = 'PENDING' ORDER BY sequence_no ASC`,
-      [runId],
-    );
+  async dispatchPendingOutboxBatches(runId?: string): Promise<number> {
+    let query = `SELECT * FROM migration_batches WHERE status = 'PENDING'`;
+    const params: any[] = [];
+    if (runId) {
+      query += ` AND migration_run_id = $1`;
+      params.push(runId);
+    }
+    query += ` ORDER BY sequence_no ASC LIMIT 100`;
+
+    const res = await this.db.query(query, params);
     if (res.rows.length === 0 || !this.queueService) return 0;
 
-    const planRes = await this.db.query(
-      `SELECT mpv.* FROM migration_plan_versions mpv
-       JOIN migration_runs mr ON mr.plan_version_id = mpv.id
-       WHERE mr.id = $1`,
-      [runId],
-    );
-    const version = planRes.rows[0];
-    const batchSize = version?.execution_config_json?.batchSize || 1000;
-    const writeMode = version?.execution_config_json?.writeMode || 'upsert';
+    const payloads: MigrationJobPayload[] = [];
+    const planCache = new Map<string, any>();
 
-    const payloads: MigrationJobPayload[] = res.rows.map((b: any) => ({
-      jobId: b.attempt_count > 0 ? `${runId}_${b.batch_key}_att${b.attempt_count}` : `${runId}_${b.batch_key}`,
-      migrationRunId: runId,
-      batchKey: b.batch_key,
-      sequenceNo: Number(b.sequence_no),
-      sourceObject: b.source_object || 'customers',
-      destinationObject: b.destination_object || 'customers',
-      cursorStart: b.source_cursor_start || null,
-      cursorEnd: b.source_cursor_end || null,
-      batchSize,
-      planVersionId: version?.id || '',
-      mappingVersionId: version?.mapping_version_id || 'default-mapping',
-      writeMode,
-      sourceConnectionId: version?.source_connection_id,
-      destinationConnectionId: version?.destination_connection_id,
-    }));
+    for (const b of res.rows) {
+      const bRunId = b.migration_run_id;
+      let version = planCache.get(bRunId);
+      if (!version) {
+        const planRes = await this.db.query(
+          `SELECT mpv.* FROM migration_plan_versions mpv
+           JOIN migration_runs mr ON mr.plan_version_id = mpv.id
+           WHERE mr.id = $1`,
+          [bRunId],
+        );
+        version = planRes.rows[0];
+        planCache.set(bRunId, version);
+      }
+
+      const batchSize = version?.execution_config_json?.batchSize || 1000;
+      const writeMode = version?.execution_config_json?.writeMode || 'upsert';
+
+      payloads.push({
+        jobId: b.attempt_count > 0 ? `${bRunId}_${b.batch_key}_att${b.attempt_count}` : `${bRunId}_${b.batch_key}`,
+        migrationRunId: bRunId,
+        batchKey: b.batch_key,
+        sequenceNo: Number(b.sequence_no),
+        sourceObject: b.source_object,
+        destinationObject: b.destination_object,
+        cursorStart: b.source_cursor_start || null,
+        cursorEnd: b.source_cursor_end || null,
+        batchSize,
+        planVersionId: version?.id || '',
+        mappingVersionId: b.mapping_version_id || version?.mapping_version_id || 'default-mapping',
+        writeMode,
+        sourceConnectionId: version?.source_connection_id,
+        destinationConnectionId: version?.destination_connection_id,
+      });
+    }
 
     await this.queueService.dispatchBatches(payloads);
-    await this.db.query(
-      `UPDATE migration_batches SET status = 'QUEUED' WHERE migration_run_id = $1 AND status = 'PENDING'`,
-      [runId],
-    );
+    for (const p of payloads) {
+      await this.db.query(
+        `UPDATE migration_batches SET status = 'QUEUED' WHERE migration_run_id = $1 AND batch_key = $2 AND status = 'PENDING'`,
+        [p.migrationRunId, p.batchKey],
+      );
+    }
     return payloads.length;
   }
 
@@ -333,13 +396,13 @@ export class MigrationService {
         migrationRunId: runId,
         batchKey: b.batch_key,
         sequenceNo: Number(b.sequence_no),
-        sourceObject: b.source_object || 'customers',
-        destinationObject: b.destination_object || 'customers',
+        sourceObject: b.source_object,
+        destinationObject: b.destination_object,
         cursorStart: b.source_cursor_start || null,
         cursorEnd: b.source_cursor_end || null,
         batchSize,
         planVersionId: version?.id || '',
-        mappingVersionId: version?.mapping_version_id || 'default-mapping',
+        mappingVersionId: b.mapping_version_id || version?.mapping_version_id || 'default-mapping',
         writeMode,
         sourceConnectionId: version?.source_connection_id,
         destinationConnectionId: version?.destination_connection_id,
@@ -411,9 +474,6 @@ export class MigrationService {
       );
       const version = planRes.rows[0];
       const batchSize = version?.execution_config_json?.batchSize || 1000;
-      const scope = version?.scope_json || {};
-      const sourceObject = scope.sourceObject || 'customers';
-      const destinationObject = scope.destinationObject || 'customers';
       const writeMode = version?.execution_config_json?.writeMode || 'upsert';
 
       const retryPayloads: MigrationJobPayload[] = res.rows.map((b: any) => ({
@@ -421,13 +481,13 @@ export class MigrationService {
         migrationRunId: runId,
         batchKey: b.batch_key,
         sequenceNo: Number(b.sequence_no),
-        sourceObject,
-        destinationObject,
+        sourceObject: b.source_object,
+        destinationObject: b.destination_object,
         cursorStart: b.source_cursor_start || null,
         cursorEnd: b.source_cursor_end || null,
         batchSize,
         planVersionId: version?.id || '',
-        mappingVersionId: version?.mapping_version_id || 'default-mapping',
+        mappingVersionId: b.mapping_version_id || version?.mapping_version_id || 'default-mapping',
         writeMode,
         sourceConnectionId: version?.source_connection_id,
         destinationConnectionId: version?.destination_connection_id,

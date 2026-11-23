@@ -64,9 +64,9 @@ describe('End-to-End 15-Step Production Release Gate (Section 9.5)', () => {
     mappingService = new MappingService(db, workspaceService, dslValidator, previewService);
 
     planService = new PlanService(db, workspaceService, projectService);
-    dryRunService = new DryRunService(db);
+    dryRunService = new DryRunService(db, workspaceService, credentialsService);
     migrationService = new MigrationService(db, workspaceService);
-    validationService = new ValidationService(db, workspaceService);
+    validationService = new ValidationService(db, workspaceService, credentialsService);
     reportService = new ReportService(db, workspaceService);
 
     ConnectionService.customProber = async (conn) => ({
@@ -77,6 +77,7 @@ describe('End-to-End 15-Step Production Release Gate (Section 9.5)', () => {
 
   afterEach(() => {
     ConnectionService.customProber = undefined;
+    migrationService.stopAutonomousOutboxPublisher();
   });
 
   it('Executes the complete 15-step deterministic lifecycle from registration to verified report', async () => {
@@ -209,6 +210,10 @@ describe('End-to-End 15-Step Production Release Gate (Section 9.5)', () => {
     expect(dryRun.measuredFacts.recordsTransformed).toBeGreaterThan(0);
     expect(dryRun.measuredFacts.transformationErrors).toBe(0);
 
+    // Verify authorized dry run retrieval
+    const fetchedDryRun = await dryRunService.getDryRun(dryRun.id, userId);
+    expect(fetchedDryRun.id).toBe(dryRun.id);
+
     // -------------------------------------------------------------
     // Step 8: Obtain explicit human approval for that exact hash
     // -------------------------------------------------------------
@@ -236,6 +241,8 @@ describe('End-to-End 15-Step Production Release Gate (Section 9.5)', () => {
     );
     expect(batches.rows.length).toBeGreaterThan(0);
     const firstBatch = batches.rows[0];
+    expect(firstBatch.source_object).toBe('customers');
+    expect(firstBatch.destination_object).toBe('customers');
 
     // -------------------------------------------------------------
     // Step 11: Execute the migration through the production worker logic

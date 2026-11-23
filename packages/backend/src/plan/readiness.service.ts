@@ -77,6 +77,53 @@ export class ReadinessService {
       facts.push(`Bounded batch size set to ${execConfig.batchSize || 1000}.`);
     }
 
+    // Verify source and destination schema compatibility
+    if (version.source_schema_snapshot_id && version.destination_schema_snapshot_id) {
+      const srcSnap = await this.db.query('SELECT snapshot_json FROM schema_snapshots WHERE id = $1', [
+        version.source_schema_snapshot_id,
+      ]);
+      const dstSnap = await this.db.query('SELECT snapshot_json FROM schema_snapshots WHERE id = $1', [
+        version.destination_schema_snapshot_id,
+      ]);
+
+      if (srcSnap.rows.length > 0 && dstSnap.rows.length > 0) {
+        const dstJson = dstSnap.rows[0].snapshot_json || {};
+
+        if (version.mapping_version_id) {
+          const mRes = await this.db.query('SELECT mapping_json FROM mapping_versions WHERE id = $1', [
+            version.mapping_version_id,
+          ]);
+          if (mRes.rows.length > 0) {
+            const mRaw = mRes.rows[0].mapping_json;
+            const parsedMap = typeof mRaw === 'string' ? JSON.parse(mRaw) : mRaw;
+            const objects: any[] = Array.isArray(parsedMap.objects) ? parsedMap.objects : [parsedMap];
+
+            for (const obj of objects) {
+              const sName = obj.source?.collection || obj.source?.object || (typeof obj.source === 'string' ? obj.source : 'customers');
+              const dName = obj.destination?.table || obj.destination?.object || (typeof obj.destination === 'string' ? obj.destination : 'customers');
+
+              const dTable = dstJson.tables?.find((t: any) => t.name === dName);
+              if (dTable && Array.isArray(dTable.columns)) {
+                for (const col of dTable.columns) {
+                  if (!col.nullable && !col.isPrimaryKey) {
+                    const isMapped = Array.isArray(obj.fields)
+                      ? obj.fields.some((f: any) => f.destinationPath === col.name)
+                      : true;
+                    if (!isMapped) {
+                      blockers.push(`Destination table '${dName}' column '${col.name}' is non-nullable but not mapped from source '${sName}'.`);
+                    }
+                  }
+                }
+              }
+            }
+            if (blockers.length === 0) {
+              facts.push(`Source and destination schema compatibility verified across ${objects.length} mapped object(s).`);
+            }
+          }
+        }
+      }
+    }
+
     const ready = blockers.length === 0;
     const score = ready ? (hypotheses.length === 0 ? 100 : 85) : 30;
 

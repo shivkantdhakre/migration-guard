@@ -32,6 +32,7 @@ export interface QueueHandlerConfig {
   idTracker?: IdTracker;
   transformFn?: TransformFunction;
   onNextBatchScheduled?: (payload: MigrationJobPayload) => Promise<void> | void;
+  isPausedOrCancelled?: (migrationRunId: string) => Promise<'RUNNING' | 'PAUSED' | 'CANCELLED' | boolean>;
 }
 
 export interface JobExecutionResult {
@@ -57,6 +58,7 @@ export class QueueHandler {
   private destinationWriter: DestinationWriter;
   private transformFn: TransformFunction;
   private onNextBatchScheduled?: (payload: MigrationJobPayload) => Promise<void> | void;
+  private isPausedOrCancelled?: (migrationRunId: string) => Promise<'RUNNING' | 'PAUSED' | 'CANCELLED' | boolean>;
 
   constructor(config: QueueHandlerConfig) {
     this.sourceConnector = config.sourceConnector;
@@ -65,6 +67,7 @@ export class QueueHandler {
     this.checkpointManager = config.checkpointManager;
     this.idTracker = config.idTracker;
     this.onNextBatchScheduled = config.onNextBatchScheduled;
+    this.isPausedOrCancelled = config.isPausedOrCancelled;
 
     this.destinationWriter = new DestinationWriter({
       connector: config.destinationConnector,
@@ -261,6 +264,49 @@ export class QueueHandler {
         'TRANSFORM_COMPLETED',
       );
 
+      // Re-check cancellation/pause before executing destination writes (Batch Drain Policy)
+      if (this.isPausedOrCancelled) {
+        const state = await this.isPausedOrCancelled(payload.migrationRunId);
+        if (state === 'CANCELLED' || state === true) {
+          await this.manifestTracker.transitionState(
+            payload.migrationRunId,
+            payload.batchKey,
+            'FAILED_PERMANENT',
+            'TRANSFORM_COMPLETED',
+            {
+              message: `Write aborted: execution cancelled for run ${payload.migrationRunId}`,
+              classification: 'PERMANENT',
+              timestamp: new Date().toISOString(),
+            },
+          );
+          return {
+            migrationRunId: payload.migrationRunId,
+            batchKey: payload.batchKey,
+            sequenceNo: payload.sequenceNo,
+            status: 'FAILED_PERMANENT',
+            recordsRead,
+            recordsWritten: 0,
+            recordsSkipped: 0,
+            recordsFailed: 0,
+            hasMore: false,
+          };
+        }
+        if (state === 'PAUSED') {
+          await this.manifestTracker.transitionState(
+            payload.migrationRunId,
+            payload.batchKey,
+            'RETRY_WAIT',
+            'TRANSFORM_COMPLETED',
+            {
+              message: `Execution paused for run ${payload.migrationRunId}. Batch ${payload.batchKey} halted before write.`,
+              classification: 'RETRYABLE',
+              timestamp: new Date().toISOString(),
+            },
+          );
+          throw new Error(`[QueueHandler] Execution paused for run ${payload.migrationRunId}. Batch ${payload.batchKey} halted before write.`);
+        }
+      }
+
       // 6. Write to destination idempotently
       const transformedBatch: TransformedBatch = {
         destinationObject: payload.destinationObject,
@@ -332,27 +378,38 @@ export class QueueHandler {
       const hasMore = sourceBatch.hasMore && cursorEnd !== null;
 
       if (hasMore) {
-        const nextSequence = payload.sequenceNo + 1;
-        const nextBatchKey = `batch_${payload.sourceObject}_seq_${String(nextSequence).padStart(6, '0')}`;
-        nextPayload = {
-          jobId: `job_${payload.migrationRunId}_${nextBatchKey}`,
-          migrationRunId: payload.migrationRunId,
-          batchKey: nextBatchKey,
-          sequenceNo: nextSequence,
-          sourceObject: payload.sourceObject,
-          destinationObject: payload.destinationObject,
-          cursorStart: cursorEnd,
-          batchSize: payload.batchSize,
-          maxBytes: payload.maxBytes,
-          planVersionId: payload.planVersionId,
-          mappingVersionId: payload.mappingVersionId,
-          writeMode: payload.writeMode,
-          conflictColumns: payload.conflictColumns,
-          updateColumns: payload.updateColumns,
-        };
+        // Enforce batch drain policy: halt downstream scheduling if run was paused or cancelled
+        let canSchedule = true;
+        if (this.isPausedOrCancelled) {
+          const state = await this.isPausedOrCancelled(payload.migrationRunId);
+          if (state === 'CANCELLED' || state === 'PAUSED' || state === true) {
+            canSchedule = false;
+          }
+        }
 
-        if (this.onNextBatchScheduled) {
-          await this.onNextBatchScheduled(nextPayload);
+        if (canSchedule) {
+          const nextSequence = payload.sequenceNo + 1;
+          const nextBatchKey = `batch_${payload.sourceObject}_seq_${String(nextSequence).padStart(6, '0')}`;
+          nextPayload = {
+            jobId: `job_${payload.migrationRunId}_${nextBatchKey}`,
+            migrationRunId: payload.migrationRunId,
+            batchKey: nextBatchKey,
+            sequenceNo: nextSequence,
+            sourceObject: payload.sourceObject,
+            destinationObject: payload.destinationObject,
+            cursorStart: cursorEnd,
+            batchSize: payload.batchSize,
+            maxBytes: payload.maxBytes,
+            planVersionId: payload.planVersionId,
+            mappingVersionId: payload.mappingVersionId,
+            writeMode: payload.writeMode,
+            conflictColumns: payload.conflictColumns,
+            updateColumns: payload.updateColumns,
+          };
+
+          if (this.onNextBatchScheduled) {
+            await this.onNextBatchScheduled(nextPayload);
+          }
         }
       }
 

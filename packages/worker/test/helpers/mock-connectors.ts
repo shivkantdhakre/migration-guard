@@ -167,13 +167,15 @@ export class MockDestinationConnector implements DestinationConnector {
   public async readByKeys(
     destinationObject: string,
     keys: string[],
+    keyColumn = 'id',
   ): Promise<DestinationRecord[]> {
     const results: DestinationRecord[] = [];
     for (const key of keys) {
       if (this.store.has(key)) {
+        const row = this.store.get(key)!;
         results.push({
-          destinationKey: key,
-          data: this.store.get(key)!,
+          destinationKey: String(row[keyColumn] !== undefined ? row[keyColumn] : key),
+          data: row,
         });
       }
     }

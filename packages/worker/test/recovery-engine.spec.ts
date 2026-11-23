@@ -189,4 +189,68 @@ describe('Recovery Engine & Crash Reconciliation Matrix', () => {
     const updated = await manifestTracker.getBatch('run_crash_unknown_fail', 'batch_unknown_2');
     expect(updated?.status).toBe('RETRY_WAIT');
   });
+
+  it('reconciles OUTCOME_UNKNOWN using custom non-id destination key (e.g. reading_id or device_id)', async () => {
+    const destinationConnector = new MockDestinationConnector();
+    // Simulate table with custom primary key column 'reading_id'
+    destinationConnector.store.set('read_1001', { reading_id: 'read_1001', metric: 42.5 });
+    destinationConnector.store.set('read_1002', { reading_id: 'read_1002', metric: 98.1 });
+
+    const manifestTracker = new BatchManifestTracker();
+    const checkpointManager = new CheckpointManager();
+
+    const engine = new RecoveryEngine({
+      destinationConnector,
+      manifestTracker,
+      checkpointManager,
+    });
+
+    await manifestTracker.createBatch({
+      migrationRunId: 'run_crash_custom_key',
+      batchKey: 'batch_telemetry_01',
+      sequenceNo: 1,
+      sourceObject: 'sensor_readings',
+      destinationObject: 'telemetry_readings',
+      sourceCursorStart: null,
+    });
+
+    await manifestTracker.transitionState('run_crash_custom_key', 'batch_telemetry_01', 'RUNNING');
+    await manifestTracker.updateSubStage('run_crash_custom_key', 'batch_telemetry_01', 'WRITE_STARTED');
+    await manifestTracker.transitionState('run_crash_custom_key', 'batch_telemetry_01', 'OUTCOME_UNKNOWN');
+
+    await manifestTracker.recordManifests([
+      {
+        migrationRunId: 'run_crash_custom_key',
+        batchKey: 'batch_telemetry_01',
+        sourceObject: 'sensor_readings',
+        sourceKey: 's_1',
+        destinationObject: 'telemetry_readings',
+        destinationKey: 'read_1001',
+        status: 'WRITTEN',
+      },
+      {
+        migrationRunId: 'run_crash_custom_key',
+        batchKey: 'batch_telemetry_01',
+        sourceObject: 'sensor_readings',
+        sourceKey: 's_2',
+        destinationObject: 'telemetry_readings',
+        destinationKey: 'read_1002',
+        status: 'WRITTEN',
+      },
+    ]);
+
+    // Pass custom destinationKey 'reading_id' instead of default 'id'
+    const plan = await engine.prepareResume(
+      'run_crash_custom_key',
+      'sensor_readings',
+      'telemetry_readings',
+      'reading_id',
+    );
+
+    expect(plan.reconciledBatches[0].resolvedStatus).toBe('COMMITTED');
+    expect(plan.lastCommittedSequenceNo).toBe(1);
+
+    const updated = await manifestTracker.getBatch('run_crash_custom_key', 'batch_telemetry_01');
+    expect(updated?.status).toBe('COMMITTED');
+  });
 });

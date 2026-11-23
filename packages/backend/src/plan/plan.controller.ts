@@ -90,8 +90,11 @@ export class PlanController {
   }
 
   @Get('dry-runs/:dryRunId')
-  async getDryRun(@Param('dryRunId') dryRunId: string) {
-    return this.dryRunService.getDryRun(dryRunId);
+  async getDryRun(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('dryRunId') dryRunId: string,
+  ) {
+    return this.dryRunService.getDryRun(dryRunId, user.id);
   }
 
   @Post('plan-versions/:versionId/approvals')

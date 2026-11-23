@@ -1,5 +1,12 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+  Optional,
+} from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
+import { WorkspaceService } from '../workspace/workspace.service';
+import { CredentialsService } from '../connection/credentials.service';
 import { TransformationEngine, ObjectMapping } from '@migrationguard/core';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -7,7 +14,11 @@ import { v4 as uuidv4 } from 'uuid';
 export class DryRunService {
   private dryRuns = new Map<string, any>();
 
-  constructor(private db: DatabaseService) {}
+  constructor(
+    private db: DatabaseService,
+    private workspaceService: WorkspaceService,
+    @Optional() private credentialsService?: CredentialsService,
+  ) {}
 
   async startDryRun(planVersionId: string): Promise<any> {
     const res = await this.db.query('SELECT * FROM migration_plan_versions WHERE id = $1', [
@@ -37,14 +48,48 @@ export class DryRunService {
       }
     }
 
-    const sourceObj = (mapping as any)?.source?.object || (typeof (mapping as any)?.source === 'string' ? (mapping as any).source : 'customers');
-    const destObj = (mapping as any)?.destination?.object || (typeof (mapping as any)?.destination === 'string' ? (mapping as any).destination : 'customers');
+    const sourceObj = (mapping as any)?.source?.object || (mapping as any)?.source?.collection || (typeof (mapping as any)?.source === 'string' ? (mapping as any).source : 'customers');
+    const destObj = (mapping as any)?.destination?.object || (mapping as any)?.destination?.table || (typeof (mapping as any)?.destination === 'string' ? (mapping as any).destination : 'customers');
 
     // Extract bounded sample from selected source connection / schema snapshot
     let sampleRecords: any[] = [];
 
-    // 1. Check schema snapshot samples if snapshot exists
-    if (version.source_schema_snapshot_id) {
+    // 1. Live source connection sampling using decrypted credentials (P1: Real Source Sampling)
+    if (version.source_connection_id && this.credentialsService) {
+      try {
+        const srcConnRes = await this.db.query('SELECT * FROM connections WHERE id = $1', [version.source_connection_id]);
+        if (srcConnRes.rows.length > 0) {
+          const srcConn = srcConnRes.rows[0];
+          const creds = await this.credentialsService.getDecryptedCredentials(
+            srcConn.id,
+            srcConn.credential_version,
+          );
+          if (srcConn.engine === 'MONGODB') {
+            const uri = creds?.uri || creds?.connectionString;
+            if (uri) {
+              const { MongoClient } = require('mongodb');
+              const client = new MongoClient(uri, { serverSelectionTimeoutMS: 2000 });
+              try {
+                await client.connect();
+                const dbName = srcConn.config_json?.database;
+                const coll = client.db(dbName).collection(sourceObj);
+                const docs = await coll.find().limit(500).toArray();
+                if (docs && docs.length > 0) {
+                  sampleRecords = docs;
+                }
+              } finally {
+                await client.close().catch(() => {});
+              }
+            }
+          }
+        }
+      } catch (err: any) {
+        console.warn(`[DryRunService] Live source sampling notice: ${err.message}`);
+      }
+    }
+
+    // 2. Check schema snapshot samples if live sampling returned empty
+    if (sampleRecords.length === 0 && version.source_schema_snapshot_id) {
       const snapRes = await this.db.query('SELECT * FROM schema_snapshots WHERE id = $1', [
         version.source_schema_snapshot_id,
       ]);
@@ -61,7 +106,7 @@ export class DryRunService {
       }
     }
 
-    // 2. Query source table from database if available
+    // 3. Query source table from local database if available
     if (sampleRecords.length === 0) {
       try {
         const sRes = await this.db.query(`SELECT * FROM "source_${sourceObj}" LIMIT 500`);
@@ -80,9 +125,15 @@ export class DryRunService {
       }
     }
 
-    // 3. Fallback bounded sample if source connection is offline/mock
-    const sampleSize = 500;
+    // 4. Fail-closed in production mode (zero synthetic fallbacks in production)
     if (sampleRecords.length === 0) {
+      if (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false') {
+        throw new BadRequestException(
+          `Cannot perform dry run: real source sample records are unavailable from the configured connection for '${sourceObj}'.`,
+        );
+      }
+      // Explicit non-production fallback only when ALLOW_SYNTHETIC_SOURCE=true
+      const sampleSize = 500;
       for (let i = 1; i <= sampleSize; i++) {
         sampleRecords.push({
           _id: `cust_sample_${i}`,
@@ -117,7 +168,7 @@ export class DryRunService {
         }
       }
     } else {
-      // Default identity transform
+      // Identity transform when mapping not found
       recordsTransformed = sampleRecords.length;
       transformedRecords.push(...sampleRecords);
     }
@@ -149,11 +200,13 @@ export class DryRunService {
 
     const measuredDurationMs = Math.max(1, Date.now() - startTime);
     const measuredRatePerSec = Math.round((recordsTransformed / (measuredDurationMs || 1)) * 1000);
-    const readyForApproval = transformationErrors === 0;
+    // Treat transformation errors and destination schema conflicts as strict approval blockers
+    const readyForApproval = transformationErrors === 0 && potentialTypeConflicts.length === 0;
 
     const dryRunResult = {
       id: dryRunId,
       planVersionId,
+      workspaceId: plan.workspace_id,
       planHash: version.plan_hash,
       status: readyForApproval ? 'COMPLETED' : 'FAILED',
       // Measured facts
@@ -193,23 +246,45 @@ export class DryRunService {
     return dryRunResult;
   }
 
-  async getDryRun(dryRunId: string): Promise<any> {
-    const dryRun = this.dryRuns.get(dryRunId);
-    if (dryRun) {
-      return dryRun;
+  async getDryRun(dryRunId: string, userId?: string): Promise<any> {
+    let dryRun = this.dryRuns.get(dryRunId);
+
+    if (!dryRun) {
+      // Attempt lookup from durable audit log
+      const auditRes = await this.db.query(
+        `SELECT details_json, workspace_id FROM audit_events WHERE action = 'DRY_RUN_COMPLETED' AND details_json->>'id' = $1`,
+        [dryRunId],
+      );
+      if (auditRes.rows.length > 0) {
+        dryRun = auditRes.rows[0].details_json;
+        dryRun.workspaceId = dryRun.workspaceId || auditRes.rows[0].workspace_id;
+        this.dryRuns.set(dryRunId, dryRun);
+      }
     }
 
-    // Attempt lookup from durable audit log
-    const auditRes = await this.db.query(
-      `SELECT details_json FROM audit_events WHERE action = 'DRY_RUN_COMPLETED' AND details_json->>'id' = $1`,
-      [dryRunId],
-    );
-    if (auditRes.rows.length > 0) {
-      const persisted = auditRes.rows[0].details_json;
-      this.dryRuns.set(dryRunId, persisted);
-      return persisted;
+    if (!dryRun) {
+      throw new NotFoundException(`Dry run ${dryRunId} not found.`);
     }
 
-    throw new NotFoundException(`Dry run ${dryRunId} not found.`);
+    // Enforce workspace authorization (IDOR Protection)
+    if (userId) {
+      let wsId = dryRun.workspaceId;
+      if (!wsId && dryRun.planVersionId) {
+        const vRes = await this.db.query(
+          `SELECT mp.workspace_id FROM migration_plan_versions mpv
+           JOIN migration_plans mp ON mpv.plan_id = mp.id
+           WHERE mpv.id = $1`,
+          [dryRun.planVersionId],
+        );
+        if (vRes.rows.length > 0) {
+          wsId = vRes.rows[0].workspace_id;
+        }
+      }
+      if (wsId) {
+        await this.workspaceService.assertWorkspaceAccess(wsId, userId, 'Viewer');
+      }
+    }
+
+    return dryRun;
   }
 }

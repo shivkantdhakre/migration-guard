@@ -135,10 +135,12 @@ export class MigrationRunner {
     }
 
     // Reconcile crash states & prepare resume
+    const destKey = config.conflictColumns?.[0] || 'id';
     const resumePlan = await this.recoveryEngine.prepareResume(
       migrationRunId,
       config.sourceObject,
       config.destinationObject,
+      destKey,
     );
 
     this.runStatuses.set(migrationRunId, 'RUNNING');

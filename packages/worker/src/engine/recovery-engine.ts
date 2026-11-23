@@ -66,6 +66,7 @@ export class RecoveryEngine {
     migrationRunId: string,
     sourceObject: string,
     destinationObject: string,
+    destinationKey = 'id',
   ): Promise<ResumePlan> {
     const batches = await this.manifestTracker.listBatches(migrationRunId);
     const objectBatches = batches.filter((b) => b.sourceObject === sourceObject);
@@ -81,7 +82,7 @@ export class RecoveryEngine {
       }
 
       // Check intermediate crash sub-stages
-      const reconciled = await this.reconcileBatch(batch, destinationObject);
+      const reconciled = await this.reconcileBatch(batch, destinationObject, destinationKey);
       if (reconciled) {
         reconciliationResults.push(reconciled);
       }
@@ -107,6 +108,7 @@ export class RecoveryEngine {
   public async reconcileBatch(
     batch: MigrationBatch,
     destinationObject: string,
+    destinationKey = 'id',
   ): Promise<ReconciliationResult | null> {
     const subStage = batch.subStage;
     const status = batch.status;
@@ -185,6 +187,7 @@ export class RecoveryEngine {
           const foundRecords = await this.destinationConnector.readByKeys(
             destinationObject,
             destinationKeys,
+            destinationKey,
           );
           const foundKeyMap = new Map<string, Record<string, unknown>>();
           for (const r of foundRecords) {

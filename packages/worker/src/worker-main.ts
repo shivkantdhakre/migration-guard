@@ -651,7 +651,8 @@ async function startWorker() {
         }
         if (existingBatch && existingBatch.status === 'OUTCOME_UNKNOWN') {
           console.log(`[Worker] Detected OUTCOME_UNKNOWN batch ${job.data.batchKey}. Reconciling via RecoveryEngine.`);
-          await recoveryEngine.reconcileBatch(existingBatch, job.data.destinationObject);
+          const destKey = (job.data.conflictColumns && job.data.conflictColumns.length > 0) ? job.data.conflictColumns[0] : 'id';
+          await recoveryEngine.reconcileBatch(existingBatch, job.data.destinationObject, destKey);
         }
 
         // In production, strictly prohibit ALLOW_DEMO_MAPPING
@@ -833,6 +834,17 @@ async function startWorker() {
                 removeOnFail: false,
               });
             }
+          },
+          isPausedOrCancelled: async (migrationRunId: string) => {
+            if (!dbPool) return 'RUNNING';
+            const check = await dbPool.query(
+              `SELECT status FROM migration_runs WHERE id = $1`,
+              [migrationRunId],
+            );
+            if (check.rows.length === 0) return 'RUNNING';
+            const s = check.rows[0].status;
+            if (s === 'PAUSED' || s === 'CANCELLED') return s;
+            return 'RUNNING';
           },
         });
 

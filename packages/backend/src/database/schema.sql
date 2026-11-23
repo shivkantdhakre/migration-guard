@@ -177,6 +177,9 @@ CREATE TABLE IF NOT EXISTS migration_batches (
     batch_key TEXT NOT NULL,
     sequence_no BIGINT NOT NULL,
     status TEXT NOT NULL DEFAULT 'PENDING', -- 'PENDING', 'QUEUED', 'RUNNING', 'COMMITTED', 'RETRY_WAIT', 'FAILED_RETRYABLE', 'FAILED_PERMANENT', 'OUTCOME_UNKNOWN'
+    source_object TEXT NOT NULL DEFAULT 'customers',
+    destination_object TEXT NOT NULL DEFAULT 'customers',
+    mapping_version_id UUID REFERENCES mapping_versions(id),
     source_cursor_start JSONB,
     source_cursor_end JSONB,
     records_read BIGINT NOT NULL DEFAULT 0,
@@ -492,6 +495,11 @@ BEGIN
       REFERENCES migration_batches(id, migration_run_id, batch_key) 
       ON DELETE CASCADE;
   END IF;
+
+  -- Ensure migration_batches has complete immutable batch context columns
+  ALTER TABLE migration_batches ADD COLUMN IF NOT EXISTS source_object TEXT NOT NULL DEFAULT 'customers';
+  ALTER TABLE migration_batches ADD COLUMN IF NOT EXISTS destination_object TEXT NOT NULL DEFAULT 'customers';
+  ALTER TABLE migration_batches ADD COLUMN IF NOT EXISTS mapping_version_id UUID REFERENCES mapping_versions(id);
 END $$;
 
 -- Validation Runs

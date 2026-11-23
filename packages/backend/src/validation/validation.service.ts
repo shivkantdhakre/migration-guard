@@ -6,6 +6,7 @@ import {
 import { DatabaseService } from '../database/database.service';
 import { WorkspaceService } from '../workspace/workspace.service';
 import { CredentialsService } from '../connection/credentials.service';
+import { appConfig } from '../config/configuration';
 import {
   ValidationEngine,
   ValidationDataset,
@@ -28,7 +29,16 @@ export class ValidationService {
          canonicalization_version, started_at, completed_at, summary_json
        )
        VALUES ($1, $2, 'ERROR', '1.0', '1.0', NOW(), NOW(), $3)`,
-      [workspaceId, runId, { error: errorReason, overallStatus: 'ERROR' }],
+      [
+        workspaceId,
+        runId,
+        {
+          error: errorReason,
+          executionStatus: 'ERROR',
+          outcome: 'ERROR',
+          overallStatus: 'ERROR',
+        },
+      ],
     );
   }
 
@@ -53,35 +63,57 @@ export class ValidationService {
     }
 
     // Verify source connection is not unavailable or in ERROR state
+    let srcConn: any = null;
+    let sourceCredentials: any = null;
     if (planVersion?.source_connection_id) {
       const srcConnRes = await this.db.query(
-        'SELECT status, engine FROM connections WHERE id = $1',
+        'SELECT * FROM connections WHERE id = $1',
         [planVersion.source_connection_id],
       );
       if (srcConnRes.rows.length === 0 || srcConnRes.rows[0].status === 'ERROR') {
         await this.recordFailedValidation(run.workspace_id, runId, 'Source connection is in ERROR state or unavailable.');
         throw new Error('Source connection is unavailable or in ERROR state. Validation failed closed.');
       }
+      srcConn = srcConnRes.rows[0];
+      if (this.credentialsService) {
+        try {
+          sourceCredentials = await this.credentialsService.getDecryptedCredentials(
+            srcConn.id,
+            srcConn.credential_version,
+          );
+        } catch (err: any) {
+          console.warn(`[ValidationService] Source credentials notice: ${err.message}`);
+        }
+      }
     }
 
     // Verify destination connection is not unavailable or in ERROR state
+    let destConn: any = null;
+    let destCredentials: any = null;
     if (planVersion?.destination_connection_id) {
       const destConnRes = await this.db.query(
-        'SELECT status, engine FROM connections WHERE id = $1',
+        'SELECT * FROM connections WHERE id = $1',
         [planVersion.destination_connection_id],
       );
       if (destConnRes.rows.length === 0 || destConnRes.rows[0].status === 'ERROR') {
         await this.recordFailedValidation(run.workspace_id, runId, 'Destination connection is in ERROR state or unavailable.');
         throw new Error('Destination connection is unavailable or in ERROR state. Validation failed closed.');
       }
+      destConn = destConnRes.rows[0];
+      if (this.credentialsService) {
+        try {
+          destCredentials = await this.credentialsService.getDecryptedCredentials(
+            destConn.id,
+            destConn.credential_version,
+          );
+        } catch (err: any) {
+          console.warn(`[ValidationService] Destination credentials notice: ${err.message}`);
+        }
+      }
     }
 
-    // Identify object mapping
-    let sourceObjectName = 'customers';
-    let destObjectName = 'customers';
-    let sourceKeyField = 'id';
-    let destKeyField = 'id';
-
+    // Identify all object mappings from plan version
+    const objectMappings: any[] = [];
     if (planVersion?.mapping_version_id) {
       const mapRes = await this.db.query('SELECT * FROM mapping_versions WHERE id = $1', [
         planVersion.mapping_version_id,
@@ -89,78 +121,24 @@ export class ValidationService {
       if (mapRes.rows.length > 0) {
         const mJson = mapRes.rows[0].mapping_json;
         const parsed = typeof mJson === 'string' ? JSON.parse(mJson) : mJson;
-        const firstObj = Array.isArray(parsed.objects) ? parsed.objects[0] : (parsed.source ? parsed : null);
-        if (firstObj) {
-          sourceObjectName =
-            firstObj.source?.collection ||
-            firstObj.source?.object ||
-            (typeof firstObj.source === 'string' ? firstObj.source : 'customers');
-          destObjectName =
-            firstObj.destination?.table ||
-            firstObj.destination?.object ||
-            (typeof firstObj.destination === 'string' ? firstObj.destination : 'customers');
-          sourceKeyField = firstObj.identity?.sourceKey || firstObj.source?.key || 'id';
-          destKeyField = firstObj.identity?.destinationKey || firstObj.destination?.key || 'id';
+        if (Array.isArray(parsed.objects)) {
+          objectMappings.push(...parsed.objects);
+        } else if (parsed.source) {
+          objectMappings.push(parsed);
         }
       }
     }
 
-    // Load manifests scoped to this exact migration run
-    const manifestsRes = await this.db.query(
-      `SELECT * FROM record_manifests WHERE migration_run_id = $1 ORDER BY created_at ASC`,
-      [runId],
-    );
-    const manifests = manifestsRes.rows;
-
-    // Load destination records scoped to destination keys in manifests
-    let destRecords: any[] = [];
-    const destKeys = manifests
-      .map((m: any) => m.destination_key || m.source_key)
-      .filter(Boolean);
-
-    if (destKeys.length > 0) {
-      try {
-        const dRes = await this.db.query(`SELECT * FROM ${destObjectName}`);
-        destRecords = dRes.rows.filter((r: any) =>
-          destKeys.includes(String(r[destKeyField] || r.id || r.destination_key)),
-        );
-      } catch (err: any) {
-        console.warn(`[ValidationService] Destination query notice: ${err.message}`);
-      }
-    }
-
-    // Load source baseline records scoped to source keys in manifests
-    let sourceRecords: any[] = [];
-    const sourceKeys = manifests.map((m: any) => m.source_key).filter(Boolean);
-
-    if (sourceKeys.length > 0) {
-      try {
-        const sRes = await this.db.query(`SELECT * FROM source_${sourceObjectName}`);
-        sourceRecords = sRes.rows.filter((r: any) =>
-          sourceKeys.includes(String(r[sourceKeyField] || r.id || r._id || r.source_key)),
-        );
-      } catch {
-        // Fallback to direct table if separate source table is not prefixed
-        try {
-          const sRes = await this.db.query(`SELECT * FROM ${sourceObjectName}`);
-          sourceRecords = sRes.rows.filter((r: any) =>
-            sourceKeys.includes(String(r[sourceKeyField] || r.id || r._id || r.source_key)),
-          );
-        } catch {
-          // No records found in local db
-        }
-      }
-
-      if (sourceRecords.length === 0) {
-        await this.recordFailedValidation(
-          run.workspace_id,
-          runId,
-          `No source records could be retrieved from source for ${sourceObjectName}. Cannot prove migration correctness.`,
-        );
-        throw new Error(
-          `Source records could not be retrieved from source connection. Validation failed closed.`,
-        );
-      }
+    if (objectMappings.length === 0) {
+      objectMappings.push({
+        source: { collection: 'customers', key: 'id' },
+        destination: { table: 'customers', key: 'id' },
+        identity: { sourceKey: 'id', destinationKey: 'id' },
+        fields: [
+          { sourcePath: 'name', destinationPath: 'name' },
+          { sourcePath: 'email', destinationPath: 'email' },
+        ],
+      });
     }
 
     const parseDateSafe = (d: any) => {
@@ -169,76 +147,256 @@ export class ValidationService {
       return isNaN(parsed.getTime()) ? new Date().toISOString() : parsed.toISOString();
     };
 
-    let sourceDataset: ValidationDataset;
-    let destinationDataset: ValidationDataset;
+    // Helper: read source documents from real MongoDB or PostgreSQL fallback
+    const fetchSourceRecords = async (sourceObjectName: string, sourceKeyField: string, sourceKeys: string[]): Promise<any[]> => {
+      if (sourceKeys.length === 0) return [];
 
-    if (manifests.length === 0 && sourceRecords.length === 0 && destRecords.length === 0) {
-      if (process.env.NODE_ENV === 'production') {
-        await this.recordFailedValidation(
-          run.workspace_id,
-          runId,
-          'No migration manifests or destination records exist for this run. Cannot validate in production.',
-        );
-        throw new Error('No manifests or records found for migration run. Validation failed closed.');
+      // 1. Live MongoDB connection using decrypted credentials
+      if (srcConn?.engine === 'MONGODB' && sourceCredentials) {
+        const uri = sourceCredentials.uri || sourceCredentials.connectionString;
+        if (uri) {
+          try {
+            const { MongoClient, ObjectId } = require('mongodb');
+            const client = new MongoClient(uri, { serverSelectionTimeoutMS: 2000 });
+            await client.connect();
+            const dbName = srcConn.config_json?.database;
+            const coll = client.db(dbName).collection(sourceObjectName);
+
+            const objectIds: any[] = [];
+            const stringIds: string[] = [];
+            for (const k of sourceKeys) {
+              if (/^[0-9a-fA-F]{24}$/.test(k)) {
+                try { objectIds.push(new ObjectId(k)); } catch {}
+              }
+              stringIds.push(k);
+            }
+
+            const filter = (sourceKeyField === '_id' || sourceKeyField === 'id')
+              ? { $or: [{ _id: { $in: objectIds } }, { _id: { $in: stringIds } }, { id: { $in: stringIds } }] }
+              : { [sourceKeyField]: { $in: sourceKeys } };
+
+            const docs = await coll.find(filter).toArray();
+            await client.close().catch(() => {});
+            if (docs.length > 0) return docs;
+          } catch (mErr: any) {
+            console.warn(`[ValidationService] Live MongoDB fetch notice: ${mErr.message}`);
+            if (process.env.NODE_ENV === 'production') {
+              throw new Error(`Failed to query source MongoDB for ${sourceObjectName}: ${mErr.message}`);
+            }
+          }
+        }
       }
-      // Non-production test harness fallback for synthetic validation test suites
-      const benchmark = generateSyntheticDataset({ totalRecords: 200 });
-      const faultResult = injectFaults(benchmark);
-      destinationDataset = faultResult.faultedDataset;
-      sourceDataset = benchmark;
-    } else {
-      sourceDataset = {
-        objectName: sourceObjectName,
-        records: sourceRecords.map((r: any) => ({
-          id: String(r[sourceKeyField] || r.id || r._id),
-          name: r.name,
-          email: r.email,
-          createdAt: parseDateSafe(r.created_at || r.createdAt),
-          updatedAt: parseDateSafe(r.updated_at || r.updatedAt),
-          ...r,
-        })),
-        orders: [],
-        attachments: [],
-      };
 
-      destinationDataset = {
-        objectName: destObjectName,
-        records: destRecords.map((r: any) => ({
-          id: String(r[destKeyField] || r.id),
-          name: r.name,
-          email: r.email,
-          createdAt: parseDateSafe(r.created_at || r.createdAt),
-          updatedAt: parseDateSafe(r.updated_at || r.updatedAt),
-          ...r,
-        })),
-        orders: [],
-        attachments: [],
-      };
-    }
+      // 2. Query separate source table in PostgreSQL (e.g. source_customers)
+      try {
+        const sRes = await this.db.query(`SELECT * FROM "source_${sourceObjectName}"`);
+        const matched = sRes.rows.filter((r: any) =>
+          sourceKeys.includes(String(r[sourceKeyField] || r.id || r._id || r.source_key)),
+        );
+        if (matched.length > 0) return matched;
+      } catch {}
 
-    // 2. Execute deterministic ValidationEngine (all checks)
-    const engine = new ValidationEngine({
-      migrationRunId: runId,
-      workspaceId: run.workspace_id,
-      fieldRules: [
-        { fieldPath: 'name' },
-        { fieldPath: 'email' },
-      ],
-    });
+      try {
+        const sRes = await this.db.query(`SELECT * FROM "${sourceObjectName}"`);
+        const matched = sRes.rows.filter((r: any) =>
+          sourceKeys.includes(String(r[sourceKeyField] || r.id || r._id || r.source_key)),
+        );
+        if (matched.length > 0) return matched;
+      } catch {}
 
-    const summary = await engine.validate(sourceDataset, destinationDataset);
-    const overallStatus = summary.failedChecks > 0 ? 'FAILED' : 'COMPLETED';
-
-    const summaryJson = {
-      totalChecks: summary.totalChecks,
-      passedChecks: summary.passedChecks,
-      failedChecks: summary.failedChecks,
-      discrepancies: summary.totalDiscrepancies,
-      durationMs: summary.durationMs,
-      overallStatus,
+      return [];
     };
 
-    // 3. Create validation_runs row with real execution summary
+    // Helper: read destination records from PostgreSQL destination
+    const fetchDestRecords = async (destObjectName: string, destKeyField: string, destKeys: string[]): Promise<any[]> => {
+      if (destKeys.length === 0) return [];
+
+      // 1. External PostgreSQL destination if distinct connection configured
+      if (destConn?.engine === 'POSTGRESQL' && destCredentials) {
+        const connStr = destCredentials.connectionString || destCredentials.uri;
+        if (connStr && connStr !== appConfig.databaseUrl) {
+          try {
+            const pg = require('pg');
+            const pool = new pg.Pool({ connectionString: connStr, connectionTimeoutMillis: 2000 });
+            try {
+              const dRes = await pool.query(
+                `SELECT * FROM "${destObjectName}" WHERE "${destKeyField}" = ANY($1)`,
+                [destKeys],
+              );
+              if (dRes.rows.length > 0) return dRes.rows;
+            } finally {
+              await pool.end().catch(() => {});
+            }
+          } catch (pErr: any) {
+            console.warn(`[ValidationService] Live PostgreSQL destination query notice: ${pErr.message}`);
+          }
+        }
+      }
+
+      // 2. Query destination table in local database
+      try {
+        const dRes = await this.db.query(`SELECT * FROM "${destObjectName}"`);
+        return dRes.rows.filter((r: any) =>
+          destKeys.includes(String(r[destKeyField] || r.id || r.destination_key)),
+        );
+      } catch (err: any) {
+        console.warn(`[ValidationService] Local destination query notice: ${err.message}`);
+        return [];
+      }
+    };
+
+    const allCheckResults: any[] = [];
+    const allDiscrepancies: any[] = [];
+    const objectsValidated: string[] = [];
+    let totalEvaluationDurationMs = 0;
+    const startTime = Date.now();
+    const startedAt = new Date().toISOString();
+
+    // Loop through ALL mapped objects in plan version (P0: Multi-object validation)
+    for (const obj of objectMappings) {
+      const sourceObjectName =
+        obj.source?.collection ||
+        obj.source?.object ||
+        (typeof obj.source === 'string' ? obj.source : 'customers');
+      const destObjectName =
+        obj.destination?.table ||
+        obj.destination?.object ||
+        (typeof obj.destination === 'string' ? obj.destination : 'customers');
+      const sourceKeyField = obj.identity?.sourceKey || obj.source?.key || '_id';
+      const destKeyField = obj.identity?.destinationKey || obj.destination?.key || 'id';
+
+      objectsValidated.push(`${sourceObjectName} -> ${destObjectName}`);
+
+      // Load manifests scoped to this exact run and object mapping
+      const manifestsRes = await this.db.query(
+        `SELECT * FROM record_manifests
+         WHERE migration_run_id = $1
+           AND (source_object = $2 OR destination_object = $3 OR $4 = 1)
+         ORDER BY created_at ASC`,
+        [runId, sourceObjectName, destObjectName, objectMappings.length],
+      );
+      const manifests = manifestsRes.rows;
+
+      const destKeys = manifests
+        .map((m: any) => m.destination_key || m.source_key)
+        .filter(Boolean);
+      const sourceKeys = manifests.map((m: any) => m.source_key).filter(Boolean);
+
+      let destRecords: any[] = [];
+      let sourceRecords: any[] = [];
+
+      if (destKeys.length > 0) {
+        destRecords = await fetchDestRecords(destObjectName, destKeyField, destKeys);
+      }
+      if (sourceKeys.length > 0) {
+        sourceRecords = await fetchSourceRecords(sourceObjectName, sourceKeyField, sourceKeys);
+      }
+
+      if (sourceKeys.length > 0 && sourceRecords.length === 0) {
+        if (process.env.NODE_ENV === 'production') {
+          await this.recordFailedValidation(
+            run.workspace_id,
+            runId,
+            `No source records could be retrieved from source for ${sourceObjectName}. Cannot prove migration correctness.`,
+          );
+          throw new Error(
+            `Source records could not be retrieved from source connection for ${sourceObjectName}. Validation failed closed.`,
+          );
+        }
+      }
+
+      let sourceDataset: ValidationDataset;
+      let destinationDataset: ValidationDataset;
+
+      if (manifests.length === 0 && sourceRecords.length === 0 && destRecords.length === 0) {
+        if (process.env.NODE_ENV === 'production') {
+          await this.recordFailedValidation(
+            run.workspace_id,
+            runId,
+            'No migration manifests or destination records exist for this run. Cannot validate in production.',
+          );
+          throw new Error('No manifests or records found for migration run. Validation failed closed.');
+        }
+        // Non-production test harness fallback for synthetic validation test suites
+        const benchmark = generateSyntheticDataset({ totalRecords: 200 });
+        const faultResult = injectFaults(benchmark);
+        destinationDataset = faultResult.faultedDataset;
+        sourceDataset = benchmark;
+      } else {
+        sourceDataset = {
+          objectName: sourceObjectName,
+          records: sourceRecords.map((r: any) => ({
+            id: String(r[sourceKeyField] || r.id || r._id),
+            name: r.name,
+            email: r.email,
+            createdAt: parseDateSafe(r.created_at || r.createdAt),
+            updatedAt: parseDateSafe(r.updated_at || r.updatedAt),
+            ...r,
+          })),
+          orders: [],
+          attachments: [],
+        };
+
+        destinationDataset = {
+          objectName: destObjectName,
+          records: destRecords.map((r: any) => ({
+            id: String(r[destKeyField] || r.id),
+            name: r.name,
+            email: r.email,
+            createdAt: parseDateSafe(r.created_at || r.createdAt),
+            updatedAt: parseDateSafe(r.updated_at || r.updatedAt),
+            ...r,
+          })),
+          orders: [],
+          attachments: [],
+        };
+      }
+
+      // Configure field rules from approved object mapping
+      const fieldRules = Array.isArray(obj.fields)
+        ? obj.fields.map((f: any) => ({
+            fieldPath: f.destinationPath || f.sourcePath || f.destination || f.source || f.fieldPath || f.field,
+          }))
+        : [
+            { fieldPath: 'name' },
+            { fieldPath: 'email' },
+          ];
+
+      const engine = new ValidationEngine({
+        migrationRunId: runId,
+        workspaceId: run.workspace_id,
+        fieldRules,
+      });
+
+      const summary = await engine.validate(sourceDataset, destinationDataset);
+      allCheckResults.push(...summary.checkResults);
+      allDiscrepancies.push(...summary.discrepancies);
+      totalEvaluationDurationMs += summary.durationMs;
+    }
+
+    const completedAt = new Date().toISOString();
+    const durationMs = Math.max(1, Date.now() - startTime);
+
+    const totalFailedChecks = allCheckResults.filter((c: any) => (c.failedCount ?? c.failCount ?? 0) > 0).length;
+    const totalPassedChecks = allCheckResults.filter((c: any) => (c.failedCount ?? c.failCount ?? 0) === 0).length;
+
+    // Explicit distinction between execution status ('COMPLETED') and verification outcome ('PASSED' / 'FAILED')
+    const outcome = totalFailedChecks > 0 ? 'FAILED' : 'PASSED';
+    const executionStatus = 'COMPLETED';
+
+    const summaryJson = {
+      executionStatus,
+      outcome,
+      overallStatus: outcome,
+      totalChecks: allCheckResults.length,
+      passedChecks: totalPassedChecks,
+      failedChecks: totalFailedChecks,
+      discrepancies: allDiscrepancies.length,
+      durationMs,
+      objectsValidated,
+    };
+
+    // Create validation_runs row with verified execution completion and summary outcome
     const valRes = await this.db.query(
       `INSERT INTO validation_runs (
          workspace_id, migration_run_id, status, validation_profile_version,
@@ -246,14 +404,24 @@ export class ValidationService {
        )
        VALUES ($1, $2, 'COMPLETED', '1.0', '1.0', $3, $4, $5)
        RETURNING *`,
-      [run.workspace_id, runId, summary.startedAt, summary.completedAt, summaryJson],
+      [
+        run.workspace_id,
+        runId,
+        startedAt,
+        completedAt,
+        summaryJson,
+      ],
     );
 
-    const valRun = valRes.rows[0];
+    const valRun = {
+      ...valRes.rows[0],
+      executionStatus,
+      outcome,
+    };
 
-    // 4. Persist real check results
-    for (const c of summary.checkResults) {
-      const checkStatus = (c as any).state || (c as any).status || (c.failedCount === 0 ? 'PASS' : 'FAIL');
+    // Persist real check results across all objects
+    for (const c of allCheckResults) {
+      const checkStatus = (c as any).state || (c as any).status || ((c.failedCount ?? c.failCount ?? 0) === 0 ? 'PASS' : 'FAIL');
       await this.db.query(
         `INSERT INTO validation_check_results (
            validation_run_id, check_id, check_name, status,
@@ -265,16 +433,16 @@ export class ValidationService {
           c.checkId,
           c.checkName,
           checkStatus,
-          c.evaluatedCount,
-          c.passedCount,
-          c.failedCount,
-          c.durationMs,
+          c.evaluatedCount ?? 0,
+          c.passedCount ?? c.passCount ?? 0,
+          c.failedCount ?? c.failCount ?? 0,
+          c.durationMs ?? 0,
         ],
       );
     }
 
-    // 5. Persist real record-level discrepancies
-    for (const d of summary.discrepancies) {
+    // Persist real record-level discrepancies across all objects
+    for (const d of allDiscrepancies) {
       let cat = d.category as string;
       if (cat === 'MISSING_ATTACHMENT' || cat === 'ATTACHMENT_MISSING') cat = 'ATTACHMENT';
       else if (cat === 'DUPLICATE_RECORD') cat = 'DUPLICATE';
@@ -283,6 +451,10 @@ export class ValidationService {
       else if (cat === 'RECORD_COUNT_MISMATCH') cat = 'COUNT';
       else if (cat === 'FIELD_VALUE_MISMATCH') cat = 'FIELD_VALUE';
       else if (cat === 'CONTENT_HASH_MISMATCH') cat = 'CONTENT_HASH';
+
+      const srcKey = d.sourceKey || d.sourceKeyRef || d.destinationKey || d.destinationKeyRef || d.issueId || 'N/A';
+      const destKey = d.destinationKey || d.destinationKeyRef || d.sourceKey || d.sourceKeyRef || 'N/A';
+      const summaryText = d.explanation || d.summary || `${d.category} discrepancy detected on ${srcKey}`;
 
       await this.db.query(
         `INSERT INTO discrepancies (
@@ -295,12 +467,12 @@ export class ValidationService {
           valRun.id,
           cat,
           d.severity,
-          d.sourceObject || sourceObjectName,
-          d.sourceKey || d.destinationKey || d.issueId || 'N/A',
-          d.destinationObject || destObjectName,
-          d.destinationKey || d.sourceKey || 'N/A',
+          d.sourceObject || 'customers',
+          srcKey,
+          d.destinationObject || 'customers',
+          destKey,
           d.fieldPath || null,
-          d.explanation || (d as any).summary || `${d.category} discrepancy detected on ${d.sourceKey}`,
+          summaryText,
         ],
       );
     }

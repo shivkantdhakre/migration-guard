@@ -227,17 +227,18 @@ export class PostgresDestinationConnector implements DestinationConnector {
     };
   }
 
-  async readByKeys(destinationObject: string, keys: string[]): Promise<DestinationRecord[]> {
+  async readByKeys(destinationObject: string, keys: string[], keyColumn = 'id'): Promise<DestinationRecord[]> {
     if (!keys || keys.length === 0) return [];
 
     const quotedTable = quoteIdent(destinationObject);
+    const quotedCol = quoteIdent(keyColumn);
     const res = await this.pool.query(
-      `SELECT * FROM ${quotedTable} WHERE "id" = ANY($1)`,
+      `SELECT * FROM ${quotedTable} WHERE ${quotedCol} = ANY($1)`,
       [keys],
     );
 
     return res.rows.map((row: any) => ({
-      destinationKey: String(row.id),
+      destinationKey: String(row[keyColumn] !== undefined ? row[keyColumn] : row.id),
       data: row,
     }));
   }

@@ -113,6 +113,7 @@ describe('Manifest Schema Upgrade & Historical Reconciliation (Run 005.20 Added-
 
   interface ExpectedModifiedTableSpec {
     nullabilityChanges?: Record<string, { from: 'YES' | 'NO'; to: 'YES' | 'NO' }>;
+    addedColumns?: Partial<ExpectedColumnSpec>[];
     addedConstraints?: ExpectedConstraintSpec[];
     removedConstraints?: { constraint_name: string; constraint_type: 'PRIMARY KEY' | 'UNIQUE' | 'FOREIGN KEY' | 'CHECK' }[];
     addedIndexes?: ExpectedIndexSpec[];
@@ -600,6 +601,26 @@ describe('Manifest Schema Upgrade & Historical Reconciliation (Run 005.20 Added-
       } as ExpectedModifiedTableSpec,
       migration_batches: {
         nullabilityChanges: {},
+        addedColumns: [
+          {
+            column_name: 'source_object',
+            data_type: 'text',
+            udt_name: 'text',
+            is_nullable: 'NO',
+          },
+          {
+            column_name: 'destination_object',
+            data_type: 'text',
+            udt_name: 'text',
+            is_nullable: 'NO',
+          },
+          {
+            column_name: 'mapping_version_id',
+            data_type: 'uuid',
+            udt_name: 'uuid',
+            is_nullable: 'YES',
+          },
+        ],
         addedConstraints: [
           {
             constraint_name: 'uq_migration_batches_identity',
@@ -785,20 +806,37 @@ describe('Manifest Schema Upgrade & Historical Reconciliation (Run 005.20 Added-
     for (const tbl of baseline.tables) {
       const baseCols = baseline.columns.get(tbl) || [];
       const postCols = postUpgrade.columns.get(tbl) || [];
+      const modSpec = (EXPECTED_SCHEMA_DELTA.modifiedTables as any)[tbl];
+      const addedCols = modSpec?.addedColumns || [];
 
       expect(
         postCols.length,
-        `Table ${tbl} column count must match historical baseline (expected ${baseCols.length}, got ${postCols.length})`,
-      ).toBe(baseCols.length);
+        `Table ${tbl} column count must match historical baseline (expected ${baseCols.length + addedCols.length}, got ${postCols.length})`,
+      ).toBe(baseCols.length + addedCols.length);
 
       const baseColMap = new Map(baseCols.map((c) => [c.column_name, c]));
       const postColMap = new Map(postCols.map((c) => [c.column_name, c]));
 
-      // All column names and ordinals must match
-      expect(
-        Array.from(postColMap.keys()),
-        `Table ${tbl} columns must preserve exact names and ordering`,
-      ).toEqual(Array.from(baseColMap.keys()));
+      if (addedCols.length > 0) {
+        const expectedColNames = [...Array.from(baseColMap.keys()), ...addedCols.map((c: any) => c.column_name)];
+        expect(
+          Array.from(postColMap.keys()),
+          `Table ${tbl} columns must preserve historical ordering plus expected additions`,
+        ).toEqual(expectedColNames);
+
+        for (const expCol of addedCols) {
+          const postCol = postColMap.get(expCol.column_name!);
+          expect(postCol, `Expected added column ${tbl}.${expCol.column_name} missing`).toBeDefined();
+          if (expCol.data_type) expect(postCol!.data_type).toBe(expCol.data_type);
+          if (expCol.udt_name) expect(postCol!.udt_name).toBe(expCol.udt_name);
+          if (expCol.is_nullable) expect(postCol!.is_nullable).toBe(expCol.is_nullable);
+        }
+      } else {
+        expect(
+          Array.from(postColMap.keys()),
+          `Table ${tbl} columns must preserve exact names and ordering`,
+        ).toEqual(Array.from(baseColMap.keys()));
+      }
 
       for (const [colName, baseCol] of baseColMap.entries()) {
         const postCol = postColMap.get(colName)!;
@@ -1863,6 +1901,29 @@ describe('Manifest Schema Upgrade & Historical Reconciliation (Run 005.20 Added-
       index_name: 'uq_migration_batches_identity',
       index_definition: 'CREATE UNIQUE INDEX uq_migration_batches_identity ON migration_batches USING btree (id, migration_run_id, batch_key)',
     });
+
+    // Populate expected added columns on migration_batches
+    const mbAddedCols = (EXPECTED_SCHEMA_DELTA.modifiedTables.migration_batches as any).addedColumns || [];
+    for (const ac of mbAddedCols) {
+      postUpgrade.columns.get('migration_batches')!.push({
+        table_name: 'migration_batches',
+        column_name: ac.column_name,
+        ordinal_position: postUpgrade.columns.get('migration_batches')!.length + 1,
+        column_default: null,
+        is_nullable: ac.is_nullable,
+        data_type: ac.data_type,
+        udt_name: ac.udt_name,
+        character_maximum_length: null,
+        numeric_precision: null,
+        numeric_scale: null,
+        datetime_precision: null,
+        is_identity: 'NO',
+        identity_generation: null,
+        is_generated: 'NEVER',
+        generation_expression: null,
+        collation_name: null,
+      });
+    }
 
     // Replace single FK with composite FK on record_manifests
     postUpgrade.foreignKeys.set('record_manifests', [

@@ -599,7 +599,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   }
 
   private handleMemoryInsert<T>(sql: string, params: any[]): QueryResult<T> {
-    const insertMatch = /INSERT\s+INTO\s+([a-zA-Z0-9_]+)\s*\(([\s\S]*?)\)\s*VALUES\s*\(/i.exec(sql);
+    const insertMatch = /INSERT\s+INTO\s+["`]?([a-zA-Z0-9_]+)["`]?\s*\(([\s\S]*?)\)\s*VALUES\s*\(/i.exec(sql);
     if (!insertMatch) return { rows: [], rowCount: 0 };
 
     const tableName = insertMatch[1].toLowerCase();
@@ -697,7 +697,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   }
 
   private handleMemorySelect<T>(sql: string, params: any[]): QueryResult<T> {
-    const fromMatch = /FROM\s+([a-zA-Z0-9_]+)/i.exec(sql);
+    const fromMatch = /FROM\s+["`]?([a-zA-Z0-9_]+)["`]?/i.exec(sql);
     if (!fromMatch) return { rows: [], rowCount: 0 };
 
     const tableName = fromMatch[1].toLowerCase();
@@ -855,7 +855,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   }
 
   private handleMemoryUpdate<T>(sql: string, params: any[]): QueryResult<T> {
-    const tableMatch = /UPDATE\s+([a-zA-Z0-9_]+)/i.exec(sql);
+    const tableMatch = /UPDATE\s+["`]?([a-zA-Z0-9_]+)["`]?/i.exec(sql);
     if (!tableMatch) return { rows: [], rowCount: 0 };
 
     const tableName = tableMatch[1].toLowerCase();
@@ -907,7 +907,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   }
 
   private handleMemoryDelete<T>(sql: string, params: any[]): QueryResult<T> {
-    const match = /DELETE\s+FROM\s+([a-zA-Z0-9_]+)\s+WHERE\s+(?:[a-zA-Z0-9_]+\.)?([a-zA-Z0-9_]+)\s*=\s*\$(\d+)/i.exec(sql);
+    const match = /DELETE\s+FROM\s+["`]?([a-zA-Z0-9_]+)["`]?\s+WHERE\s+(?:[a-zA-Z0-9_]+\.)?([a-zA-Z0-9_]+)\s*=\s*\$(\d+)/i.exec(sql);
     if (!match) return { rows: [], rowCount: 0 };
 
     const tableName = match[1].toLowerCase();

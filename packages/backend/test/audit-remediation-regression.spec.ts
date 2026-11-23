@@ -406,5 +406,103 @@ describe('Audit Remediation Comprehensive Regression Suite', () => {
       expect(res.success).toBe(true);
       expect((res.data as any).status).toBe('NOT_FOUND');
     });
+
+    it('returns UNAVAILABLE instead of synthesizing records when live database records cannot be fetched', async () => {
+      const proj = await projectService.createProject(workspaceA.id, 'Proj Compare', undefined, userA.user.id);
+      const plan = await planService.createPlan(proj.id, 'Plan Compare', userA.user.id);
+      const pv = await planService.createPlanVersion(
+        plan.id,
+        {
+          sourceConnectionId: sourceConnA.id,
+          destinationConnectionId: destConnA.id,
+          scope: { collections: ['orders'] },
+        },
+        userA.user.id,
+      );
+      const runA = await db.query(
+        `INSERT INTO migration_runs (workspace_id, plan_version_id, status) VALUES ($1, $2, 'RUNNING') RETURNING id`,
+        [workspaceA.id, pv.id],
+      );
+      await db.query(
+        `INSERT INTO record_manifests (migration_run_id, batch_key, source_object, source_key, destination_object, destination_key, status)
+         VALUES ($1, 'b1', 'orders', 'ord_live_missing', 'orders', 'ord_live_missing', 'WRITTEN')`,
+        [runA.rows[0].id],
+      );
+
+      const res = await ToolCatalog.executeTool({
+        toolName: 'compare_sample_records',
+        input: { sourceRecordId: 'ord_live_missing', destinationRecordId: 'ord_live_missing' },
+        context: { workspaceId: workspaceA.id, actorId: userA.user.id, actorRole: 'ENGINEER' },
+      });
+      expect(res.success).toBe(true);
+      // Must not synthesize fake records from manifest metadata; returns UNAVAILABLE when live connections/creds fail
+      expect(['UNAVAILABLE', 'NOT_FOUND']).toContain((res.data as any).status);
+      expect((res.data as any).matchedFields).toBeUndefined();
+    });
+
+    it('removes unscoped user fallbacks and does not attribute audit events to foreign users', async () => {
+      // workspaceB context with an actorId that is a random non-member UUID
+      const randomForeignActor = '44444444-4444-4444-4444-444444444444';
+      const res = await ToolCatalog.executeTool({
+        toolName: 'create_draft_proposal',
+        input: {
+          proposalType: 'MAPPING',
+          content: { mapping: [] },
+          rationale: 'Isolated Proposal',
+        },
+        context: {
+          workspaceId: workspaceB.id,
+          actorId: randomForeignActor,
+          actorRole: 'ENGINEER',
+        },
+      });
+      expect(res.success).toBe(true);
+      expect((res.data as any).status).toBe('DRAFT_CREATED');
+
+      // Verify that audit events in workspaceB were only attributed to workspaceB members, never userA
+      const auditRes = await db.query(
+        `SELECT actor_id FROM audit_events WHERE workspace_id = $1 AND resource_id = $2`,
+        [workspaceB.id, (res.data as any).proposalId],
+      );
+      if (auditRes.rows.length > 0) {
+        expect(auditRes.rows[0].actor_id).not.toBe(userA.user.id);
+      }
+    });
+  });
+
+  describe('5. Readiness Connectivity Probes & Stale Health Prevention', () => {
+    it('blocks readiness when live connectivity probe fails even if connection status is marked HEALTHY', async () => {
+      const proj = await projectService.createProject(workspaceA.id, 'Proj Readiness Probe', undefined, userA.user.id);
+      const plan = await planService.createPlan(proj.id, 'Plan Readiness Probe', userA.user.id);
+      const mapRes = await db.query(
+        `INSERT INTO mapping_versions (workspace_id, plan_id, version, mapping_json, mapping_hash, created_by)
+         VALUES ($1, $2, 1, '{"objects":[{"source":{"collection":"items","key":"id"},"destination":{"table":"items","key":"id"},"identity":{"sourceKey":"id","destinationKey":"id"},"fields":[{"sourcePath":"id","destinationPath":"id"}]}]}', 'hash_rp', $3) RETURNING id`,
+        [workspaceA.id, plan.id, userA.user.id],
+      );
+      const pv = await planService.createPlanVersion(
+        plan.id,
+        {
+          sourceConnectionId: sourceConnA.id,
+          destinationConnectionId: destConnA.id,
+          mappingVersionId: mapRes.rows[0].id,
+          scope: { collections: ['items'] },
+        },
+        userA.user.id,
+      );
+
+      // Configure a failing customProber to simulate a stale HEALTHY status where the database is actually down
+      ConnectionService.customProber = async () => ({
+        reachable: false,
+        errorMessage: 'Network timeout: database host unreachable',
+      });
+
+      try {
+        const result = await readinessService.checkReadiness(pv.id);
+        expect(result.ready).toBe(false);
+        expect(result.blockers.some((b) => /connectivity test failed|unreachable/i.test(b))).toBe(true);
+      } finally {
+        ConnectionService.customProber = undefined;
+      }
+    });
   });
 });

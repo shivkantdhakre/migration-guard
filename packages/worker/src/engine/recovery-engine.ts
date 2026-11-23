@@ -179,37 +179,100 @@ export class RecoveryEngine {
         };
       }
 
-      // 2. Identify destination keys for records marked WRITTEN
-      const writtenManifests = manifests.filter((m) => m.status === 'WRITTEN');
-      const destinationKeys = writtenManifests.map((m) => m.destinationKey);
-
-      if (destinationKeys.length === 0) {
-        // All manifests are accounted for (SKIPPED or FAILED)
+      // 2. Priority 4: Never commit batches containing FAILED manifests
+      const failedManifests = manifests.filter((m) => m.status === 'FAILED');
+      if (failedManifests.length > 0 || (batch.recordsFailed && Number(batch.recordsFailed) > 0)) {
         await this.manifestTracker.transitionState(
           batch.migrationRunId,
           batch.batchKey,
-          'COMMITTED',
-          'CHECKPOINT_COMMITTED',
+          'RETRY_WAIT',
+          'IDLE',
         );
-        await this.checkpointManager.advanceCheckpoint({
-          migrationRunId: batch.migrationRunId,
-          sourceObject: batch.sourceObject,
-          batch,
-          planVersionId: 'resumed_plan',
-          mappingVersionId: 'resumed_mapping',
-          recordsCommittedCount: 0,
-          cursorEnd: batch.sourceCursorEnd,
-        });
         return {
           batchKey: batch.batchKey,
           originalStatus: status,
           originalSubStage: subStage,
-          resolvedStatus: 'COMMITTED',
-          actionTaken: 'Durable manifests verified (all records skipped/failed); marked committed and advanced checkpoint',
+          resolvedStatus: 'RETRY_WAIT',
+          actionTaken: `Batch contains ${failedManifests.length} FAILED manifest(s); refused to commit and reset to RETRY_WAIT`,
         };
       }
 
-      // 3. Inspect destination records by stable keys
+      // 3. Priority 4: Verify skipped records against destination (must exist in destination)
+      const skippedManifests = manifests.filter((m) => m.status === 'SKIPPED');
+      if (skippedManifests.length > 0) {
+        const skippedKeys = skippedManifests.map((m) => String(m.destinationKey || m.sourceKey));
+        const foundSkipped = await this.destinationConnector.readByKeys(
+          destinationObject,
+          skippedKeys,
+          destinationKey,
+        );
+        const foundSkippedMap = new Set(foundSkipped.map((r) => String(r.destinationKey)));
+        const missingSkipped = skippedKeys.filter((k) => !foundSkippedMap.has(k));
+        if (missingSkipped.length > 0) {
+          await this.manifestTracker.transitionState(
+            batch.migrationRunId,
+            batch.batchKey,
+            'RETRY_WAIT',
+            'IDLE',
+          );
+          return {
+            batchKey: batch.batchKey,
+            originalStatus: status,
+            originalSubStage: subStage,
+            resolvedStatus: 'RETRY_WAIT',
+            actionTaken: `Verification failed: ${missingSkipped.length} SKIPPED record(s) do not exist in destination; reset to RETRY_WAIT`,
+          };
+        }
+      }
+
+      // 4. Identify destination keys for records marked WRITTEN
+      const writtenManifests = manifests.filter((m) => m.status === 'WRITTEN');
+      const destinationKeys = writtenManifests.map((m) => m.destinationKey);
+
+      if (destinationKeys.length === 0) {
+        if (skippedManifests.length > 0) {
+          // All manifests were SKIPPED and verified present in destination
+          await this.manifestTracker.transitionState(
+            batch.migrationRunId,
+            batch.batchKey,
+            'COMMITTED',
+            'CHECKPOINT_COMMITTED',
+          );
+          await this.checkpointManager.advanceCheckpoint({
+            migrationRunId: batch.migrationRunId,
+            sourceObject: batch.sourceObject,
+            batch,
+            planVersionId: 'resumed_plan',
+            mappingVersionId: 'resumed_mapping',
+            recordsCommittedCount: 0,
+            cursorEnd: batch.sourceCursorEnd,
+          });
+          return {
+            batchKey: batch.batchKey,
+            originalStatus: status,
+            originalSubStage: subStage,
+            resolvedStatus: 'COMMITTED',
+            actionTaken: 'Durable manifests verified (all records skipped and verified in destination); marked committed and advanced checkpoint',
+          };
+        }
+
+        // Neither written nor verified skipped manifests found
+        await this.manifestTracker.transitionState(
+          batch.migrationRunId,
+          batch.batchKey,
+          'RETRY_WAIT',
+          'IDLE',
+        );
+        return {
+          batchKey: batch.batchKey,
+          originalStatus: status,
+          originalSubStage: subStage,
+          resolvedStatus: 'RETRY_WAIT',
+          actionTaken: 'No written records in manifests; reset to RETRY_WAIT',
+        };
+      }
+
+      // 5. Inspect destination records by stable keys
       try {
         const foundRecords = await this.destinationConnector.readByKeys(
           destinationObject,
@@ -247,9 +310,26 @@ export class RecoveryEngine {
           };
         }
 
-        // 4. Verify RFC 8785 canonical hash comparison for every record where contentHash is available
+        // 6. Verify RFC 8785 canonical hash comparison for every record where contentHash is available (required in production)
         let hashMismatchCount = 0;
         for (const manifest of writtenManifests) {
+          if (process.env.NODE_ENV === 'production' && (!manifest.contentHash || typeof manifest.contentHash !== 'string' || manifest.contentHash.trim() === '')) {
+            // Missing required canonical hash in production
+            await this.manifestTracker.transitionState(
+              batch.migrationRunId,
+              batch.batchKey,
+              'RETRY_WAIT',
+              'IDLE',
+            );
+            return {
+              batchKey: batch.batchKey,
+              originalStatus: status,
+              originalSubStage: subStage,
+              resolvedStatus: 'RETRY_WAIT',
+              actionTaken: `Written manifest for ${manifest.destinationKey} missing required canonical hash; reset to RETRY_WAIT`,
+            };
+          }
+
           const foundRecord = foundKeyMap.get(String(manifest.destinationKey));
           if (!foundRecord) {
             hashMismatchCount++;

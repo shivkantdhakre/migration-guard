@@ -396,6 +396,7 @@ export class ValidationService {
             const coll = client.db(dbName).collection(sourceObjectName);
             sourceCount = await coll.countDocuments();
             await client.close().catch(() => {});
+            sourceCountQueried = true;
           } catch (cErr: any) {
             console.warn(`[ValidationService] Source count query failed: ${cErr.message}`);
             if (process.env.NODE_ENV === 'production') {
@@ -417,6 +418,7 @@ export class ValidationService {
               assertSafeIdentifier(sourceObjectName, 'COUNT_MISMATCH source pg count');
               const cRes = await pool.query(`SELECT COUNT(*) AS cnt FROM "${sourceObjectName}"`);
               sourceCount = parseInt(cRes.rows[0]?.cnt ?? '0', 10);
+              sourceCountQueried = true;
             } finally {
               await pool.end().catch(() => {});
             }
@@ -441,6 +443,7 @@ export class ValidationService {
               assertSafeIdentifier(destObjectName, 'COUNT_MISMATCH dest count');
               const cRes = await pool.query(`SELECT COUNT(*) AS cnt FROM "${destObjectName}"`);
               destCount = parseInt(cRes.rows[0]?.cnt ?? '0', 10);
+              destCountQueried = true;
             } finally {
               await pool.end().catch(() => {});
             }
@@ -455,7 +458,30 @@ export class ValidationService {
       }
 
       // Add COUNT_MISMATCH check result — this is PRIMARY, manifest-based check is SUPPLEMENTARY
-      if (sourceCount > 0 || destCount > 0) {
+      if (sourceCountQueried && destCountQueried) {
+        const countMatches = sourceCount === destCount;
+        allCheckResults.push({
+          checkId: `COUNT_MISMATCH_${sourceObjectName}`,
+          checkName: `Record Count: ${sourceObjectName} → ${destObjectName}`,
+          evaluatedCount: Math.max(sourceCount, destCount),
+          passedCount: countMatches ? 1 : 0,
+          failedCount: countMatches ? 0 : 1,
+          failCount: countMatches ? 0 : 1,
+          durationMs: 0,
+          state: countMatches ? 'PASS' : 'FAIL',
+        });
+        if (!countMatches) {
+          allDiscrepancies.push({
+            category: 'RECORD_COUNT_MISMATCH',
+            severity: 'CRITICAL',
+            sourceObject: sourceObjectName,
+            destinationObject: destObjectName,
+            sourceKey: 'N/A',
+            destinationKey: 'N/A',
+            explanation: `Source count (${sourceCount}) does not match destination count (${destCount}) for ${sourceObjectName} → ${destObjectName}.`,
+          });
+        }
+      } else if (sourceCount > 0 || destCount > 0) {
         const countMatches = sourceCount === destCount;
         allCheckResults.push({
           checkId: `COUNT_MISMATCH_${sourceObjectName}`,

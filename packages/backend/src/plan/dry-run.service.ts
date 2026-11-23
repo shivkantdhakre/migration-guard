@@ -151,6 +151,7 @@ export class DryRunService {
       let sampleRecords: any[] = [];
       let liveSamplingAttempted = false;
       let liveSamplingError: Error | null = null;
+      let isVerifiedEmpty = false;
 
       // 1. Live source connection sampling using decrypted credentials (P1: Real Source Sampling)
       if (version.source_connection_id && this.credentialsService) {
@@ -172,9 +173,13 @@ export class DryRunService {
                   await client.connect();
                   const dbName = srcConn.config_json?.database;
                   const coll = client.db(dbName).collection(sourceObj);
-                  const docs = await coll.find().limit(500).toArray();
-                  if (docs && docs.length > 0) {
-                    sampleRecords = docs;
+                  const count = await coll.countDocuments();
+                  if (count === 0) {
+                    isVerifiedEmpty = true;
+                    sampleRecords = [];
+                  } else {
+                    const docs = await coll.find().limit(500).toArray();
+                    sampleRecords = docs || [];
                   }
                 } finally {
                   await client.close().catch(() => {});
@@ -186,9 +191,15 @@ export class DryRunService {
                 const pg = require('pg');
                 const pool = new pg.Pool({ connectionString: connStr, connectionTimeoutMillis: 2000 });
                 try {
-                  const sRes = await pool.query(`SELECT * FROM "${sourceObj}" LIMIT 500`);
-                  if (sRes.rows.length > 0) {
-                    sampleRecords = sRes.rows;
+                  assertSafeIdentifier(sourceObj, 'dryRun source pg');
+                  const countRes = await pool.query(`SELECT COUNT(*)::int AS cnt FROM "${sourceObj}"`);
+                  const count = countRes.rows[0]?.cnt ?? 0;
+                  if (count === 0) {
+                    isVerifiedEmpty = true;
+                    sampleRecords = [];
+                  } else {
+                    const sRes = await pool.query(`SELECT * FROM "${sourceObj}" LIMIT 500`);
+                    sampleRecords = sRes.rows || [];
                   }
                 } finally {
                   await pool.end().catch(() => {});
@@ -214,54 +225,34 @@ export class DryRunService {
         }
       }
 
-      // 2. Check schema snapshot samples if live sampling returned empty
-      // In production, NEVER substitute stale snapshot samples or fallback when live sampling failed
-      if (sampleRecords.length === 0 && version.source_schema_snapshot_id) {
-        if (liveSamplingAttempted && liveSamplingError && (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false')) {
+      // In production, require genuine live source evidence: NEVER substitute snapshot samples or synthetic records
+      if (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false') {
+        if (!liveSamplingAttempted || liveSamplingError) {
           throw new BadRequestException(
-            `Cannot perform dry run: live source sampling failed for '${sourceObj}'. Refusing to substitute snapshot samples in production.`,
+            `Cannot perform dry run: genuine live source sampling failed or is unavailable for '${sourceObj}'. Refusing to substitute snapshot or synthetic records in production.`,
           );
         }
+        if (sampleRecords.length === 0 && !isVerifiedEmpty) {
+          throw new BadRequestException(
+            `Cannot perform dry run: live source sampling returned no records and dataset is not verified empty for '${sourceObj}'.`,
+          );
+        }
+      }
 
+      // 2. Check schema snapshot samples ONLY in non-production environments when live sampling is not attempted
+      if (sampleRecords.length === 0 && !isVerifiedEmpty && version.source_schema_snapshot_id && process.env.NODE_ENV !== 'production' && process.env.ALLOW_SYNTHETIC_SOURCE !== 'false') {
         const snapRes = await this.db.query('SELECT * FROM schema_snapshots WHERE id = $1', [
           version.source_schema_snapshot_id,
         ]);
         if (snapRes.rows.length > 0) {
           const sSnap = snapRes.rows[0];
-
-          // Check if snapshot is stale
-          let isStale = false;
-          if (version.source_connection_id) {
-            const newerRes = await this.db.query(
-              `SELECT id, schema_version FROM schema_snapshots
-               WHERE connection_id = $1 AND (schema_version > $2 OR created_at > $3)
-               LIMIT 1`,
-              [version.source_connection_id, sSnap.schema_version, sSnap.created_at],
-            );
-            if (newerRes.rows.length > 0) {
-              isStale = true;
-            }
-            const srcConnCheck = await this.db.query('SELECT credential_version FROM connections WHERE id = $1', [version.source_connection_id]);
-            if (srcConnCheck.rows.length > 0 && sSnap.connection_version < (srcConnCheck.rows[0].credential_version || 1)) {
-              isStale = true;
-            }
-          }
-
-          if (isStale) {
-            if (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false') {
-              throw new BadRequestException(
-                `Cannot perform dry run: source schema snapshot ${version.source_schema_snapshot_id} is stale. Refusing to substitute stale snapshot samples in production.`,
-              );
-            }
-          } else {
-            const sJson = sSnap.snapshot_json || {};
-            if (Array.isArray(sJson.samples?.[sourceObj])) {
-              sampleRecords = sJson.samples[sourceObj].slice(0, 500);
-            } else if (Array.isArray(sJson.collections)) {
-              const coll = sJson.collections.find((c: any) => c.name === sourceObj);
-              if (coll && Array.isArray(coll.sampleDocuments)) {
-                sampleRecords = coll.sampleDocuments.slice(0, 500);
-              }
+          const sJson = sSnap.snapshot_json || {};
+          if (Array.isArray(sJson.samples?.[sourceObj])) {
+            sampleRecords = sJson.samples[sourceObj].slice(0, 500);
+          } else if (Array.isArray(sJson.collections)) {
+            const coll = sJson.collections.find((c: any) => c.name === sourceObj);
+            if (coll && Array.isArray(coll.sampleDocuments)) {
+              sampleRecords = coll.sampleDocuments.slice(0, 500);
             }
           }
         }
@@ -502,8 +493,9 @@ export class DryRunService {
 
     const measuredDurationMs = Math.max(1, Date.now() - startTime);
     const measuredRatePerSec = Math.round((totalRecordsTransformed / (measuredDurationMs || 1)) * 1000);
+    const allVerifiedEmpty = objectsTested.length > 0 && objectsTested.every((o) => o.sampleCount === 0);
     // Treat transformation errors and destination schema conflicts as strict approval blockers
-    const readyForApproval = totalTransformationErrors === 0 && allPotentialTypeConflicts.length === 0 && totalRecordsTransformed > 0;
+    const readyForApproval = totalTransformationErrors === 0 && allPotentialTypeConflicts.length === 0 && (totalRecordsTransformed > 0 || allVerifiedEmpty);
 
     const dryRunResult = {
       id: dryRunId,

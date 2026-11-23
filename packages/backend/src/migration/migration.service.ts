@@ -277,13 +277,158 @@ export class MigrationService implements OnModuleInit, OnModuleDestroy {
     }
 
     try {
+      const isPostgres = Boolean(this.db.getRawPool());
+      if (isPostgres) {
+        let dispatchedCount = 0;
+        await this.db.transaction(async (client) => {
+          // Transaction-scoped advisory lock for multi-instance coordination
+          const xactLock = await client.query<{ acquired: boolean }>(
+            `SELECT pg_try_advisory_xact_lock(hashtext($1)) as acquired`,
+            [lockKey],
+          );
+          if (xactLock.rows.length > 0 && !xactLock.rows[0].acquired) {
+            return;
+          }
+
+          let query = `SELECT * FROM migration_batches WHERE status = 'PENDING'`;
+          const params: any[] = [];
+          if (runId) {
+            query += ` AND migration_run_id = $1`;
+            params.push(runId);
+          }
+          query += ` ORDER BY sequence_no ASC LIMIT 100 FOR UPDATE SKIP LOCKED`;
+
+          const res = await client.query(query, params);
+          if (res.rows.length === 0 || !this.queueService) return;
+
+          const parseJsonField = (val: any) => {
+            if (val === null || val === undefined) return null;
+            if (typeof val === 'string') {
+              try {
+                return JSON.parse(val);
+              } catch {
+                return val;
+              }
+            }
+            return val;
+          };
+
+          const payloads: MigrationJobPayload[] = [];
+          const planCache = new Map<string, any>();
+          const runCache = new Map<string, any>();
+
+          for (const b of res.rows) {
+            const bRunId = b.migration_run_id;
+
+            let run = runCache.get(bRunId);
+            if (!run) {
+              const runRes = await client.query(
+                `SELECT id, status, plan_version_id FROM migration_runs WHERE id = $1`,
+                [bRunId],
+              );
+              if (runRes.rows.length > 0) {
+                run = runRes.rows[0];
+                runCache.set(bRunId, run);
+              }
+            }
+            if (run && (run.status === 'PAUSED' || run.status === 'CANCELLED')) {
+              continue;
+            }
+
+            let version = planCache.get(bRunId);
+            if (!version) {
+              const planVersionId = run?.plan_version_id;
+              if (planVersionId) {
+                const planRes = await client.query(
+                  `SELECT * FROM migration_plan_versions WHERE id = $1`,
+                  [planVersionId],
+                );
+                version = planRes.rows[0];
+                planCache.set(bRunId, version);
+              }
+            }
+
+            const batchSize = version?.execution_config_json?.batchSize || 1000;
+            const maxBytes = version?.execution_config_json?.maxBytes;
+            const writeMode = version?.execution_config_json?.writeMode || 'upsert';
+
+            let destKey = 'id';
+            const mapVersionId = b.mapping_version_id || version?.mapping_version_id;
+            if (mapVersionId) {
+              let mappingJson = planCache.get(`map_${mapVersionId}`);
+              if (!mappingJson) {
+                const mapRes = await client.query(
+                  'SELECT mapping_json FROM mapping_versions WHERE id = $1',
+                  [mapVersionId],
+                );
+                if (mapRes.rows.length > 0) {
+                  mappingJson = typeof mapRes.rows[0].mapping_json === 'string'
+                    ? JSON.parse(mapRes.rows[0].mapping_json)
+                    : mapRes.rows[0].mapping_json;
+                  planCache.set(`map_${mapVersionId}`, mappingJson);
+                }
+              }
+              const objects: any[] = Array.isArray(mappingJson?.objects)
+                ? mappingJson.objects
+                : (mappingJson ? [mappingJson] : []);
+              const matched = objects.find(
+                (o: any) =>
+                  (o.source?.collection || o.source?.object || o.source) === b.source_object ||
+                  (o.destination?.table || o.destination?.object || o.destination) === b.destination_object,
+              ) || (objects.length === 1 ? objects[0] : null);
+              if (matched?.identity?.destinationKey || matched?.destination?.key || matched?.destination?.identityKey) {
+                destKey = matched.identity?.destinationKey || matched?.destination?.key || matched?.destination?.identityKey;
+              }
+            }
+
+            payloads.push({
+              jobId: b.attempt_count > 0 ? `${bRunId}_${b.batch_key}_att${b.attempt_count}` : `${bRunId}_${b.batch_key}`,
+              migrationRunId: bRunId,
+              batchKey: b.batch_key,
+              sequenceNo: Number(b.sequence_no),
+              sourceObject: b.source_object || 'customers',
+              destinationObject: b.destination_object || b.source_object || 'customers',
+              cursorStart: parseJsonField(b.source_cursor_start),
+              cursorEnd: parseJsonField(b.source_cursor_end),
+              batchSize,
+              maxBytes,
+              planVersionId: version?.id || run?.plan_version_id || '',
+              mappingVersionId: b.mapping_version_id || version?.mapping_version_id || 'default-mapping',
+              writeMode,
+              conflictColumns: [destKey],
+              destinationKey: destKey,
+              sourceConnectionId: version?.source_connection_id,
+              destinationConnectionId: version?.destination_connection_id,
+            });
+          }
+
+          if (payloads.length === 0) return;
+
+          // Dispatch to BullMQ / Redis. If Redis fails, transaction rolls back and batches remain PENDING.
+          await this.queueService.dispatchBatches(payloads);
+
+          // Atomic transition inside the transaction
+          for (const p of payloads) {
+            await client.query(
+              `UPDATE migration_batches SET status = 'QUEUED', updated_at = NOW() WHERE migration_run_id = $1 AND batch_key = $2 AND status = 'PENDING'`,
+              [p.migrationRunId, p.batchKey],
+            );
+          }
+
+          dispatchedCount = payloads.length;
+        });
+
+        return dispatchedCount;
+      }
+
+      // In-memory fallback
       let query = `SELECT * FROM migration_batches WHERE status = 'PENDING'`;
       const params: any[] = [];
       if (runId) {
         query += ` AND migration_run_id = $1`;
         params.push(runId);
       }
-      query += ` ORDER BY sequence_no ASC LIMIT 100 FOR UPDATE SKIP LOCKED`;
+      query += ` ORDER BY sequence_no ASC LIMIT 100`;
 
       const res = await this.db.query(query, params);
       if (res.rows.length === 0 || !this.queueService) return 0;

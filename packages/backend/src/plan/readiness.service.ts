@@ -2,6 +2,7 @@ import { Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
 import { WorkspaceService } from '../workspace/workspace.service';
 import { ConnectionService } from '../connection/connection.service';
+import { CredentialsService } from '../connection/credentials.service';
 
 export interface ReadinessCheckResult {
   planVersionId: string;
@@ -18,6 +19,7 @@ export class ReadinessService {
     private db: DatabaseService,
     @Optional() private workspaceService?: WorkspaceService,
     @Optional() private connectionService?: ConnectionService,
+    @Optional() private credentialsService?: CredentialsService,
   ) {}
 
   async checkReadiness(planVersionId: string): Promise<ReadinessCheckResult> {
@@ -42,22 +44,16 @@ export class ReadinessService {
     } else {
       const srcConn = sourceRes.rows[0];
       facts.push(`Source connection configured for engine ${srcConn.engine}.`);
-      if (srcConn.status === 'HEALTHY') {
-        facts.push('Source connection verified healthy.');
-      } else {
+      if (srcConn.status !== 'HEALTHY') {
         blockers.push(`Source connection is not HEALTHY (current status: ${srcConn.status}). Run a connectivity test before proceeding.`);
       }
 
-      // Live connectivity probe if customProber is configured
-      if ((ConnectionService as any).customProber) {
-        try {
-          const probe = await (ConnectionService as any).customProber(srcConn);
-          if (probe && !probe.reachable) {
-            blockers.push(`Live source connectivity test failed: ${probe.errorMessage || 'Source connection unreachable'}.`);
-          }
-        } catch (probeErr: any) {
-          blockers.push(`Live source connectivity test failed: ${probeErr.message}.`);
-        }
+      // Live connectivity probe using configured credentials
+      const srcProbeError = await this.probeConnection(srcConn, 'source');
+      if (srcProbeError) {
+        blockers.push(srcProbeError);
+      } else if (srcConn.status === 'HEALTHY') {
+        facts.push('Source connection verified healthy.');
       }
     }
 
@@ -70,22 +66,16 @@ export class ReadinessService {
     } else {
       const dstConn = destRes.rows[0];
       facts.push(`Destination connection configured for engine ${dstConn.engine}.`);
-      if (dstConn.status === 'HEALTHY') {
-        facts.push('Destination connection verified healthy.');
-      } else {
+      if (dstConn.status !== 'HEALTHY') {
         blockers.push(`Destination connection is not HEALTHY (current status: ${dstConn.status}). Run a connectivity test before proceeding.`);
       }
 
-      // Live connectivity probe if customProber is configured
-      if ((ConnectionService as any).customProber) {
-        try {
-          const probe = await (ConnectionService as any).customProber(dstConn);
-          if (probe && !probe.reachable) {
-            blockers.push(`Live destination connectivity test failed: ${probe.errorMessage || 'Destination connection unreachable'}.`);
-          }
-        } catch (probeErr: any) {
-          blockers.push(`Live destination connectivity test failed: ${probeErr.message}.`);
-        }
+      // Live connectivity probe using configured credentials
+      const dstProbeError = await this.probeConnection(dstConn, 'destination');
+      if (dstProbeError) {
+        blockers.push(dstProbeError);
+      } else if (dstConn.status === 'HEALTHY') {
+        facts.push('Destination connection verified healthy.');
       }
     }
 
@@ -292,5 +282,65 @@ export class ReadinessService {
       hypotheses,
       blockers,
     };
+  }
+
+  private async probeConnection(conn: any, role: 'source' | 'destination'): Promise<string | null> {
+    let decryptedCreds: any = null;
+    if (this.credentialsService) {
+      try {
+        decryptedCreds = await this.credentialsService.getDecryptedCredentials(
+          conn.id,
+          conn.credential_version,
+        );
+      } catch (err: any) {
+        if (process.env.NODE_ENV === 'production') {
+          return `Failed to retrieve credentials for ${role} connection ${conn.id}: ${err.message}`;
+        }
+      }
+    }
+
+    if (ConnectionService.customProber) {
+      try {
+        const probe = await (ConnectionService.customProber as any)(conn, decryptedCreds);
+        if (probe && !probe.reachable) {
+          return `Live ${role} connectivity test failed: ${probe.errorMessage || `${role} connection unreachable`}.`;
+        }
+      } catch (probeErr: any) {
+        return `Live ${role} connectivity test failed: ${probeErr.message}.`;
+      }
+    } else if (decryptedCreds) {
+      const connStr = decryptedCreds.connectionString || decryptedCreds.uri || decryptedCreds.url;
+      if (connStr) {
+        if (conn.engine === 'POSTGRESQL') {
+          try {
+            const pg = require('pg');
+            const pool = new pg.Pool({ connectionString: connStr, connectionTimeoutMillis: 2000 });
+            try {
+              await pool.query('SELECT 1;');
+            } finally {
+              await pool.end().catch(() => {});
+            }
+          } catch (err: any) {
+            return `Live ${role} connectivity test failed: ${err.message}.`;
+          }
+        } else if (conn.engine === 'MONGODB') {
+          try {
+            const { MongoClient } = require('mongodb');
+            const client = new MongoClient(connStr, { serverSelectionTimeoutMS: 2000 });
+            try {
+              await client.connect();
+              await client.db().admin().ping();
+            } finally {
+              await client.close().catch(() => {});
+            }
+          } catch (err: any) {
+            return `Live ${role} connectivity test failed: ${err.message}.`;
+          }
+        }
+      } else if (process.env.NODE_ENV === 'production') {
+        return `Live ${role} connectivity probe failed: no valid connection URI or connectionString in credentials.`;
+      }
+    }
+    return null;
   }
 }

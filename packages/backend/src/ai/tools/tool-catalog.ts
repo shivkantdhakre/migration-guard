@@ -559,18 +559,208 @@ export class ToolCatalog {
               }
 
               const manifest = mRes.rows[0];
-              srcRec = {
-                id: manifest.source_key,
-                object: manifest.source_object,
-                contentHash: manifest.content_hash,
-                status: manifest.status,
+
+              // Retrieve actual source and destination records via authorized connections in workspace
+              const runRes = await this.db.query(
+                `SELECT mr.plan_version_id, mr.workspace_id, mpv.source_connection_id, mpv.destination_connection_id, mpv.mapping_version_id
+                 FROM migration_runs mr
+                 JOIN migration_plan_versions mpv ON mpv.id = mr.plan_version_id
+                 WHERE mr.id = $1 AND mr.workspace_id = $2`,
+                [manifest.migration_run_id, context.workspaceId],
+              );
+
+              if (runRes.rows.length === 0) {
+                rawResult = {
+                  status: 'UNAVAILABLE',
+                  sourceRecordId: input.sourceRecordId,
+                  destinationRecordId: input.destinationRecordId,
+                  message: 'Authorized plan version and connections unavailable for record retrieval.',
+                };
+                break;
+              }
+
+              const planInfo = runRes.rows[0];
+
+              // Verify connections belong to the authorized workspace
+              const connRes = await this.db.query(
+                `SELECT id, engine, connection_role, config_json, credential_version
+                 FROM connections
+                 WHERE id = ANY($1::uuid[]) AND workspace_id = $2`,
+                [[planInfo.source_connection_id, planInfo.destination_connection_id], context.workspaceId],
+              );
+
+              const srcConn = connRes.rows.find((c: any) => c.id === planInfo.source_connection_id);
+              const dstConn = connRes.rows.find((c: any) => c.id === planInfo.destination_connection_id);
+
+              if (!srcConn || !dstConn) {
+                rawResult = {
+                  status: 'UNAVAILABLE',
+                  sourceRecordId: input.sourceRecordId,
+                  destinationRecordId: input.destinationRecordId,
+                  message: 'Authorized source or destination connection not found in workspace.',
+                };
+                break;
+              }
+
+              // Retrieve decrypted credentials from connection_secrets
+              const getDecryptedCreds = async (connectionId: string, version: number) => {
+                const sRes = await this.db.query(
+                  'SELECT * FROM connection_secrets WHERE connection_id = $1 AND version = $2',
+                  [connectionId, version],
+                );
+                if (sRes.rows.length === 0) return null;
+                const row = sRes.rows[0];
+                const { CryptoUtil } = require('../../common/crypto/crypto.util');
+                const decryptedJson = CryptoUtil.decrypt({
+                  encryptedData: row.encrypted_payload,
+                  iv: row.iv,
+                  authTag: row.auth_tag,
+                });
+                return JSON.parse(decryptedJson);
               };
-              dstRec = {
-                id: manifest.destination_key,
-                object: manifest.destination_object,
-                contentHash: manifest.content_hash,
-                status: manifest.status,
-              };
+
+              let srcCreds: any = null;
+              let dstCreds: any = null;
+              try {
+                srcCreds = await getDecryptedCreds(srcConn.id, srcConn.credential_version || 1);
+                dstCreds = await getDecryptedCreds(dstConn.id, dstConn.credential_version || 1);
+              } catch (err: any) {
+                rawResult = {
+                  status: 'UNAVAILABLE',
+                  sourceRecordId: input.sourceRecordId,
+                  destinationRecordId: input.destinationRecordId,
+                  message: `Failed to decrypt credentials for connection: ${err.message}`,
+                };
+                break;
+              }
+
+              if (!srcCreds || !dstCreds) {
+                rawResult = {
+                  status: 'UNAVAILABLE',
+                  sourceRecordId: input.sourceRecordId,
+                  destinationRecordId: input.destinationRecordId,
+                  message: 'Authorized connection credentials unavailable in vault.',
+                };
+                break;
+              }
+
+              // Retrieve identity key names from mapping version
+              let sourceKeyField = '_id';
+              let destKeyField = 'id';
+              if (planInfo.mapping_version_id) {
+                const mapRes = await this.db.query(
+                  'SELECT mapping_json FROM mapping_versions WHERE id = $1 AND workspace_id = $2',
+                  [planInfo.mapping_version_id, context.workspaceId],
+                );
+                if (mapRes.rows.length > 0) {
+                  const mJson = typeof mapRes.rows[0].mapping_json === 'string'
+                    ? JSON.parse(mapRes.rows[0].mapping_json)
+                    : mapRes.rows[0].mapping_json;
+                  const objs = Array.isArray(mJson.objects) ? mJson.objects : (mJson.source ? [mJson] : []);
+                  const matchedObj = objs.find((o: any) =>
+                    (o.source?.collection || o.source?.object || o.source) === manifest.source_object &&
+                    (o.destination?.table || o.destination?.object || o.destination) === manifest.destination_object
+                  );
+                  if (matchedObj?.identity?.sourceKey) sourceKeyField = matchedObj.identity.sourceKey;
+                  if (matchedObj?.identity?.destinationKey) destKeyField = matchedObj.identity.destinationKey;
+                }
+              }
+
+              let liveSrc: any = null;
+              let liveDst: any = null;
+
+              // Query destination PostgreSQL record
+              const dstConnStr = dstCreds.connectionString || dstCreds.uri || dstCreds.url;
+              if (dstConn.engine === 'POSTGRESQL' && dstConnStr) {
+                try {
+                  const pg = require('pg');
+                  const pool = new pg.Pool({ connectionString: dstConnStr, connectionTimeoutMillis: 2000 });
+                  try {
+                    const qRes = await pool.query(
+                      `SELECT * FROM "${manifest.destination_object}" WHERE "${destKeyField}" = $1 LIMIT 1`,
+                      [input.destinationRecordId],
+                    );
+                    if (qRes.rows.length > 0) liveDst = qRes.rows[0];
+                  } finally {
+                    await pool.end().catch(() => {});
+                  }
+                } catch (err: any) {
+                  rawResult = {
+                    status: 'UNAVAILABLE',
+                    sourceRecordId: input.sourceRecordId,
+                    destinationRecordId: input.destinationRecordId,
+                    message: `Live destination query failed: ${err.message}`,
+                  };
+                  break;
+                }
+              }
+
+              // Query source MongoDB or PostgreSQL record
+              const srcConnStr = srcCreds.uri || srcCreds.connectionString || srcCreds.url;
+              if (srcConn.engine === 'MONGODB' && srcConnStr) {
+                try {
+                  const { MongoClient, ObjectId } = require('mongodb');
+                  const client = new MongoClient(srcConnStr, { serverSelectionTimeoutMS: 2000 });
+                  try {
+                    await client.connect();
+                    const dbName = srcConn.config_json?.database;
+                    const coll = client.db(dbName).collection(manifest.source_object);
+                    let filter: any;
+                    const sIdStr = String(input.sourceRecordId);
+                    if (sourceKeyField === '_id' && /^[0-9a-fA-F]{24}$/.test(sIdStr)) {
+                      filter = { $or: [{ _id: new ObjectId(sIdStr) }, { _id: sIdStr }] };
+                    } else {
+                      filter = { [sourceKeyField]: sIdStr };
+                    }
+                    liveSrc = await coll.findOne(filter);
+                  } finally {
+                    await client.close().catch(() => {});
+                  }
+                } catch (err: any) {
+                  rawResult = {
+                    status: 'UNAVAILABLE',
+                    sourceRecordId: input.sourceRecordId,
+                    destinationRecordId: input.destinationRecordId,
+                    message: `Live source query failed: ${err.message}`,
+                  };
+                  break;
+                }
+              } else if (srcConn.engine === 'POSTGRESQL' && srcConnStr) {
+                try {
+                  const pg = require('pg');
+                  const pool = new pg.Pool({ connectionString: srcConnStr, connectionTimeoutMillis: 2000 });
+                  try {
+                    const qRes = await pool.query(
+                      `SELECT * FROM "${manifest.source_object}" WHERE "${sourceKeyField}" = $1 LIMIT 1`,
+                      [input.sourceRecordId],
+                    );
+                    if (qRes.rows.length > 0) liveSrc = qRes.rows[0];
+                  } finally {
+                    await pool.end().catch(() => {});
+                  }
+                } catch (err: any) {
+                  rawResult = {
+                    status: 'UNAVAILABLE',
+                    sourceRecordId: input.sourceRecordId,
+                    destinationRecordId: input.destinationRecordId,
+                    message: `Live source query failed: ${err.message}`,
+                  };
+                  break;
+                }
+              }
+
+              if (!liveSrc || !liveDst) {
+                rawResult = {
+                  status: 'NOT_FOUND',
+                  sourceRecordId: input.sourceRecordId,
+                  destinationRecordId: input.destinationRecordId,
+                  message: `Record ${!liveSrc ? input.sourceRecordId : input.destinationRecordId} not found in live database.`,
+                };
+                break;
+              }
+
+              srcRec = liveSrc;
+              dstRec = liveDst;
             } else {
               rawResult = {
                 status: 'NOT_FOUND',
@@ -698,41 +888,53 @@ export class ToolCatalog {
         case 'create_draft_proposal': {
           const proposalId = uuidv4();
           if (this.db) {
-            let actorId = context.actorId;
+            let actorId: string | null = context.actorId;
             const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-            if (!isUuid.test(actorId)) {
+            if (this.db.isDbConnected) {
+              try {
+                const uRes = await this.db.query(
+                  'SELECT u.id FROM users u JOIN workspace_members wm ON wm.user_id = u.id WHERE wm.workspace_id = $1 AND u.id = $2 LIMIT 1',
+                  [context.workspaceId, isUuid.test(actorId || '') ? actorId : '00000000-0000-0000-0000-000000000000'],
+                );
+                if (uRes.rows.length > 0) {
+                  actorId = uRes.rows[0].id;
+                } else {
+                  const anyMember = await this.db.query(
+                    'SELECT u.id FROM users u JOIN workspace_members wm ON wm.user_id = u.id WHERE wm.workspace_id = $1 LIMIT 1',
+                    [context.workspaceId],
+                  );
+                  actorId = anyMember.rows.length > 0 ? anyMember.rows[0].id : null;
+                }
+              } catch {
+                actorId = isUuid.test(actorId || '') ? actorId : null;
+              }
+            } else if (!isUuid.test(actorId || '')) {
               try {
                 const uRes = await this.db.query(
                   'SELECT u.id FROM users u JOIN workspace_members wm ON wm.user_id = u.id WHERE wm.workspace_id = $1 LIMIT 1',
                   [context.workspaceId],
                 );
-                if (uRes.rows.length > 0) {
-                  actorId = uRes.rows[0].id;
-                } else {
-                  const fallbackUser = await this.db.query('SELECT id FROM users LIMIT 1');
-                  if (fallbackUser.rows.length > 0) actorId = fallbackUser.rows[0].id;
-                }
+                actorId = uRes.rows.length > 0 ? uRes.rows[0].id : null;
               } catch {
-                try {
-                  const fallbackUser = await this.db.query('SELECT id FROM users LIMIT 1');
-                  if (fallbackUser.rows.length > 0) actorId = fallbackUser.rows[0].id;
-                } catch {}
+                actorId = null;
               }
             }
-            try {
-              await this.db.query(
-                `INSERT INTO audit_events (workspace_id, project_id, actor_type, actor_id, action, resource_type, resource_id, details_json)
-                 VALUES ($1, $2, 'USER', $3, 'CREATE_DRAFT_PROPOSAL', 'PROPOSAL', $4, $5)`,
-                [
-                  context.workspaceId,
-                  context.projectId || null,
-                  actorId,
-                  proposalId,
-                  { input, createdAt: new Date().toISOString() },
-                ],
-              );
-            } catch (err: any) {
-              console.warn(`[ToolCatalog] Audit event persistence notice: ${err.message}`);
+            if (actorId) {
+              try {
+                await this.db.query(
+                  `INSERT INTO audit_events (workspace_id, project_id, actor_type, actor_id, action, resource_type, resource_id, details_json)
+                   VALUES ($1, $2, 'USER', $3, 'CREATE_DRAFT_PROPOSAL', 'PROPOSAL', $4, $5)`,
+                  [
+                    context.workspaceId,
+                    context.projectId || null,
+                    actorId,
+                    proposalId,
+                    { input, createdAt: new Date().toISOString() },
+                  ],
+                );
+              } catch (err: any) {
+                console.warn(`[ToolCatalog] Audit event persistence notice: ${err.message}`);
+              }
             }
           }
           rawResult = {
@@ -746,41 +948,53 @@ export class ToolCatalog {
         case 'request_human_approval': {
           const approvalRequestId = uuidv4();
           if (this.db) {
-            let actorId = context.actorId;
+            let actorId: string | null = context.actorId;
             const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-            if (!isUuid.test(actorId)) {
+            if (this.db.isDbConnected) {
+              try {
+                const uRes = await this.db.query(
+                  'SELECT u.id FROM users u JOIN workspace_members wm ON wm.user_id = u.id WHERE wm.workspace_id = $1 AND u.id = $2 LIMIT 1',
+                  [context.workspaceId, isUuid.test(actorId || '') ? actorId : '00000000-0000-0000-0000-000000000000'],
+                );
+                if (uRes.rows.length > 0) {
+                  actorId = uRes.rows[0].id;
+                } else {
+                  const anyMember = await this.db.query(
+                    'SELECT u.id FROM users u JOIN workspace_members wm ON wm.user_id = u.id WHERE wm.workspace_id = $1 LIMIT 1',
+                    [context.workspaceId],
+                  );
+                  actorId = anyMember.rows.length > 0 ? anyMember.rows[0].id : null;
+                }
+              } catch {
+                actorId = isUuid.test(actorId || '') ? actorId : null;
+              }
+            } else if (!isUuid.test(actorId || '')) {
               try {
                 const uRes = await this.db.query(
                   'SELECT u.id FROM users u JOIN workspace_members wm ON wm.user_id = u.id WHERE wm.workspace_id = $1 LIMIT 1',
                   [context.workspaceId],
                 );
-                if (uRes.rows.length > 0) {
-                  actorId = uRes.rows[0].id;
-                } else {
-                  const fallbackUser = await this.db.query('SELECT id FROM users LIMIT 1');
-                  if (fallbackUser.rows.length > 0) actorId = fallbackUser.rows[0].id;
-                }
+                actorId = uRes.rows.length > 0 ? uRes.rows[0].id : null;
               } catch {
-                try {
-                  const fallbackUser = await this.db.query('SELECT id FROM users LIMIT 1');
-                  if (fallbackUser.rows.length > 0) actorId = fallbackUser.rows[0].id;
-                } catch {}
+                actorId = null;
               }
             }
-            try {
-              await this.db.query(
-                `INSERT INTO audit_events (workspace_id, project_id, actor_type, actor_id, action, resource_type, resource_id, details_json)
-                 VALUES ($1, $2, 'USER', $3, 'REQUEST_HUMAN_APPROVAL', 'APPROVAL_REQUEST', $4, $5)`,
-                [
-                  context.workspaceId,
-                  context.projectId || null,
-                  actorId,
-                  approvalRequestId,
-                  { input, createdAt: new Date().toISOString() },
-                ],
-              );
-            } catch (err: any) {
-              console.warn(`[ToolCatalog] Audit event persistence notice: ${err.message}`);
+            if (actorId) {
+              try {
+                await this.db.query(
+                  `INSERT INTO audit_events (workspace_id, project_id, actor_type, actor_id, action, resource_type, resource_id, details_json)
+                   VALUES ($1, $2, 'USER', $3, 'REQUEST_HUMAN_APPROVAL', 'APPROVAL_REQUEST', $4, $5)`,
+                  [
+                    context.workspaceId,
+                    context.projectId || null,
+                    actorId,
+                    approvalRequestId,
+                    { input, createdAt: new Date().toISOString() },
+                  ],
+                );
+              } catch (err: any) {
+                console.warn(`[ToolCatalog] Audit event persistence notice: ${err.message}`);
+              }
             }
           }
           rawResult = {

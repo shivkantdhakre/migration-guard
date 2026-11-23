@@ -548,33 +548,56 @@ async function reconcileStrandedRunsOnStartup(): Promise<void> {
 
       let destConnector = defaultDestinationConnector;
       let destKey = 'id';
-      try {
+
+      if (row.plan_version_id) {
         const planRes = await dbPool.query(
-          `SELECT mp.destination_connection_id, mp.destination_object,
-                  mpv.plan_json
-           FROM migration_plans mp
-           JOIN migration_plan_versions mpv ON mpv.plan_id = mp.id
+          `SELECT mpv.id as plan_version_id,
+                  mpv.destination_connection_id,
+                  mpv.source_connection_id,
+                  mpv.mapping_version_id,
+                  mpv.scope_json,
+                  mpv.execution_config_json,
+                  mv.mapping_json
+           FROM migration_plan_versions mpv
+           LEFT JOIN mapping_versions mv ON mv.id = mpv.mapping_version_id
            WHERE mpv.id = $1`,
           [row.plan_version_id],
         );
-        if (planRes.rows.length > 0) {
-          const destConnId = planRes.rows[0].destination_connection_id;
-          if (destConnId) {
-            destConnector = await getDestinationConnector({ destinationConnectionId: destConnId } as any);
-          }
-          const planJson = typeof planRes.rows[0].plan_json === 'string'
-            ? JSON.parse(planRes.rows[0].plan_json)
-            : planRes.rows[0].plan_json || {};
-          if (planJson.destinationKey) {
-            destKey = planJson.destinationKey;
-          } else if (planJson.identity?.destinationKey) {
-            destKey = planJson.identity.destinationKey;
-          } else if (planJson.conflictColumns?.[0]) {
-            destKey = planJson.conflictColumns[0];
+        if (planRes.rows.length === 0) {
+          throw new Error(`[Worker Recovery] Plan version ${row.plan_version_id} not found for stranded run ${runId}`);
+        }
+
+        const planRow = planRes.rows[0];
+        const destConnId = planRow.destination_connection_id;
+        if (!destConnId && (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE !== 'true')) {
+          throw new Error(`[Worker Recovery] No destination connection configured on plan version ${row.plan_version_id} for run ${runId}`);
+        }
+
+        if (destConnId) {
+          destConnector = await getDestinationConnector({ destinationConnectionId: destConnId } as any);
+          if (!destConnector) {
+            throw new Error(`[Worker Recovery] Failed to resolve destination connector for connection ${destConnId} in run ${runId}`);
           }
         }
-      } catch (err: any) {
-        console.warn(`[Worker Recovery] Notice resolving plan details for run ${runId}: ${err.message}`);
+
+        const mappingJson = typeof planRow.mapping_json === 'string'
+          ? JSON.parse(planRow.mapping_json)
+          : planRow.mapping_json || {};
+        const objects: any[] = Array.isArray(mappingJson.objects)
+          ? mappingJson.objects
+          : (mappingJson.source ? [mappingJson] : []);
+
+        const matched = objects.find(
+          (o: any) =>
+            (o.destination?.table || o.destination?.object || o.destination) === objectsRes.rows[0]?.destination_object ||
+            (o.source?.collection || o.source?.object || o.source) === objectsRes.rows[0]?.source_object,
+        ) || (objects.length === 1 ? objects[0] : null);
+
+        if (matched?.identity?.destinationKey || matched?.destination?.key || matched?.destination?.identityKey) {
+          destKey = matched.identity?.destinationKey || matched?.destination?.key || matched?.destination?.identityKey;
+        } else if (planRow.execution_config_json?.conflictColumns?.[0]) {
+          destKey = planRow.execution_config_json.conflictColumns[0];
+        }
       }
 
       const recoveryEngine = new RecoveryEngine({
@@ -942,34 +965,95 @@ async function startWorker() {
           },
           onNextBatchScheduled: process.env.ENABLE_WORKER_AUTO_STREAMING === 'true'
             ? async (nextPayload: MigrationJobPayload) => {
-                // Priority 2: Propagate identity.destinationKey through streaming batches
+                // Ensure complete immutable metadata is preserved on the streaming payload
                 if (!nextPayload.destinationKey && job.data.destinationKey) {
                   nextPayload.destinationKey = job.data.destinationKey;
                 }
-                console.log(`[Worker] Scheduling streaming batch: ${nextPayload.batchKey} (seq: ${nextPayload.sequenceNo})`);
+                if (!nextPayload.sourceObject && job.data.sourceObject) {
+                  nextPayload.sourceObject = job.data.sourceObject;
+                }
+                if (!nextPayload.destinationObject && job.data.destinationObject) {
+                  nextPayload.destinationObject = job.data.destinationObject;
+                }
+                if (!nextPayload.mappingVersionId && job.data.mappingVersionId) {
+                  nextPayload.mappingVersionId = job.data.mappingVersionId;
+                }
+                if (!nextPayload.planVersionId && job.data.planVersionId) {
+                  nextPayload.planVersionId = job.data.planVersionId;
+                }
+                if (!nextPayload.sourceConnectionId && job.data.sourceConnectionId) {
+                  nextPayload.sourceConnectionId = job.data.sourceConnectionId;
+                }
+                if (!nextPayload.destinationConnectionId && job.data.destinationConnectionId) {
+                  nextPayload.destinationConnectionId = job.data.destinationConnectionId;
+                }
+
+                console.log(`[Worker] Routing streaming batch through durable PENDING outbox: ${nextPayload.batchKey} (seq: ${nextPayload.sequenceNo})`);
                 if (dbPool) {
+                  // Route through durable PENDING outbox with complete metadata: never insert QUEUED directly
                   await dbPool.query(
                     `INSERT INTO migration_batches (
                        id, migration_run_id, batch_key, sequence_no, status,
-                       source_cursor_start, records_read, records_written, records_skipped, records_failed, attempt_count
+                       source_object, destination_object, mapping_version_id,
+                       source_cursor_start, source_cursor_end,
+                       records_read, records_written, records_skipped, records_failed, attempt_count, updated_at
                      ) VALUES (
-                       gen_random_uuid(), $1, $2, $3, 'QUEUED', $4, 0, 0, 0, 0, 0
-                     ) ON CONFLICT (migration_run_id, batch_key) DO UPDATE SET status = 'QUEUED'`,
+                       gen_random_uuid(), $1, $2, $3, 'PENDING',
+                       $4, $5, $6,
+                       $7, $8,
+                       0, 0, 0, 0, 0, NOW()
+                     ) ON CONFLICT (migration_run_id, batch_key) DO UPDATE SET
+                       source_object = EXCLUDED.source_object,
+                       destination_object = EXCLUDED.destination_object,
+                       mapping_version_id = EXCLUDED.mapping_version_id,
+                       source_cursor_start = EXCLUDED.source_cursor_start,
+                       source_cursor_end = EXCLUDED.source_cursor_end,
+                       updated_at = NOW()`,
                     [
                       nextPayload.migrationRunId,
                       nextPayload.batchKey,
                       nextPayload.sequenceNo,
+                      nextPayload.sourceObject || 'customers',
+                      nextPayload.destinationObject || nextPayload.sourceObject || 'customers',
+                      nextPayload.mappingVersionId || null,
                       JSON.stringify(nextPayload.cursorStart || {}),
+                      JSON.stringify(nextPayload.cursorEnd || {}),
                     ],
                   );
-                }
-                if (executionQueue) {
-                  const jobId = `${nextPayload.migrationRunId}_${nextPayload.batchKey}`;
-                  await executionQueue.add('execute-batch', nextPayload, {
-                    jobId,
-                    removeOnComplete: false,
-                    removeOnFail: false,
-                  });
+
+                  // If executionQueue is active, transition from PENDING -> QUEUED atomically in a transaction
+                  if (executionQueue) {
+                    const client = await dbPool.connect();
+                    try {
+                      await client.query('BEGIN');
+                      const claimRes = await client.query(
+                        `SELECT * FROM migration_batches
+                         WHERE migration_run_id = $1 AND batch_key = $2 AND status = 'PENDING'
+                         FOR UPDATE SKIP LOCKED`,
+                        [nextPayload.migrationRunId, nextPayload.batchKey],
+                      );
+                      if (claimRes.rows.length > 0) {
+                        const jobId = `${nextPayload.migrationRunId}_${nextPayload.batchKey}`;
+                        await executionQueue.add('execute-batch', nextPayload, {
+                          jobId,
+                          removeOnComplete: false,
+                          removeOnFail: false,
+                        });
+                        await client.query(
+                          `UPDATE migration_batches SET status = 'QUEUED', updated_at = NOW()
+                           WHERE migration_run_id = $1 AND batch_key = $2`,
+                          [nextPayload.migrationRunId, nextPayload.batchKey],
+                        );
+                      }
+                      await client.query('COMMIT');
+                    } catch (queueErr: any) {
+                      await client.query('ROLLBACK').catch(() => {});
+                      console.error(`[Worker] Failed to enqueue streaming batch to BullMQ: ${queueErr.message}. Batch remains PENDING in outbox.`);
+                      throw queueErr;
+                    } finally {
+                      client.release();
+                    }
+                  }
                 }
               }
             : undefined,

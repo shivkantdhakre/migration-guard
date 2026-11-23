@@ -108,6 +108,7 @@ describe('P0/P1 Regression: Fail-Closed Validation', () => {
     services = buildServices({});
     await services.db.onModuleInit();
     services.db.resetMemoryStore();
+    await services.db.query("DELETE FROM migration_batches WHERE status = 'PENDING'");
     ConnectionService.customProber = async (conn) => ({
       reachable: true,
       engineVersion: conn.engine === 'MONGODB' ? 'MongoDB 7.0' : 'PostgreSQL 16',
@@ -115,9 +116,10 @@ describe('P0/P1 Regression: Fail-Closed Validation', () => {
     services.migrationService.stopAutonomousOutboxPublisher();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     ConnectionService.customProber = undefined;
-    services.migrationService.stopAutonomousOutboxPublisher();
+    services?.migrationService?.stopAutonomousOutboxPublisher();
+    await services?.db?.onModuleDestroy();
   });
 
   // ---- Issue 1: No fabricated default mapping ----
@@ -178,7 +180,7 @@ describe('P0/P1 Regression: Fail-Closed Validation', () => {
 
     // Verify an ERROR validation run was recorded (fail-closed evidence)
     const valRuns = await services.db.query(
-      `SELECT * FROM validation_runs WHERE migration_run_id = $1 ORDER BY created_at DESC`,
+      `SELECT * FROM validation_runs WHERE migration_run_id = $1 ORDER BY started_at DESC`,
       [run.runId],
     );
     expect(valRuns.rows.length).toBeGreaterThan(0);
@@ -241,6 +243,7 @@ describe('P0/P1 Regression: Fail-Closed Validation', () => {
     } finally {
       ConnectionService.customProber = undefined;
       svc.migrationService.stopAutonomousOutboxPublisher();
+      await svc.db.onModuleDestroy();
     }
   });
 });
@@ -252,6 +255,7 @@ describe('P0/P1 Regression: Source Count Completeness', () => {
     services = buildServices({});
     await services.db.onModuleInit();
     services.db.resetMemoryStore();
+    await services.db.query("DELETE FROM migration_batches WHERE status = 'PENDING'");
     ConnectionService.customProber = async (conn) => ({
       reachable: true,
       engineVersion: conn.engine === 'MONGODB' ? 'MongoDB 7.0' : 'PostgreSQL 16',
@@ -259,9 +263,10 @@ describe('P0/P1 Regression: Source Count Completeness', () => {
     services.migrationService.stopAutonomousOutboxPublisher();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     ConnectionService.customProber = undefined;
-    services.migrationService.stopAutonomousOutboxPublisher();
+    services?.migrationService?.stopAutonomousOutboxPublisher();
+    await services?.db?.onModuleDestroy();
   });
 
   // Issue 2: Validation must not pass when source records > manifested records
@@ -400,6 +405,7 @@ describe('P0/P1 Regression: Outbox Persistence and Dispatch', () => {
     });
     await services.db.onModuleInit();
     services.db.resetMemoryStore();
+    await services.db.query("DELETE FROM migration_batches WHERE status = 'PENDING'");
     ConnectionService.customProber = async (conn) => ({
       reachable: true,
       engineVersion: conn.engine === 'MONGODB' ? 'MongoDB 7.0' : 'PostgreSQL 16',
@@ -407,9 +413,10 @@ describe('P0/P1 Regression: Outbox Persistence and Dispatch', () => {
     services.migrationService.stopAutonomousOutboxPublisher();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     ConnectionService.customProber = undefined;
-    services.migrationService.stopAutonomousOutboxPublisher();
+    services?.migrationService?.stopAutonomousOutboxPublisher();
+    await services?.db?.onModuleDestroy();
   });
 
   it('P0.4 - Batch payloads must include sourceConnectionId and destinationConnectionId', async () => {
@@ -535,7 +542,7 @@ describe('P0/P1 Regression: Outbox Persistence and Dispatch', () => {
     const firstDispatchCount = dispatchedPayloads.length;
 
     // Run autonomous publisher again - should NOT re-dispatch QUEUED batches
-    await services.migrationService.dispatchPendingOutboxBatches();
+    await services.migrationService.dispatchPendingOutboxBatches(run.runId);
     expect(dispatchedPayloads.length).toBe(firstDispatchCount); // No new dispatches
   });
 });
@@ -634,6 +641,7 @@ describe('P0/P1 Regression: Recovery Custom Identity Keys', () => {
     } finally {
       ConnectionService.customProber = undefined;
       migrationService.stopAutonomousOutboxPublisher();
+      await db.onModuleDestroy();
     }
   });
 });
@@ -645,6 +653,7 @@ describe('P0/P1 Regression: Dry-Run All Objects', () => {
     services = buildServices({});
     await services.db.onModuleInit();
     services.db.resetMemoryStore();
+    await services.db.query("DELETE FROM migration_batches WHERE status = 'PENDING'");
     ConnectionService.customProber = async (conn) => ({
       reachable: true,
       engineVersion: conn.engine === 'MONGODB' ? 'MongoDB 7.0' : 'PostgreSQL 16',
@@ -652,9 +661,10 @@ describe('P0/P1 Regression: Dry-Run All Objects', () => {
     services.migrationService.stopAutonomousOutboxPublisher();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     ConnectionService.customProber = undefined;
-    services.migrationService.stopAutonomousOutboxPublisher();
+    services?.migrationService?.stopAutonomousOutboxPublisher();
+    await services?.db?.onModuleDestroy();
   });
 
   it('P0.6 - Dry-run must fail in production when no live source samples available', async () => {
@@ -781,6 +791,7 @@ describe('P0/P1 Regression: Schema Discovery Fail-Closed', () => {
       }
     } finally {
       ConnectionService.customProber = undefined;
+      await db.onModuleDestroy();
     }
   });
 
@@ -840,6 +851,7 @@ describe('P0/P1 Regression: Schema Discovery Fail-Closed', () => {
       }
     } finally {
       ConnectionService.customProber = undefined;
+      await db.onModuleDestroy();
     }
   });
 });
@@ -851,6 +863,7 @@ describe('P0/P1 Regression: Readiness Checks Block on Unhealthy Connections', ()
     services = buildServices({});
     await services.db.onModuleInit();
     services.db.resetMemoryStore();
+    await services.db.query("DELETE FROM migration_batches WHERE status = 'PENDING'");
     ConnectionService.customProber = async (conn) => ({
       reachable: true,
       engineVersion: conn.engine === 'MONGODB' ? 'MongoDB 7.0' : 'PostgreSQL 16',
@@ -858,9 +871,10 @@ describe('P0/P1 Regression: Readiness Checks Block on Unhealthy Connections', ()
     services.migrationService.stopAutonomousOutboxPublisher();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     ConnectionService.customProber = undefined;
-    services.migrationService.stopAutonomousOutboxPublisher();
+    services?.migrationService?.stopAutonomousOutboxPublisher();
+    await services?.db?.onModuleDestroy();
   });
 
   it('P0.8 - Readiness must report NOT READY when source connection is not HEALTHY', async () => {
@@ -1035,6 +1049,7 @@ describe('P0/P1 Regression: Outbox Dispatch Failure Handling', () => {
     } finally {
       ConnectionService.customProber = undefined;
       migrationService.stopAutonomousOutboxPublisher();
+      await db.onModuleDestroy();
     }
   });
 });

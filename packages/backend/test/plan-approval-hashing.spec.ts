@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { PlanService } from '../src/plan/plan.service';
 import { ApprovalService } from '../src/plan/approval.service';
 import { ReadinessService } from '../src/plan/readiness.service';
@@ -91,6 +91,10 @@ describe('Plan Approval & Canonical Hashing', () => {
     // Mark connections as tested & healthy for plan readiness verification
     await db.query(`UPDATE connections SET status = 'HEALTHY' WHERE id = $1`, [sourceConn.id]);
     await db.query(`UPDATE connections SET status = 'HEALTHY' WHERE id = $1`, [destConn.id]);
+  });
+
+  afterEach(async () => {
+    await db?.onModuleDestroy();
   });
 
   it('should compute deterministic canonical plan hash and create plan version', async () => {

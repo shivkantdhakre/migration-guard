@@ -272,7 +272,7 @@ describe('P0/P1 Regression: Source Count Completeness', () => {
 
     // We verify this by inspecting the validation summary for count-related checks.
     // A correct implementation will include a "count" check in the check results.
-    const reg = await services.authService.register('count1@test.io', 'CountUser', 'Password123!');
+    const reg = await services.authService.register(uniqueEmail('count1@test.io'), 'CountUser', 'Password123!');
     const wsId = reg.workspace.id;
     const proj = await services.projectService.createProject(wsId, 'CountProj', 'Test', reg.user.id);
 
@@ -413,7 +413,7 @@ describe('P0/P1 Regression: Outbox Persistence and Dispatch', () => {
   });
 
   it('P0.4 - Batch payloads must include sourceConnectionId and destinationConnectionId', async () => {
-    const reg = await services.authService.register('outbox1@test.io', 'OutboxUser', 'Password123!');
+    const reg = await services.authService.register(uniqueEmail('outbox1@test.io'), 'OutboxUser', 'Password123!');
     const wsId = reg.workspace.id;
     const proj = await services.projectService.createProject(wsId, 'OutboxProj', 'Test', reg.user.id);
 
@@ -463,7 +463,7 @@ describe('P0/P1 Regression: Outbox Persistence and Dispatch', () => {
   });
 
   it('P0.4 - PENDING batches must transition to QUEUED after successful dispatch', async () => {
-    const reg = await services.authService.register('outbox2@test.io', 'OutboxUser2', 'Password123!');
+    const reg = await services.authService.register(uniqueEmail('outbox2@test.io'), 'OutboxUser2', 'Password123!');
     const wsId = reg.workspace.id;
     const proj = await services.projectService.createProject(wsId, 'Outbox2Proj', 'Test', reg.user.id);
 
@@ -506,7 +506,7 @@ describe('P0/P1 Regression: Outbox Persistence and Dispatch', () => {
   });
 
   it('P0.4 - Outbox publisher must be idempotent: re-dispatching QUEUED batches must not create duplicates', async () => {
-    const reg = await services.authService.register('outbox3@test.io', 'OutboxUser3', 'Password123!');
+    const reg = await services.authService.register(uniqueEmail('outbox3@test.io'), 'OutboxUser3', 'Password123!');
     const wsId = reg.workspace.id;
     const proj = await services.projectService.createProject(wsId, 'Outbox3Proj', 'Test', reg.user.id);
 
@@ -584,7 +584,7 @@ describe('P0/P1 Regression: Recovery Custom Identity Keys', () => {
     migrationService.stopAutonomousOutboxPublisher();
 
     try {
-      const reg = await authService.register('recovery1@test.io', 'RecoveryUser', 'Password123!');
+      const reg = await authService.register(uniqueEmail('recovery1@test.io'), 'RecoveryUser', 'Password123!');
       const wsId = reg.workspace.id;
       const proj = await projectService.createProject(wsId, 'RecoveryProj', 'Test', reg.user.id);
 
@@ -662,7 +662,7 @@ describe('P0/P1 Regression: Dry-Run All Objects', () => {
     const originalNodeEnv = process.env.NODE_ENV;
 
     try {
-      const reg = await services.authService.register('dryrun1@test.io', 'DryUser', 'Password123!');
+      const reg = await services.authService.register(uniqueEmail('dryrun1@test.io'), 'DryUser', 'Password123!');
       const wsId = reg.workspace.id;
       const proj = await services.projectService.createProject(wsId, 'DryProj', 'Test', reg.user.id);
 
@@ -743,7 +743,7 @@ describe('P0/P1 Regression: Schema Discovery Fail-Closed', () => {
     ConnectionService.customProber = async () => ({ reachable: true, engineVersion: 'MongoDB 7.0' });
 
     try {
-      const reg = await authService.register('schema1@test.io', 'SchemaUser', 'Password123!');
+      const reg = await authService.register(uniqueEmail('schema1@test.io'), 'SchemaUser', 'Password123!');
       const wsId = reg.workspace.id;
 
       const conn = await connectionService.createConnection(
@@ -802,7 +802,7 @@ describe('P0/P1 Regression: Schema Discovery Fail-Closed', () => {
     ConnectionService.customProber = async () => ({ reachable: true, engineVersion: 'MongoDB 7.0' });
 
     try {
-      const reg = await authService.register('profile1@test.io', 'ProfileUser', 'Password123!');
+      const reg = await authService.register(uniqueEmail('profile1@test.io'), 'ProfileUser', 'Password123!');
       const wsId = reg.workspace.id;
 
       const conn = await connectionService.createConnection(
@@ -864,7 +864,7 @@ describe('P0/P1 Regression: Readiness Checks Block on Unhealthy Connections', ()
   });
 
   it('P0.8 - Readiness must report NOT READY when source connection is not HEALTHY', async () => {
-    const reg = await services.authService.register('ready1@test.io', 'ReadyUser', 'Password123!');
+    const reg = await services.authService.register(uniqueEmail('ready1@test.io'), 'ReadyUser', 'Password123!');
     const wsId = reg.workspace.id;
     const proj = await services.projectService.createProject(wsId, 'ReadyProj', 'Test', reg.user.id);
 
@@ -904,7 +904,7 @@ describe('P0/P1 Regression: Readiness Checks Block on Unhealthy Connections', ()
   });
 
   it('P0.8 - Readiness must report NOT READY when no mapping version is configured', async () => {
-    const reg = await services.authService.register('ready2@test.io', 'ReadyUser2', 'Password123!');
+    const reg = await services.authService.register(uniqueEmail('ready2@test.io'), 'ReadyUser2', 'Password123!');
     const wsId = reg.workspace.id;
     const proj = await services.projectService.createProject(wsId, 'Ready2Proj', 'Test', reg.user.id);
 
@@ -1004,7 +1004,7 @@ describe('P0/P1 Regression: Outbox Dispatch Failure Handling', () => {
     ConnectionService.customProber = async () => ({ reachable: true, engineVersion: 'MongoDB 7.0' });
 
     try {
-      const reg = await authService.register('outboxfail@test.io', 'FailUser', 'Password123!');
+      const reg = await authService.register(uniqueEmail('outboxfail@test.io'), 'FailUser', 'Password123!');
       const wsId = reg.workspace.id;
       const proj = await projectService.createProject(wsId, 'FailProj', 'Test', reg.user.id);
 

@@ -546,7 +546,8 @@ async function reconcileStrandedRunsOnStartup(): Promise<void> {
         [runId],
       );
 
-      if (!row.plan_version_id && (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE !== 'true')) {
+      const isStrict = process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false';
+      if (!row.plan_version_id && isStrict) {
         throw new Error(`[Worker Recovery] Missing plan_version_id for stranded run ${runId}. Startup recovery failed closed.`);
       }
 
@@ -573,7 +574,7 @@ async function reconcileStrandedRunsOnStartup(): Promise<void> {
 
         planRow = planRes.rows[0];
         const destConnId = planRow.destination_connection_id;
-        if (!destConnId && (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE !== 'true')) {
+        if (!destConnId && isStrict) {
           throw new Error(`[Worker Recovery] No destination connection configured on plan version ${row.plan_version_id} for run ${runId}`);
         }
 
@@ -584,7 +585,7 @@ async function reconcileStrandedRunsOnStartup(): Promise<void> {
           ? mappingJson.objects
           : (mappingJson.source ? [mappingJson] : []);
 
-        if (objects.length === 0 && (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE !== 'true')) {
+        if (objects.length === 0 && isStrict) {
           throw new Error(`[Worker Recovery] No mapped objects found on plan version ${row.plan_version_id} for stranded run ${runId}. Startup recovery failed closed.`);
         }
       }
@@ -592,7 +593,7 @@ async function reconcileStrandedRunsOnStartup(): Promise<void> {
       // Resolve each object's destination connector, mapping, and identity key independently.
       // Fail closed when plan version, mapping, destination connector, or identity key is missing or ambiguous.
       for (const objRow of objectsRes.rows) {
-        if ((!objRow.source_object || !objRow.destination_object) && (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE !== 'true')) {
+        if ((!objRow.source_object || !objRow.destination_object) && isStrict) {
           throw new Error(`[Worker Recovery] Ambiguous or missing source/destination object in batch for run ${runId}. Startup recovery failed closed.`);
         }
         const srcObj = objRow.source_object || 'customers';
@@ -608,7 +609,7 @@ async function reconcileStrandedRunsOnStartup(): Promise<void> {
               ((o.source?.collection || o.source?.object || o.source) === srcObj),
           );
 
-          if (exactMatches.length > 1 && (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE !== 'true')) {
+          if (exactMatches.length > 1 && isStrict) {
             throw new Error(`[Worker Recovery] Ambiguous mapping: multiple objects match '${srcObj}' -> '${dstObj}' in run ${runId}. Startup recovery failed closed.`);
           }
 
@@ -616,7 +617,7 @@ async function reconcileStrandedRunsOnStartup(): Promise<void> {
             ? exactMatches[0]
             : (objects.length === 1 ? objects[0] : null);
 
-          if (!matched && (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE !== 'true')) {
+          if (!matched && isStrict) {
             throw new Error(`[Worker Recovery] No matching object mapping found for '${srcObj}' -> '${dstObj}' in plan version ${row.plan_version_id} for run ${runId}. Startup recovery failed closed.`);
           }
 
@@ -627,7 +628,7 @@ async function reconcileStrandedRunsOnStartup(): Promise<void> {
           }
 
           const objDestConnId = matched?.destinationConnectionId || matched?.destination?.connectionId || planRow.destination_connection_id;
-          if (!objDestConnId && (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE !== 'true')) {
+          if (!objDestConnId && isStrict) {
             throw new Error(`[Worker Recovery] No destination connection configured for object '${dstObj}' in run ${runId}. Refusing control-plane fallback in production.`);
           }
 
@@ -636,15 +637,15 @@ async function reconcileStrandedRunsOnStartup(): Promise<void> {
             if (!objDestConnector) {
               throw new Error(`[Worker Recovery] Failed to resolve destination connector for connection ${objDestConnId} in run ${runId} for object ${dstObj}`);
             }
-          } else if (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE !== 'true') {
+          } else if (isStrict) {
             throw new Error(`[Worker Recovery] Missing destination connector for object '${dstObj}' in run ${runId}. Refusing control-plane fallback in production.`);
           }
-        } else if (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE !== 'true') {
+        } else if (isStrict) {
           throw new Error(`[Worker Recovery] Plan row missing for run ${runId}. Refusing control-plane fallback in production.`);
         }
 
         if (!objDestKey) {
-          if (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE !== 'true') {
+          if (isStrict) {
             throw new Error(`[Worker Recovery] Missing destination identity key for object '${dstObj}' in run ${runId}. Refusing default 'id' fallback in production.`);
           }
           objDestKey = 'id';
@@ -746,7 +747,7 @@ async function startWorker() {
         // FR-EXEC-002 & P0.4: strictly validate queue message contains identifiers/cursors, NOT bulk records
         // and requires explicit connection references in production
         QueueHandler.validatePayload(job.data, {
-          requireConnections: process.env.ALLOW_SYNTHETIC_SOURCE !== 'true' || process.env.NODE_ENV === 'production',
+          requireConnections: process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false',
         });
 
         console.log(
@@ -1036,7 +1037,7 @@ async function startWorker() {
                 }
 
                 // Validate all required streaming metadata before outbox persistence
-                if (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE !== 'true') {
+                if (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false') {
                   if (!nextPayload.sourceObject || !nextPayload.destinationObject) {
                     throw new Error(`[Worker Streaming] Missing required sourceObject or destinationObject for streaming batch ${nextPayload.batchKey}`);
                   }

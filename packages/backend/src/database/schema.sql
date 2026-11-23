@@ -179,7 +179,7 @@ CREATE TABLE IF NOT EXISTS migration_batches (
     status TEXT NOT NULL DEFAULT 'PENDING', -- 'PENDING', 'QUEUED', 'RUNNING', 'COMMITTED', 'RETRY_WAIT', 'FAILED_RETRYABLE', 'FAILED_PERMANENT', 'OUTCOME_UNKNOWN'
     source_object TEXT NOT NULL DEFAULT 'customers',
     destination_object TEXT NOT NULL DEFAULT 'customers',
-    mapping_version_id UUID REFERENCES mapping_versions(id),
+    mapping_version_id UUID,
     source_cursor_start JSONB,
     source_cursor_end JSONB,
     records_read BIGINT NOT NULL DEFAULT 0,
@@ -499,7 +499,7 @@ BEGIN
   -- Ensure migration_batches has complete immutable batch context columns
   ALTER TABLE migration_batches ADD COLUMN IF NOT EXISTS source_object TEXT NOT NULL DEFAULT 'customers';
   ALTER TABLE migration_batches ADD COLUMN IF NOT EXISTS destination_object TEXT NOT NULL DEFAULT 'customers';
-  ALTER TABLE migration_batches ADD COLUMN IF NOT EXISTS mapping_version_id UUID REFERENCES mapping_versions(id);
+  ALTER TABLE migration_batches ADD COLUMN IF NOT EXISTS mapping_version_id UUID;
 END $$;
 
 -- Validation Runs

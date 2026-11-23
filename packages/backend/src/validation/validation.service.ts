@@ -457,6 +457,19 @@ export class ValidationService {
         }
       }
 
+      // In production mode, both source and destination count queries must have succeeded (fail closed on missing count evidence)
+      if (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false') {
+        if (!sourceCountQueried || !destCountQueried) {
+          const missingMsg = !sourceCountQueried && !destCountQueried
+            ? `Missing live source and destination count evidence for ${sourceObjectName} → ${destObjectName}. Validation failed closed.`
+            : !sourceCountQueried
+            ? `Missing live source count evidence for ${sourceObjectName}. Validation failed closed.`
+            : `Missing live destination count evidence for ${destObjectName}. Validation failed closed.`;
+          await this.recordFailedValidation(run.workspace_id, runId, missingMsg);
+          throw new Error(missingMsg);
+        }
+      }
+
       // Add COUNT_MISMATCH check result — this is PRIMARY, manifest-based check is SUPPLEMENTARY
       if (sourceCountQueried && destCountQueried) {
         const countMatches = sourceCount === destCount;
@@ -825,8 +838,8 @@ export class ValidationService {
     ).length;
 
     // Explicit distinction between execution status ('COMPLETED') and verification outcome ('PASSED' / 'FAILED')
-    // Ensure validation cannot pass with incomplete evidence (no checks evaluated or unresolved discrepancies)
-    const hasIncompleteEvidence = allCheckResults.length === 0 || allDiscrepancies.length > 0;
+    // Ensure validation cannot pass with incomplete evidence (no checks evaluated, objects unvalidated, or unresolved discrepancies)
+    const hasIncompleteEvidence = allCheckResults.length === 0 || allDiscrepancies.length > 0 || objectsValidated.length === 0;
     const outcome = (totalFailedChecks > 0 || hasIncompleteEvidence) ? 'FAILED' : 'PASSED';
     const executionStatus = 'COMPLETED';
 

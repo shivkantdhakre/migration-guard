@@ -1,6 +1,12 @@
 import { ToolExecutionRequest, ToolExecutionResponse, ToolExecutionGuard } from './tool-guard.js';
 import { v4 as uuidv4 } from 'uuid';
 
+function assertSafeIdentifier(name: string, context: string): void {
+  if (!name || typeof name !== 'string' || !/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name)) {
+    throw new Error(`Unsafe identifier in ${context}: "${name}"`);
+  }
+}
+
 export class ToolCatalog {
   private static mockSnapshots: Map<string, any> = new Map();
   private static mockDiscrepancies: Map<string, any[]> = new Map();
@@ -666,8 +672,26 @@ export class ToolCatalog {
                 }
               }
 
+              // Validate all dynamic SQL identifiers before querying
+              try {
+                assertSafeIdentifier(manifest.destination_object, 'destination object');
+                assertSafeIdentifier(destKeyField, 'destination key');
+                assertSafeIdentifier(manifest.source_object, 'source object');
+                assertSafeIdentifier(sourceKeyField, 'source key');
+              } catch (idErr: any) {
+                rawResult = {
+                  status: 'UNAVAILABLE',
+                  sourceRecordId: input.sourceRecordId,
+                  destinationRecordId: input.destinationRecordId,
+                  message: `Invalid or unsafe identifier: ${idErr.message}`,
+                };
+                break;
+              }
+
               let liveSrc: any = null;
               let liveDst: any = null;
+              let srcQueried = false;
+              let dstQueried = false;
 
               // Query destination PostgreSQL record
               const dstConnStr = dstCreds.connectionString || dstCreds.uri || dstCreds.url;
@@ -680,6 +704,7 @@ export class ToolCatalog {
                       `SELECT * FROM "${manifest.destination_object}" WHERE "${destKeyField}" = $1 LIMIT 1`,
                       [input.destinationRecordId],
                     );
+                    dstQueried = true;
                     if (qRes.rows.length > 0) liveDst = qRes.rows[0];
                   } finally {
                     await pool.end().catch(() => {});
@@ -693,6 +718,14 @@ export class ToolCatalog {
                   };
                   break;
                 }
+              } else {
+                rawResult = {
+                  status: 'UNAVAILABLE',
+                  sourceRecordId: input.sourceRecordId,
+                  destinationRecordId: input.destinationRecordId,
+                  message: `Live record retrieval unsupported for destination engine '${dstConn.engine}'.`,
+                };
+                break;
               }
 
               // Query source MongoDB or PostgreSQL record
@@ -713,6 +746,7 @@ export class ToolCatalog {
                       filter = { [sourceKeyField]: sIdStr };
                     }
                     liveSrc = await coll.findOne(filter);
+                    srcQueried = true;
                   } finally {
                     await client.close().catch(() => {});
                   }
@@ -734,6 +768,7 @@ export class ToolCatalog {
                       `SELECT * FROM "${manifest.source_object}" WHERE "${sourceKeyField}" = $1 LIMIT 1`,
                       [input.sourceRecordId],
                     );
+                    srcQueried = true;
                     if (qRes.rows.length > 0) liveSrc = qRes.rows[0];
                   } finally {
                     await pool.end().catch(() => {});
@@ -747,6 +782,24 @@ export class ToolCatalog {
                   };
                   break;
                 }
+              } else {
+                rawResult = {
+                  status: 'UNAVAILABLE',
+                  sourceRecordId: input.sourceRecordId,
+                  destinationRecordId: input.destinationRecordId,
+                  message: `Live record retrieval unsupported for source engine '${srcConn.engine}'.`,
+                };
+                break;
+              }
+
+              if (!srcQueried || !dstQueried) {
+                rawResult = {
+                  status: 'UNAVAILABLE',
+                  sourceRecordId: input.sourceRecordId,
+                  destinationRecordId: input.destinationRecordId,
+                  message: 'Live record retrieval unsupported or could not be completed.',
+                };
+                break;
               }
 
               if (!liveSrc || !liveDst) {
@@ -890,36 +943,25 @@ export class ToolCatalog {
           if (this.db) {
             let actorId: string | null = context.actorId;
             const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+            let verifiedActorId: string | null = null;
             if (this.db.isDbConnected) {
-              try {
-                const uRes = await this.db.query(
-                  'SELECT u.id FROM users u JOIN workspace_members wm ON wm.user_id = u.id WHERE wm.workspace_id = $1 AND u.id = $2 LIMIT 1',
-                  [context.workspaceId, isUuid.test(actorId || '') ? actorId : '00000000-0000-0000-0000-000000000000'],
-                );
-                if (uRes.rows.length > 0) {
-                  actorId = uRes.rows[0].id;
-                } else {
-                  const anyMember = await this.db.query(
-                    'SELECT u.id FROM users u JOIN workspace_members wm ON wm.user_id = u.id WHERE wm.workspace_id = $1 LIMIT 1',
-                    [context.workspaceId],
+              if (actorId && isUuid.test(actorId)) {
+                try {
+                  const uRes = await this.db.query(
+                    'SELECT u.id FROM users u JOIN workspace_members wm ON wm.user_id = u.id WHERE wm.workspace_id = $1 AND u.id = $2 LIMIT 1',
+                    [context.workspaceId, actorId],
                   );
-                  actorId = anyMember.rows.length > 0 ? anyMember.rows[0].id : null;
+                  if (uRes.rows.length > 0) {
+                    verifiedActorId = uRes.rows[0].id;
+                  }
+                } catch {
+                  verifiedActorId = null;
                 }
-              } catch {
-                actorId = isUuid.test(actorId || '') ? actorId : null;
               }
-            } else if (!isUuid.test(actorId || '')) {
-              try {
-                const uRes = await this.db.query(
-                  'SELECT u.id FROM users u JOIN workspace_members wm ON wm.user_id = u.id WHERE wm.workspace_id = $1 LIMIT 1',
-                  [context.workspaceId],
-                );
-                actorId = uRes.rows.length > 0 ? uRes.rows[0].id : null;
-              } catch {
-                actorId = null;
-              }
+            } else if (actorId && isUuid.test(actorId)) {
+              verifiedActorId = actorId;
             }
-            if (actorId) {
+            if (verifiedActorId) {
               try {
                 await this.db.query(
                   `INSERT INTO audit_events (workspace_id, project_id, actor_type, actor_id, action, resource_type, resource_id, details_json)
@@ -927,9 +969,7 @@ export class ToolCatalog {
                   [
                     context.workspaceId,
                     context.projectId || null,
-                    actorId,
-                    proposalId,
-                    { input, createdAt: new Date().toISOString() },
+                    verifiedActorId, proposalId, { input, createdAt: new Date().toISOString() },
                   ],
                 );
               } catch (err: any) {
@@ -950,36 +990,25 @@ export class ToolCatalog {
           if (this.db) {
             let actorId: string | null = context.actorId;
             const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+            let verifiedActorId: string | null = null;
             if (this.db.isDbConnected) {
-              try {
-                const uRes = await this.db.query(
-                  'SELECT u.id FROM users u JOIN workspace_members wm ON wm.user_id = u.id WHERE wm.workspace_id = $1 AND u.id = $2 LIMIT 1',
-                  [context.workspaceId, isUuid.test(actorId || '') ? actorId : '00000000-0000-0000-0000-000000000000'],
-                );
-                if (uRes.rows.length > 0) {
-                  actorId = uRes.rows[0].id;
-                } else {
-                  const anyMember = await this.db.query(
-                    'SELECT u.id FROM users u JOIN workspace_members wm ON wm.user_id = u.id WHERE wm.workspace_id = $1 LIMIT 1',
-                    [context.workspaceId],
+              if (actorId && isUuid.test(actorId)) {
+                try {
+                  const uRes = await this.db.query(
+                    'SELECT u.id FROM users u JOIN workspace_members wm ON wm.user_id = u.id WHERE wm.workspace_id = $1 AND u.id = $2 LIMIT 1',
+                    [context.workspaceId, actorId],
                   );
-                  actorId = anyMember.rows.length > 0 ? anyMember.rows[0].id : null;
+                  if (uRes.rows.length > 0) {
+                    verifiedActorId = uRes.rows[0].id;
+                  }
+                } catch {
+                  verifiedActorId = null;
                 }
-              } catch {
-                actorId = isUuid.test(actorId || '') ? actorId : null;
               }
-            } else if (!isUuid.test(actorId || '')) {
-              try {
-                const uRes = await this.db.query(
-                  'SELECT u.id FROM users u JOIN workspace_members wm ON wm.user_id = u.id WHERE wm.workspace_id = $1 LIMIT 1',
-                  [context.workspaceId],
-                );
-                actorId = uRes.rows.length > 0 ? uRes.rows[0].id : null;
-              } catch {
-                actorId = null;
-              }
+            } else if (actorId && isUuid.test(actorId)) {
+              verifiedActorId = actorId;
             }
-            if (actorId) {
+            if (verifiedActorId) {
               try {
                 await this.db.query(
                   `INSERT INTO audit_events (workspace_id, project_id, actor_type, actor_id, action, resource_type, resource_id, details_json)
@@ -987,9 +1016,7 @@ export class ToolCatalog {
                   [
                     context.workspaceId,
                     context.projectId || null,
-                    actorId,
-                    approvalRequestId,
-                    { input, createdAt: new Date().toISOString() },
+                    verifiedActorId, approvalRequestId, { input, createdAt: new Date().toISOString() },
                   ],
                 );
               } catch (err: any) {

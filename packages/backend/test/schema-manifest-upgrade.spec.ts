@@ -620,6 +620,12 @@ describe('Manifest Schema Upgrade & Historical Reconciliation (Run 005.20 Added-
             udt_name: 'uuid',
             is_nullable: 'YES',
           },
+          {
+            column_name: 'updated_at',
+            data_type: 'timestamp with time zone',
+            udt_name: 'timestamptz',
+            is_nullable: 'YES',
+          },
         ],
         addedConstraints: [
           {

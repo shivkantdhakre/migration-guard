@@ -218,10 +218,74 @@ export class ReadinessService {
       }
     }
 
+    // In addition to snapshots, inspect live destination PostgreSQL database schema if available
+    let liveDstEntities: any[] | null = null;
+    if (version.destination_connection_id && this.credentialsService) {
+      try {
+        const dConnRes = await this.db.query('SELECT * FROM connections WHERE id = $1', [version.destination_connection_id]);
+        if (dConnRes.rows.length > 0 && dConnRes.rows[0].engine === 'POSTGRESQL') {
+          const dConn = dConnRes.rows[0];
+          const dCreds = await this.credentialsService.getDecryptedCredentials(dConn.id, dConn.credential_version);
+          const connStr = dCreds?.connectionString || dCreds?.uri || dCreds?.url;
+          if (connStr) {
+            const pg = require('pg');
+            const pool = new pg.Pool({ connectionString: connStr, connectionTimeoutMillis: 2000 });
+            try {
+              const tRes = await pool.query(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'`);
+              const cRes = await pool.query(`
+                SELECT table_name, column_name, data_type, udt_name, is_nullable, character_maximum_length
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+              `);
+              const kRes = await pool.query(`
+                SELECT tc.table_name, kcu.column_name, tc.constraint_type
+                FROM information_schema.table_constraints tc
+                JOIN information_schema.key_column_usage kcu
+                  ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
+                WHERE tc.table_schema = 'public' AND tc.constraint_type IN ('PRIMARY KEY', 'UNIQUE')
+              `);
+              const tableMap = new Map<string, any>();
+              for (const t of tRes.rows) {
+                tableMap.set(t.table_name, { name: t.table_name, columns: [] });
+              }
+              for (const c of cRes.rows) {
+                let tbl = tableMap.get(c.table_name);
+                if (!tbl) {
+                  tbl = { name: c.table_name, columns: [] };
+                  tableMap.set(c.table_name, tbl);
+                }
+                const isPk = kRes.rows.some((k: any) => k.table_name === c.table_name && k.column_name === c.column_name && k.constraint_type === 'PRIMARY KEY');
+                const isUnq = isPk || kRes.rows.some((k: any) => k.table_name === c.table_name && k.column_name === c.column_name && k.constraint_type === 'UNIQUE');
+                tbl.columns.push({
+                  name: c.column_name,
+                  type: c.udt_name || c.data_type,
+                  data_type: c.data_type,
+                  udt_name: c.udt_name,
+                  nullable: c.is_nullable !== 'NO',
+                  is_nullable: c.is_nullable,
+                  isPrimaryKey: isPk,
+                  isUnique: isUnq,
+                  maxLength: c.character_maximum_length,
+                });
+              }
+              liveDstEntities = Array.from(tableMap.values());
+            } finally {
+              await pool.end().catch(() => {});
+            }
+          }
+        }
+      } catch (err: any) {
+        console.warn(`[ReadinessService] Live destination catalog inspection notice: ${err.message}`);
+      }
+    }
+
     // 7. Verify Schema Compatibility & Missing Destination Tables across ALL Mapped Objects
-    if (dstSnapRow && objects.length > 0) {
-      const dstJson = dstSnapRow.snapshot_json || {};
-      const dstEntities = dstJson.tables || dstJson.collections || dstJson.objects || [];
+    const effectiveDstEntities = (liveDstEntities && liveDstEntities.length > 0)
+      ? liveDstEntities
+      : (dstSnapRow ? ((dstSnapRow.snapshot_json || {}).tables || (dstSnapRow.snapshot_json || {}).collections || (dstSnapRow.snapshot_json || {}).objects || []) : []);
+
+    if ((dstSnapRow || (liveDstEntities && liveDstEntities.length > 0)) && objects.length > 0) {
+      const dstEntities = effectiveDstEntities;
 
       for (const obj of objects) {
         const sName = obj.source?.collection || obj.source?.object || (typeof obj.source === 'string' ? obj.source : 'customers');

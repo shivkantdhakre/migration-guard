@@ -243,10 +243,13 @@ export class MigrationService implements OnModuleInit, OnModuleDestroy {
    * Transactional Outbox Dispatcher: queries all PENDING batches (for a specific run or across all runs),
    * dispatches them to BullMQ, and idempotently updates their status to QUEUED.
    * Features:
-   * 1. Multi-instance coordination via PostgreSQL advisory locks (pg_try_advisory_lock) and in-memory locks.
+   * 1. Multi-instance coordination via transaction-scoped PostgreSQL advisory locks (pg_try_advisory_xact_lock).
    * 2. Atomic batch claiming with FOR UPDATE SKIP LOCKED.
    * 3. Complete immutable metadata: source/destination objects, cursors, connection IDs, destination identity key, mapping version.
-   * 4. Safe state transitions: batches remain PENDING until BullMQ confirms enqueue, then transition to QUEUED inside an atomic transaction.
+   * 4. Safe distributed boundary: batches remain PENDING until successfully dispatched to BullMQ/Redis,
+   *    then transition to QUEUED in PostgreSQL. Cross-system atomicity is not claimed; crash windows between
+   *    Redis enqueue and DB commit are handled by deterministic BullMQ job IDs, durable retryable batch claims,
+   *    and worker startup reconciliation.
    */
   async dispatchPendingOutboxBatches(runId?: string): Promise<number> {
     const lockKey = runId ? `outbox_pub_${runId}` : 'outbox_pub_global';
@@ -257,24 +260,6 @@ export class MigrationService implements OnModuleInit, OnModuleDestroy {
     }
     MigrationService.activeOutboxLocks.add(inMemoryKey);
     this.isPublishing = true;
-
-    let advisoryLockAcquired = false;
-    if (Boolean(this.db.getRawPool())) {
-      try {
-        const lockRes = await this.db.query<{ acquired: boolean }>(
-          `SELECT pg_try_advisory_lock(hashtext($1)) as acquired`,
-          [lockKey],
-        );
-        advisoryLockAcquired = lockRes.rows.length > 0 && lockRes.rows[0].acquired === true;
-        if (!advisoryLockAcquired) {
-          MigrationService.activeOutboxLocks.delete(inMemoryKey);
-          this.isPublishing = false;
-          return 0;
-        }
-      } catch {
-        // Fallback gracefully if advisory locking is unavailable in target DB
-      }
-    }
 
     try {
       const isPostgres = Boolean(this.db.getRawPool());
@@ -551,13 +536,6 @@ export class MigrationService implements OnModuleInit, OnModuleDestroy {
 
       return payloads.length;
     } finally {
-      if (advisoryLockAcquired && Boolean(this.db.getRawPool())) {
-        try {
-          await this.db.query(`SELECT pg_advisory_unlock(hashtext($1))`, [lockKey]);
-        } catch {
-          // Best-effort lock release
-        }
-      }
       MigrationService.activeOutboxLocks.delete(inMemoryKey);
       this.isPublishing = false;
     }

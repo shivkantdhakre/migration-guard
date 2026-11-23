@@ -517,6 +517,7 @@ async function getDestinationConnector(payload: MigrationJobPayload): Promise<De
  * Priority 2: Reconcile in-flight/ambiguous runs and batches on worker startup/restart.
  * Inspects PostgreSQL for batches or runs interrupted mid-flight (e.g. process crash, OOM, reboot).
  * Calls RecoveryEngine.prepareResume() to verify destination records and advance checkpoints.
+ * Never silently swallows recovery failures: if recovery cannot complete safely, throws error to halt worker startup.
  */
 async function reconcileStrandedRunsOnStartup(): Promise<void> {
   if (!dbPool) return;
@@ -526,8 +527,7 @@ async function reconcileStrandedRunsOnStartup(): Promise<void> {
        FROM migration_runs mr
        JOIN migration_batches mb ON mb.migration_run_id = mr.id
        WHERE mr.status = 'RUNNING'
-          OR mb.status IN ('RUNNING', 'OUTCOME_UNKNOWN', 'RETRY_WAIT')
-          OR mb.sub_stage IN ('WRITE_STARTED', 'DESTINATION_WRITTEN', 'MANIFEST_COMMITTED')`,
+          OR mb.status IN ('RUNNING', 'OUTCOME_UNKNOWN', 'RETRY_WAIT')`,
     );
 
     if (candidateRuns.rows.length === 0) {
@@ -546,8 +546,8 @@ async function reconcileStrandedRunsOnStartup(): Promise<void> {
         [runId],
       );
 
-      let destConnector = defaultDestinationConnector;
-      let destKey = 'id';
+      let planRow: any = null;
+      let objects: any[] = [];
 
       if (row.plan_version_id) {
         const planRes = await dbPool.query(
@@ -567,66 +567,79 @@ async function reconcileStrandedRunsOnStartup(): Promise<void> {
           throw new Error(`[Worker Recovery] Plan version ${row.plan_version_id} not found for stranded run ${runId}`);
         }
 
-        const planRow = planRes.rows[0];
+        planRow = planRes.rows[0];
         const destConnId = planRow.destination_connection_id;
         if (!destConnId && (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE !== 'true')) {
           throw new Error(`[Worker Recovery] No destination connection configured on plan version ${row.plan_version_id} for run ${runId}`);
         }
 
-        if (destConnId) {
-          destConnector = await getDestinationConnector({ destinationConnectionId: destConnId } as any);
-          if (!destConnector) {
-            throw new Error(`[Worker Recovery] Failed to resolve destination connector for connection ${destConnId} in run ${runId}`);
-          }
-        }
-
         const mappingJson = typeof planRow.mapping_json === 'string'
           ? JSON.parse(planRow.mapping_json)
           : planRow.mapping_json || {};
-        const objects: any[] = Array.isArray(mappingJson.objects)
+        objects = Array.isArray(mappingJson.objects)
           ? mappingJson.objects
           : (mappingJson.source ? [mappingJson] : []);
-
-        const matched = objects.find(
-          (o: any) =>
-            (o.destination?.table || o.destination?.object || o.destination) === objectsRes.rows[0]?.destination_object ||
-            (o.source?.collection || o.source?.object || o.source) === objectsRes.rows[0]?.source_object,
-        ) || (objects.length === 1 ? objects[0] : null);
-
-        if (matched?.identity?.destinationKey || matched?.destination?.key || matched?.destination?.identityKey) {
-          destKey = matched.identity?.destinationKey || matched?.destination?.key || matched?.destination?.identityKey;
-        } else if (planRow.execution_config_json?.conflictColumns?.[0]) {
-          destKey = planRow.execution_config_json.conflictColumns[0];
-        }
       }
 
-      const recoveryEngine = new RecoveryEngine({
-        destinationConnector: destConnector,
-        manifestTracker,
-        checkpointManager,
-        idTracker,
-      });
-
+      // Priority 6: Resolve each object's destination connector, mapping, and identity key independently.
+      // Never reuse the first object's identity key across different objects!
       for (const objRow of objectsRes.rows) {
         const srcObj = objRow.source_object || 'customers';
         const dstObj = objRow.destination_object || 'customers';
+
+        let objDestConnector = defaultDestinationConnector;
+        let objDestKey = 'id';
+
+        if (planRow) {
+          const matched = objects.find(
+            (o: any) =>
+              ((o.destination?.table || o.destination?.object || o.destination) === dstObj) &&
+              ((o.source?.collection || o.source?.object || o.source) === srcObj),
+          ) || objects.find(
+            (o: any) =>
+              (o.destination?.table || o.destination?.object || o.destination) === dstObj ||
+              (o.source?.collection || o.source?.object || o.source) === srcObj,
+          ) || (objects.length === 1 ? objects[0] : null);
+
+          if (matched?.identity?.destinationKey || matched?.destination?.key || matched?.destination?.identityKey) {
+            objDestKey = matched.identity?.destinationKey || matched.destination?.key || matched.destination?.identityKey;
+          } else if (planRow.execution_config_json?.conflictColumns?.[0]) {
+            objDestKey = planRow.execution_config_json.conflictColumns[0];
+          }
+
+          const objDestConnId = matched?.destinationConnectionId || matched?.destination?.connectionId || planRow.destination_connection_id;
+          if (objDestConnId) {
+            objDestConnector = await getDestinationConnector({ destinationConnectionId: objDestConnId } as any);
+            if (!objDestConnector) {
+              throw new Error(`[Worker Recovery] Failed to resolve destination connector for connection ${objDestConnId} in run ${runId} for object ${dstObj}`);
+            }
+          }
+        }
+
+        const recoveryEngine = new RecoveryEngine({
+          destinationConnector: objDestConnector,
+          manifestTracker,
+          checkpointManager,
+          idTracker,
+        });
 
         const resumePlan = await recoveryEngine.prepareResume(
           runId,
           srcObj,
           dstObj,
-          destKey,
+          objDestKey,
         );
 
         console.log(
-          `[Worker Recovery] Startup resume prepared for run ${runId} (${srcObj} -> ${dstObj}): ` +
+          `[Worker Recovery] Startup resume prepared for run ${runId} (${srcObj} -> ${dstObj}) with identity key '${objDestKey}': ` +
           `checkpoint seq ${resumePlan.lastCommittedSequenceNo}, ` +
           `reconciled ${resumePlan.reconciledBatches.length} batch(es)`,
         );
       }
     }
   } catch (err: any) {
-    console.warn(`[Worker Recovery] Notice during startup reconciliation: ${err.message}`);
+    console.error(`[Worker Recovery] Fatal error during startup reconciliation: ${err.message}`);
+    throw err;
   }
 }
 

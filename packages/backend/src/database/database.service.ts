@@ -222,19 +222,16 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private static migrationsRan = false;
-
   public async runMigrations() {
     if (!this.isConnected || !this.pool) return;
-    if (DatabaseService.migrationsRan) return;
     const client = await this.pool.connect();
+    const lockKey = `migrationguard_schema_migrations_${this.customSearchPath || 'default'}`;
     try {
       if (this.customSearchPath) {
         await client.query(`SET search_path TO ${this.customSearchPath}`);
       }
-      await client.query('SELECT pg_advisory_lock(hashtext($1))', ['migrationguard_schema_migrations']);
+      await client.query('SELECT pg_advisory_lock(hashtext($1))', [lockKey]);
       try {
-        if (DatabaseService.migrationsRan) return;
         const candidates = [
           path.join(__dirname, 'schema.sql'),
           path.join(__dirname, '..', 'src', 'database', 'schema.sql'),
@@ -245,11 +242,10 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         if (sqlPath) {
           const sql = fs.readFileSync(sqlPath, 'utf8');
           await client.query(sql);
-          DatabaseService.migrationsRan = true;
-          console.log('[DatabaseService] Migrations executed successfully.');
+          console.log(`[DatabaseService] Migrations executed successfully on schema: ${this.customSearchPath || 'public'}.`);
         }
       } finally {
-        await client.query('SELECT pg_advisory_unlock(hashtext($1))', ['migrationguard_schema_migrations']).catch(() => {});
+        await client.query('SELECT pg_advisory_unlock(hashtext($1))', [lockKey]).catch(() => {});
       }
     } catch (err: any) {
       console.error('[DatabaseService] Migration failed:', err.message);

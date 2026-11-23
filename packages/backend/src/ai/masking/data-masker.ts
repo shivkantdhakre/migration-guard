@@ -31,7 +31,7 @@ export class DataMasker {
     /\b\d{3}-\d{2}-\d{4}\b/g;
 
   private static readonly PHONE_REGEX =
-    /(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/g;
+    /(?<![a-zA-Z0-9-])(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/g;
 
   /**
    * Redact sensitive secrets from any text (prompts, errors, logs).
@@ -132,7 +132,11 @@ export class DataMasker {
       }
 
       if (typeof value === 'string') {
-        result[key] = this.sanitizeText(value);
+        if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) {
+          result[key] = value;
+        } else {
+          result[key] = this.sanitizeText(value);
+        }
       } else if (Array.isArray(value)) {
         result[key] = value.slice(0, 3).map((item) =>
           typeof item === 'object' && item !== null

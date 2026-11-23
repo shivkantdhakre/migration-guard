@@ -32,6 +32,7 @@ import { ValidationService } from '../src/validation/validation.service';
 import { ReadinessService } from '../src/plan/readiness.service';
 import { DslValidatorService } from '../src/mapping/dsl-validator.service';
 import { MappingPreviewService } from '../src/mapping/mapping-preview.service';
+import { ToolCatalog } from '../src/ai/tools/tool-catalog';
 import { JwtService } from '@nestjs/jwt';
 import { appConfig } from '../src/config/configuration';
 import { BadRequestException } from '@nestjs/common';
@@ -389,6 +390,91 @@ describe('P0/P1 Regression: Mapping-Aware Validation', () => {
     expect(identity.destinationKey).toBe('order_uuid');
     expect(identity.destinationKey).not.toBe('id'); // Must not default to 'id'
   });
+
+  it('P0.3 - ValidationService correctly applies transforms and field mappings without false mismatches', async () => {
+    const services = buildServices({});
+    await services.db.onModuleInit();
+    services.db.resetMemoryStore();
+    try {
+      const reg = await services.authService.register(uniqueEmail('mapval@test.io'), 'MapUser', 'Password123!');
+      const wsId = reg.workspace.id;
+      const proj = await services.projectService.createProject(wsId, 'MapProj', 'Test', reg.user.id);
+
+      const srcConn = await services.connectionService.createConnection(
+        wsId,
+        { name: 'M', engine: 'MONGODB', connectionRole: 'SOURCE', config: { database: 'db' }, credentials: { uri: 'mongodb://localhost' } },
+        reg.user.id,
+      );
+      const dstConn = await services.connectionService.createConnection(
+        wsId,
+        { name: 'P', engine: 'POSTGRESQL', connectionRole: 'DESTINATION', config: {}, credentials: { connectionString: 'postgresql://localhost/db' } },
+        reg.user.id,
+      );
+
+      const plan = await services.planService.createPlan(proj.id, 'Map Plan', reg.user.id);
+      const mapDsl = {
+        objects: [
+          {
+            source: { collection: 'users' },
+            destination: { table: 'users' },
+            identity: { sourceKey: '_id', destinationKey: 'user_id', strategy: 'PRESERVE_AS_TEXT' },
+            fields: [
+              { sourcePath: 'first_name', destinationPath: 'given_name' },
+              { sourcePath: 'email', destinationPath: 'email', transform: { op: 'UPPERCASE' } },
+            ],
+          },
+        ],
+      };
+      const mapVersion = await services.mappingService.createVersion(plan.id, mapDsl, reg.user.id);
+      const planVersion = await services.planService.createPlanVersion(
+        plan.id,
+        {
+          sourceConnectionId: srcConn.id,
+          destinationConnectionId: dstConn.id,
+          mappingVersionId: mapVersion.id,
+          scope: {},
+          executionConfig: { batchSize: 100, writeMode: 'upsert' },
+        },
+        reg.user.id,
+      );
+      await services.approvalService.submitApproval(
+        planVersion.id,
+        { decision: 'APPROVE', planHash: planVersion.plan_hash, comment: 'ok' },
+        reg.user.id,
+      );
+
+      const runRes = await services.db.query(
+        `INSERT INTO migration_runs (workspace_id, project_id, plan_version_id, status, initiated_by)
+         VALUES ($1, $2, $3, 'COMPLETED', $4) RETURNING *`,
+        [wsId, proj.id, planVersion.id, reg.user.id],
+      );
+      const runId = runRes.rows[0].id;
+
+      await services.db.query(
+        `INSERT INTO record_manifests (migration_run_id, source_object, source_key, destination_object, destination_key, status)
+         VALUES ($1, 'users', 'u_101', 'users', 'u_101', 'WRITTEN')`,
+        [runId],
+      );
+
+      await services.db.query(
+        `INSERT INTO source_users (_id, first_name, email) VALUES ($1, $2, $3)`,
+        ['u_101', 'Alice', 'alice@test.io'],
+      );
+
+      await services.db.query(
+        `INSERT INTO users (user_id, given_name, email) VALUES ($1, $2, $3)`,
+        ['u_101', 'Alice', 'ALICE@TEST.IO'],
+      );
+
+      const valRun = await services.validationService.triggerValidation(runId, reg.user.id);
+      expect(valRun.status).toBe('COMPLETED');
+      expect(valRun.summaryJson.outcome).toBe('PASSED');
+      expect(valRun.summaryJson.failedChecks).toBe(0);
+      expect(valRun.summaryJson.discrepancies).toBe(0);
+    } finally {
+      await services.db.onModuleDestroy();
+    }
+  });
 });
 
 describe('P0/P1 Regression: Outbox Persistence and Dispatch', () => {
@@ -544,6 +630,70 @@ describe('P0/P1 Regression: Outbox Persistence and Dispatch', () => {
     // Run autonomous publisher again - should NOT re-dispatch QUEUED batches
     await services.migrationService.dispatchPendingOutboxBatches(run.runId);
     expect(dispatchedPayloads.length).toBe(firstDispatchCount); // No new dispatches
+  });
+
+  it('P0.4 - retryFailed and resumeRun must use transactional outbox with PENDING -> QUEUED transitions and propagate destinationKey', async () => {
+    const reg = await services.authService.register(uniqueEmail('outboxretry@test.io'), 'RetryUser', 'Password123!');
+    const wsId = reg.workspace.id;
+    const proj = await services.projectService.createProject(wsId, 'RetryProj', 'Test', reg.user.id);
+
+    const srcConn = await services.connectionService.createConnection(
+      wsId,
+      { name: 'M4', engine: 'MONGODB', connectionRole: 'SOURCE', config: { database: 'appdb' }, credentials: { uri: 'mongodb://localhost:27017' } },
+      reg.user.id,
+    );
+    const dstConn = await services.connectionService.createConnection(
+      wsId,
+      { name: 'P4', engine: 'POSTGRESQL', connectionRole: 'DESTINATION', config: {}, credentials: { connectionString: 'postgresql://localhost:5432/db' } },
+      reg.user.id,
+    );
+
+    const plan = await services.planService.createPlan(proj.id, 'Retry Plan', reg.user.id);
+    const mapDsl = {
+      objects: [{
+        source: { collection: 'devices', key: '_id' },
+        destination: { table: 'devices', key: 'device_id' },
+        identity: { sourceKey: '_id', destinationKey: 'device_id' },
+        fields: [{ sourcePath: 'name', destinationPath: 'name' }],
+      }],
+    };
+    const mapVersion = await services.mappingService.createVersion(plan.id, mapDsl, reg.user.id);
+    const planVersion = await services.planService.createPlanVersion(
+      plan.id,
+      { sourceConnectionId: srcConn.id, destinationConnectionId: dstConn.id, mappingVersionId: mapVersion.id, scope: {}, executionConfig: { batchSize: 100, writeMode: 'upsert' } },
+      reg.user.id,
+    );
+    await services.approvalService.submitApproval(planVersion.id, { decision: 'APPROVE', planHash: planVersion.plan_hash, comment: 'ok' }, reg.user.id);
+
+    const run = await services.migrationService.startMigrationRun(planVersion.id, reg.user.id);
+    dispatchedPayloads.length = 0; // Clear initial dispatch
+
+    // Simulate batch failure: transition batch to FAILED_RETRYABLE
+    await services.db.query(
+      `UPDATE migration_batches SET status = 'FAILED_RETRYABLE' WHERE migration_run_id = $1`,
+      [run.runId],
+    );
+
+    // Call retryFailed
+    await services.migrationService.retryFailed(run.runId, reg.user.id);
+
+    // Verify batch was re-dispatched with destinationKey and conflictColumns
+    expect(dispatchedPayloads.length).toBeGreaterThan(0);
+    for (const p of dispatchedPayloads) {
+      expect(p.conflictColumns).toEqual(['device_id']);
+      expect(p.destinationKey).toBe('device_id');
+      expect(p.jobId).toContain('_att');
+    }
+
+    // Verify batch is in QUEUED state in DB
+    const batches = await services.db.query(
+      `SELECT * FROM migration_batches WHERE migration_run_id = $1`,
+      [run.runId],
+    );
+    for (const b of batches.rows) {
+      expect(b.status).toBe('QUEUED');
+      expect(b.attempt_count).toBeGreaterThan(0);
+    }
   });
 });
 
@@ -1051,5 +1201,90 @@ describe('P0/P1 Regression: Outbox Dispatch Failure Handling', () => {
       migrationService.stopAutonomousOutboxPublisher();
       await db.onModuleDestroy();
     }
+  });
+});
+
+describe('P0/P1 Regression: AI Tool Guard and Real Telemetry (Requirement 9)', () => {
+  it('P0.9 - ToolCatalog returns explicit NOT_FOUND/UNAVAILABLE when evidence is missing, and persists valid audit events', async () => {
+    const db = new DatabaseService();
+    await db.onModuleInit();
+    db.resetMemoryStore();
+    ToolCatalog.setDatabaseService(db);
+
+    const context = {
+      workspaceId: '11111111-1111-1111-1111-111111111111',
+      projectId: '22222222-2222-2222-2222-222222222222',
+      actorId: '33333333-3333-3333-3333-333333333333',
+      actorRole: 'ENGINEER' as const,
+    };
+
+    // 1. compare_sample_records: missing records return NOT_FOUND (never canned synthetic data)
+    const compareRes = await ToolCatalog.executeTool({
+      toolName: 'compare_sample_records',
+      input: { sourceRecordId: 'missing_src', destinationRecordId: 'missing_dest' },
+      context,
+    });
+    expect(compareRes.success).toBe(true);
+    expect((compareRes.data as any).status).toBe('NOT_FOUND');
+
+    // 2. compare_sample_records: real record comparison
+    const compareWithRecords = await ToolCatalog.executeTool({
+      toolName: 'compare_sample_records',
+      input: {
+        sourceRecordId: '1',
+        destinationRecordId: '1',
+        sourceRecord: { id: '1', name: 'Alice', role: 'admin' },
+        destinationRecord: { id: '1', name: 'Alice', role: 'user' },
+      },
+      context,
+    });
+    expect(compareWithRecords.success).toBe(true);
+    expect((compareWithRecords.data as any).matchedFields).toEqual(expect.arrayContaining(['id', 'name']));
+    expect((compareWithRecords.data as any).divergentFields.length).toBe(1);
+    expect((compareWithRecords.data as any).divergentFields[0].field).toBe('role');
+
+    // 3. validate_plan_draft: missing draft returns UNAVAILABLE (never canned synthetic findings)
+    const draftRes = await ToolCatalog.executeTool({
+      toolName: 'validate_plan_draft',
+      input: {},
+      context,
+    });
+    expect(draftRes.success).toBe(true);
+    expect((draftRes.data as any).status).toBe('UNAVAILABLE');
+
+    // 4. create_draft_proposal: creates valid UUID proposal and persists audit event
+    const propRes = await ToolCatalog.executeTool({
+      toolName: 'create_draft_proposal',
+      input: {
+        proposalType: 'PLAN',
+        content: { title: 'Proposal 1' },
+        rationale: 'Optimization',
+      },
+      context,
+    });
+    expect(propRes.success).toBe(true);
+    const propData = propRes.data as any;
+    expect(propData.status).toBe('DRAFT_CREATED');
+    expect(propData.proposalId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+
+    // 5. request_human_approval: creates valid UUID approval request and persists audit event
+    const apprRes = await ToolCatalog.executeTool({
+      toolName: 'request_human_approval',
+      input: {
+        proposalId: propData.proposalId,
+        summary: 'Approval required for migration plan',
+      },
+      context,
+    });
+    expect(apprRes.success).toBe(true);
+    const apprData = apprRes.data as any;
+    expect(apprData.status).toBe('PENDING_HUMAN_APPROVAL');
+    expect(apprData.approvalRequestId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+
+    // Verify audit events table has entries
+    const auditEvents = await db.query('SELECT * FROM audit_events');
+    expect(auditEvents.rows.length).toBeGreaterThanOrEqual(2);
+
+    await db.onModuleDestroy();
   });
 });

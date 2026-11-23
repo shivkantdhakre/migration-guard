@@ -11,12 +11,18 @@ import { CredentialsService } from '../connection/credentials.service';
 import { TransformationEngine, ObjectMapping } from '@migrationguard/core';
 import { v4 as uuidv4 } from 'uuid';
 
-/** Only allow safe SQL identifiers */
+/** Only allow safe SQL identifiers (supports dot-separated identifiers e.g. schema.table) */
 function assertSafeIdentifier(name: string, context: string): void {
-  if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name)) {
-    throw new BadRequestException(
-      `Unsafe SQL identifier rejected in ${context}: "${name}". Only [a-zA-Z_][a-zA-Z0-9_]* allowed.`,
-    );
+  if (!name) {
+    throw new BadRequestException(`Unsafe SQL identifier rejected in ${context}: empty string.`);
+  }
+  const parts = name.split('.');
+  for (const part of parts) {
+    if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(part)) {
+      throw new BadRequestException(
+        `Unsafe SQL identifier rejected in ${context}: "${name}". Only [a-zA-Z_][a-zA-Z0-9_]* allowed.`,
+      );
+    }
   }
 }
 
@@ -246,9 +252,17 @@ export class DryRunService {
 
       // Validate transformed output against destination schema snapshot
       if (destJson) {
-        const destTable = destJson.tables?.find((t: any) => t.name === destObj);
-        if (destTable && Array.isArray(destTable.columns)) {
-          for (const col of destTable.columns) {
+        const destEntities = destJson.tables || destJson.collections || destJson.objects || [];
+        const destTable = destEntities.find((t: any) => t.name === destObj);
+        if (destTable) {
+          const rawCols = destTable.columns || destTable.fields || [];
+          const cols = rawCols.map((c: any) => ({
+            name: c.name || c.path,
+            nullable: c.nullable !== false && c.is_nullable !== 'NO',
+            isPrimaryKey: !!(c.isPrimaryKey || c.name === 'id' || c.path === 'id'),
+          }));
+
+          for (const col of cols) {
             if (!col.nullable && !col.isPrimaryKey) {
               const missingInTransformed = transformedRecords.some(
                 (tr) => tr[col.name] === undefined || tr[col.name] === null,
@@ -263,12 +277,16 @@ export class DryRunService {
 
           // Validate destination identity key
           const destKey = mapping.identity?.destinationKey || (mapping.destination as any)?.key || 'id';
-          const keyExists = destTable.columns.some((c: any) => c.name === destKey);
+          const keyExists = cols.some((c: any) => c.name === destKey);
           if (!keyExists) {
             objConflicts.push(
               `Configured destination identity key '${destKey}' does not exist in destination table '${destObj}'.`,
             );
           }
+        } else if (process.env.NODE_ENV === 'production') {
+          objConflicts.push(
+            `Destination table '${destObj}' was not found in destination schema snapshot.`,
+          );
         }
       }
 

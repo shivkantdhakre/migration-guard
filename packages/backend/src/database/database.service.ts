@@ -891,13 +891,21 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
             const pIdx = parseInt(colParam[2], 10) - 1;
             row[col] = params[pIdx];
           } else {
-            const colLiteral = /([a-zA-Z0-9_]+)\s*=\s*'([^']+)'/i.exec(pair);
-            if (colLiteral) {
-              row[colLiteral[1].toLowerCase()] = colLiteral[2];
+            const colInc = /([a-zA-Z0-9_]+)\s*=\s*([a-zA-Z0-9_]+)\s*\+\s*(\d+)/i.exec(pair);
+            if (colInc) {
+              const col = colInc[1].toLowerCase();
+              const baseCol = colInc[2].toLowerCase();
+              const incVal = parseInt(colInc[3], 10);
+              row[col] = (Number(row[baseCol]) || 0) + incVal;
             } else {
-              const colNow = /([a-zA-Z0-9_]+)\s*=\s*NOW\(\)/i.exec(pair);
-              if (colNow) {
-                row[colNow[1].toLowerCase()] = new Date().toISOString();
+              const colLiteral = /([a-zA-Z0-9_]+)\s*=\s*'([^']+)'/i.exec(pair);
+              if (colLiteral) {
+                row[colLiteral[1].toLowerCase()] = colLiteral[2];
+              } else {
+                const colNow = /([a-zA-Z0-9_]+)\s*=\s*NOW\(\)/i.exec(pair);
+                if (colNow) {
+                  row[colNow[1].toLowerCase()] = new Date().toISOString();
+                }
               }
             }
           }

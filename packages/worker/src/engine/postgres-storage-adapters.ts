@@ -27,10 +27,16 @@ export class PostgresStorageAdapters
    * when identifiers must be used in dynamic SQL or as JSONB key paths.
    */
   private static validateIdentifier(value: string, fieldName: string): void {
-    if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(value)) {
-      throw new Error(
-        `Invalid SQL identifier for '${fieldName}': '${value}'. Identifiers must match /^[a-zA-Z_][a-zA-Z0-9_]*$/.`,
-      );
+    if (!value) {
+      throw new Error(`Invalid SQL identifier for '${fieldName}': empty string.`);
+    }
+    const parts = value.split('.');
+    for (const part of parts) {
+      if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(part)) {
+        throw new Error(
+          `Invalid SQL identifier for '${fieldName}': '${value}'. Identifiers must match /^[a-zA-Z_][a-zA-Z0-9_]*$/.`,
+        );
+      }
     }
   }
 

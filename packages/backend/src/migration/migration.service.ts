@@ -14,6 +14,7 @@ import { QueueService, MigrationJobPayload } from '../queue/queue.service';
 @Injectable()
 export class MigrationService implements OnModuleInit, OnModuleDestroy {
   private outboxTimer: NodeJS.Timeout | null = null;
+  private isPublishing = false;
 
   constructor(
     private db: DatabaseService,
@@ -100,29 +101,8 @@ export class MigrationService implements OnModuleInit, OnModuleDestroy {
 
     // Seed initial batches for worker processing
     const batchSize = version.execution_config_json?.batchSize || 1000;
-    const scope = version.scope_json || {};
-    const rawTables = scope.tables || scope.collections || [];
-    const tables: Array<{ source: string; destination: string }> =
-      Array.isArray(rawTables) && rawTables.length > 0
-        ? rawTables.map((t: any) =>
-            typeof t === 'string'
-              ? { source: t, destination: t }
-              : { source: t.source || t.name, destination: t.destination || t.source || t.name },
-          )
-        : [
-            {
-              source: scope.sourceObject || 'customers',
-              destination: scope.destinationObject || 'customers',
-            },
-          ];
-    const rawMode = String(version.execution_config_json?.writeMode || 'upsert').toLowerCase();
-    const writeMode: 'insert_only' | 'upsert' | 'skip_existing' =
-      rawMode === 'insert_only' || rawMode === 'skip_existing' ? (rawMode as any) : 'upsert';
 
-    const payloads: MigrationJobPayload[] = [];
-    let overallSeq = 0;
-
-    // Resolve mapping version for identity keys (Requirement 4 & 5)
+    // Resolve mapping version for identity keys and objects (Requirement 4 & 5)
     let mappingObjects: any[] = [];
     if (version.mapping_version_id) {
       const mapRes = await this.db.query(
@@ -136,6 +116,33 @@ export class MigrationService implements OnModuleInit, OnModuleDestroy {
         mappingObjects = Array.isArray(m?.objects) ? m.objects : (m ? [m] : []);
       }
     }
+
+    const scope = version.scope_json || {};
+    const rawTables = scope.tables || scope.collections || [];
+    const tables: Array<{ source: string; destination: string }> =
+      Array.isArray(rawTables) && rawTables.length > 0
+        ? rawTables.map((t: any) =>
+            typeof t === 'string'
+              ? { source: t, destination: t }
+              : { source: t.source || t.name, destination: t.destination || t.source || t.name },
+          )
+        : mappingObjects.length > 0
+        ? mappingObjects.map((m: any) => ({
+            source: m.source?.collection || m.source?.object || (typeof m.source === 'string' ? m.source : 'customers'),
+            destination: m.destination?.table || m.destination?.object || (typeof m.destination === 'string' ? m.destination : 'customers'),
+          }))
+        : [
+            {
+              source: scope.sourceObject || 'customers',
+              destination: scope.destinationObject || 'customers',
+            },
+          ];
+    const rawMode = String(version.execution_config_json?.writeMode || 'upsert').toLowerCase();
+    const writeMode: 'insert_only' | 'upsert' | 'skip_existing' =
+      rawMode === 'insert_only' || rawMode === 'skip_existing' ? (rawMode as any) : 'upsert';
+
+    const payloads: MigrationJobPayload[] = [];
+    let overallSeq = 0;
 
     // Support dynamic streaming: if batchesPerTable is not explicitly configured,
     // seed initial streaming batch (seq 1, cursorStart = null) per collection/table.
@@ -199,6 +206,7 @@ export class MigrationService implements OnModuleInit, OnModuleDestroy {
           mappingVersionId: version.mapping_version_id || 'default-mapping',
           writeMode,
           conflictColumns: [destKey],
+          destinationKey: destKey,
           sourceConnectionId: version.source_connection_id,
           destinationConnectionId: version.destination_connection_id,
         });
@@ -235,16 +243,19 @@ export class MigrationService implements OnModuleInit, OnModuleDestroy {
    * Serves both synchronous post-creation dispatch and the autonomous background publisher.
    */
   async dispatchPendingOutboxBatches(runId?: string): Promise<number> {
-    let query = `SELECT * FROM migration_batches WHERE status = 'PENDING'`;
-    const params: any[] = [];
-    if (runId) {
-      query += ` AND migration_run_id = $1`;
-      params.push(runId);
-    }
-    query += ` ORDER BY sequence_no ASC LIMIT 100`;
+    if (this.isPublishing) return 0;
+    this.isPublishing = true;
+    try {
+      let query = `SELECT * FROM migration_batches WHERE status = 'PENDING'`;
+      const params: any[] = [];
+      if (runId) {
+        query += ` AND migration_run_id = $1`;
+        params.push(runId);
+      }
+      query += ` ORDER BY sequence_no ASC LIMIT 100`;
 
-    const res = await this.db.query(query, params);
-    if (res.rows.length === 0 || !this.queueService) return 0;
+      const res = await this.db.query(query, params);
+      if (res.rows.length === 0 || !this.queueService) return 0;
 
     const payloads: MigrationJobPayload[] = [];
     const planCache = new Map<string, any>();
@@ -294,7 +305,7 @@ export class MigrationService implements OnModuleInit, OnModuleDestroy {
           (o: any) =>
             (o.source?.collection || o.source?.object || o.source) === b.source_object ||
             (o.destination?.table || o.destination?.object || o.destination) === b.destination_object,
-        );
+        ) || (objects.length === 1 ? objects[0] : null);
         if (matched?.identity?.destinationKey || matched?.destination?.key) {
           destKey = matched.identity?.destinationKey || matched?.destination?.key;
         }
@@ -314,6 +325,7 @@ export class MigrationService implements OnModuleInit, OnModuleDestroy {
         mappingVersionId: b.mapping_version_id || version?.mapping_version_id || 'default-mapping',
         writeMode,
         conflictColumns: [destKey],
+        destinationKey: destKey,
         sourceConnectionId: version?.source_connection_id,
         destinationConnectionId: version?.destination_connection_id,
       });
@@ -328,6 +340,9 @@ export class MigrationService implements OnModuleInit, OnModuleDestroy {
       );
     }
     return payloads.length;
+    } finally {
+      this.isPublishing = false;
+    }
   }
 
   async listRuns(workspaceId: string, userId: string) {
@@ -430,49 +445,14 @@ export class MigrationService implements OnModuleInit, OnModuleDestroy {
       runId,
     ]);
 
-    // Dispatch any pending outbox batches that were not yet queued
-    await this.dispatchPendingOutboxBatches(runId);
-
-    // Re-dispatch any paused or retry batches
-    const pausedBatches = await this.db.query(
-      `SELECT * FROM migration_batches WHERE migration_run_id = $1 AND status IN ('PAUSED', 'RETRY_WAIT') ORDER BY sequence_no ASC`,
+    // Transition any paused or retry batches to PENDING in the outbox
+    await this.db.query(
+      `UPDATE migration_batches SET status = 'PENDING' WHERE migration_run_id = $1 AND status IN ('PAUSED', 'RETRY_WAIT')`,
       [runId],
     );
 
-    if (this.queueService && pausedBatches.rows.length > 0) {
-      const planRes = await this.db.query(
-        `SELECT mpv.* FROM migration_plan_versions mpv
-         JOIN migration_runs mr ON mr.plan_version_id = mpv.id
-         WHERE mr.id = $1`,
-        [runId],
-      );
-      const version = planRes.rows[0];
-      const batchSize = version?.execution_config_json?.batchSize || 1000;
-      const writeMode = version?.execution_config_json?.writeMode || 'upsert';
-
-      const resumePayloads: MigrationJobPayload[] = pausedBatches.rows.map((b: any) => ({
-        jobId: `${runId}_${b.batch_key}_resumed_${Date.now()}_att${b.attempt_count + 1}`,
-        migrationRunId: runId,
-        batchKey: b.batch_key,
-        sequenceNo: Number(b.sequence_no),
-        sourceObject: b.source_object,
-        destinationObject: b.destination_object,
-        cursorStart: b.source_cursor_start || null,
-        cursorEnd: b.source_cursor_end || null,
-        batchSize,
-        planVersionId: version?.id || '',
-        mappingVersionId: b.mapping_version_id || version?.mapping_version_id || 'default-mapping',
-        writeMode,
-        sourceConnectionId: version?.source_connection_id,
-        destinationConnectionId: version?.destination_connection_id,
-      }));
-
-      await this.queueService.dispatchBatches(resumePayloads);
-      await this.db.query(
-        `UPDATE migration_batches SET status = 'QUEUED', attempt_count = attempt_count + 1 WHERE migration_run_id = $1 AND status IN ('PAUSED', 'RETRY_WAIT')`,
-        [runId],
-      );
-    }
+    // Dispatch pending outbox batches that were not yet queued (transitions PENDING -> QUEUED only after dispatch)
+    await this.dispatchPendingOutboxBatches(runId);
 
     await this.db.query(
       `INSERT INTO audit_events (workspace_id, project_id, actor_type, actor_id, action, resource_type, resource_id)
@@ -514,46 +494,17 @@ export class MigrationService implements OnModuleInit, OnModuleDestroy {
     const run = await this.getRun(runId, userId);
     await this.workspaceService.assertWorkspaceAccess(run.workspace_id, userId, 'Engineer');
 
-    // Reset failed batches to QUEUED
+    // Reset failed batches to PENDING in transactional outbox with incremented attempt_count
     const res = await this.db.query(
       `UPDATE migration_batches
-       SET status = 'QUEUED', attempt_count = attempt_count + 1
+       SET status = 'PENDING', attempt_count = attempt_count + 1
        WHERE migration_run_id = $1 AND status IN ('FAILED_RETRYABLE', 'RETRY_WAIT')
        RETURNING *`,
       [runId],
     );
 
-    // Re-dispatch reset batches to BullMQ
-    if (this.queueService && res.rows.length > 0) {
-      const planRes = await this.db.query(
-        `SELECT mpv.* FROM migration_plan_versions mpv
-         JOIN migration_runs mr ON mr.plan_version_id = mpv.id
-         WHERE mr.id = $1`,
-        [runId],
-      );
-      const version = planRes.rows[0];
-      const batchSize = version?.execution_config_json?.batchSize || 1000;
-      const writeMode = version?.execution_config_json?.writeMode || 'upsert';
-
-      const retryPayloads: MigrationJobPayload[] = res.rows.map((b: any) => ({
-        jobId: `${runId}_${b.batch_key}_retry_${b.attempt_count}`,
-        migrationRunId: runId,
-        batchKey: b.batch_key,
-        sequenceNo: Number(b.sequence_no),
-        sourceObject: b.source_object,
-        destinationObject: b.destination_object,
-        cursorStart: b.source_cursor_start || null,
-        cursorEnd: b.source_cursor_end || null,
-        batchSize,
-        planVersionId: version?.id || '',
-        mappingVersionId: b.mapping_version_id || version?.mapping_version_id || 'default-mapping',
-        writeMode,
-        sourceConnectionId: version?.source_connection_id,
-        destinationConnectionId: version?.destination_connection_id,
-      }));
-
-      await this.queueService.dispatchBatches(retryPayloads);
-    }
+    // Dispatch pending outbox batches (transitions PENDING -> QUEUED only after successful dispatch)
+    await this.dispatchPendingOutboxBatches(runId);
 
     return {
       runId,

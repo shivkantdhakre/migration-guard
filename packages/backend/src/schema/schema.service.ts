@@ -164,7 +164,19 @@ export class SchemaService {
               });
             }
             if (collections.length > 0) {
-              snapshotJson = { database: dbName, collections };
+              const tables = collections.map((c) => ({
+                name: c.name,
+                schema: c.schema,
+                rowCount: c.documentCount,
+                columns: c.fields.map((f: any) => ({
+                  name: f.path,
+                  type: f.type,
+                  nullable: f.nullable,
+                  isPrimaryKey: f.path === 'id' || f.isPrimaryKey,
+                })),
+                sampleRows: c.sampleDocuments,
+              }));
+              snapshotJson = { database: dbName, tables, collections };
             }
           } finally {
             await client.end().catch(() => {});

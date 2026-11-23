@@ -13,14 +13,22 @@ import {
   ValidationDataset,
   generateSyntheticDataset,
   injectFaults,
+  TransformationEngine,
+  ObjectMapping,
 } from '@migrationguard/core';
 
-/** Only allow safe SQL identifiers: letters, digits, underscores, starting with letter/underscore */
+/** Only allow safe SQL identifiers (supports dot-separated identifiers e.g. schema.table) */
 function assertSafeIdentifier(name: string, context: string): void {
-  if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name)) {
-    throw new BadRequestException(
-      `Unsafe SQL identifier rejected in ${context}: "${name}". Only [a-zA-Z_][a-zA-Z0-9_]* allowed.`,
-    );
+  if (!name) {
+    throw new BadRequestException(`Unsafe SQL identifier rejected in ${context}: empty string.`);
+  }
+  const parts = name.split('.');
+  for (const part of parts) {
+    if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(part)) {
+      throw new BadRequestException(
+        `Unsafe SQL identifier rejected in ${context}: "${name}". Only [a-zA-Z_][a-zA-Z0-9_]* allowed.`,
+      );
+    }
   }
 }
 
@@ -345,6 +353,10 @@ export class ValidationService {
             await client.close().catch(() => {});
           } catch (cErr: any) {
             console.warn(`[ValidationService] Source count query failed: ${cErr.message}`);
+            if (process.env.NODE_ENV === 'production') {
+              await this.recordFailedValidation(run.workspace_id, runId, `Source count query failed for ${sourceObjectName}: ${cErr.message}`);
+              throw new Error(`Source count query failed for ${sourceObjectName}: ${cErr.message}. Validation failed closed.`);
+            }
           }
         }
       }
@@ -364,6 +376,10 @@ export class ValidationService {
             }
           } catch (cErr: any) {
             console.warn(`[ValidationService] Destination count query failed: ${cErr.message}`);
+            if (process.env.NODE_ENV === 'production') {
+              await this.recordFailedValidation(run.workspace_id, runId, `Destination count query failed for ${destObjectName}: ${cErr.message}`);
+              throw new Error(`Destination count query failed for ${destObjectName}: ${cErr.message}. Validation failed closed.`);
+            }
           }
         }
       }
@@ -451,44 +467,111 @@ export class ValidationService {
         destinationDataset = faultResult.faultedDataset;
         sourceDataset = benchmark;
       } else {
+        const mappingObj: ObjectMapping = {
+          source: {
+            collection: sourceObjectName,
+          },
+          destination: {
+            table: destObjectName,
+          },
+          identity: {
+            sourceKey: sourceKeyField,
+            destinationKey: destKeyField,
+            strategy: obj.identity?.strategy || 'PRESERVE_AS_TEXT',
+          },
+          fields: Array.isArray(obj.fields)
+            ? obj.fields.map((f: any) => ({
+                sourcePath: f.sourcePath || f.source || f.field || f.fieldPath,
+                destinationPath: f.destinationPath || f.destination || f.field || f.fieldPath,
+                transform: f.transform,
+                nullable: f.nullable,
+                defaultValue: f.defaultValue,
+              }))
+            : [],
+        };
+
+        const transformEngine = new TransformationEngine(mappingObj);
+
         sourceDataset = {
           objectName: sourceObjectName,
-          records: sourceRecords.map((r: any) => ({
-            id: String(r[sourceKeyField] || r.id || r._id),
-            name: r.name,
-            email: r.email,
-            createdAt: parseDateSafe(r.created_at || r.createdAt),
-            updatedAt: parseDateSafe(r.updated_at || r.updatedAt),
-            ...r,
-          })),
+          records: sourceRecords.map((r: any) => {
+            const transformed = transformEngine.transform(r);
+            const destKeyVal = String(transformed.destinationKey || r[sourceKeyField] || r.id || r._id);
+            return {
+              ...r,
+              ...transformed.payload,
+              id: destKeyVal,
+            };
+          }),
           orders: [],
           attachments: [],
         };
 
         destinationDataset = {
           objectName: destObjectName,
-          records: destRecords.map((r: any) => ({
-            id: String(r[destKeyField] || r.id),
-            name: r.name,
-            email: r.email,
-            createdAt: parseDateSafe(r.created_at || r.createdAt),
-            updatedAt: parseDateSafe(r.updated_at || r.updatedAt),
-            ...r,
-          })),
+          records: destRecords.map((r: any) => {
+            const destKeyVal = String(r[destKeyField] || r.id || r.destination_key);
+            return {
+              ...(r.created_at || r.createdAt ? { createdAt: parseDateSafe(r.created_at || r.createdAt) } : {}),
+              ...(r.updated_at || r.updatedAt ? { updatedAt: parseDateSafe(r.updated_at || r.updatedAt) } : {}),
+              ...r,
+              id: destKeyVal,
+            };
+          }),
           orders: [],
           attachments: [],
         };
       }
 
       // Configure field rules from approved object mapping (Requirement 3: preserve sourcePath and destinationPath)
-      const fieldRules = Array.isArray(obj.fields)
+      const mappingObjForEngine: ObjectMapping = {
+        source: { collection: sourceObjectName },
+        destination: { table: destObjectName },
+        identity: {
+          sourceKey: sourceKeyField,
+          destinationKey: destKeyField,
+          strategy: obj.identity?.strategy || 'PRESERVE_AS_TEXT',
+        },
+        fields: Array.isArray(obj.fields)
+          ? obj.fields.map((f: any) => ({
+              sourcePath: f.sourcePath || f.source || f.field || f.fieldPath,
+              destinationPath: f.destinationPath || f.destination || f.field || f.fieldPath,
+              transform: f.transform,
+              nullable: f.nullable,
+              defaultValue: f.defaultValue,
+            }))
+          : [],
+      };
+      const transformEngineForEngine = new TransformationEngine(mappingObjForEngine);
+
+      const fieldRules = Array.isArray(obj.fields) && obj.fields.length > 0
         ? obj.fields.map((f: any) => {
             const sPath = f.sourcePath || f.source || f.field || f.fieldPath;
             const dPath = f.destinationPath || f.destination || f.field || f.fieldPath;
             return {
               fieldPath: dPath || sPath,
-              sourcePath: sPath,
-              destinationPath: dPath,
+              sourcePath: dPath || sPath,
+              destinationPath: dPath || sPath,
+              nullable: f.nullable,
+              customComparator: (srcVal: any, destVal: any) => {
+                if (srcVal === destVal) return true;
+                if (srcVal === null || srcVal === undefined) {
+                  return destVal === null || destVal === undefined;
+                }
+                if (destVal === null || destVal === undefined) return false;
+                if (typeof srcVal === 'number' && typeof destVal === 'number') {
+                  return Math.abs(srcVal - destVal) < 1e-9;
+                }
+                if (srcVal instanceof Date || (typeof srcVal === 'string' && !isNaN(Date.parse(srcVal)))) {
+                  const d1 = new Date(srcVal).getTime();
+                  const d2 = new Date(destVal).getTime();
+                  if (!isNaN(d1) && !isNaN(d2)) return d1 === d2;
+                }
+                if (typeof srcVal === 'object' && typeof destVal === 'object') {
+                  return JSON.stringify(srcVal) === JSON.stringify(destVal);
+                }
+                return String(srcVal) === String(destVal);
+              },
             };
           })
         : [
@@ -496,10 +579,63 @@ export class ValidationService {
             { fieldPath: 'email', sourcePath: 'email', destinationPath: 'email' },
           ];
 
+      const normalizer = (srcRec: any) => {
+        try {
+          const transformed = transformEngineForEngine.transform(srcRec);
+          const destKey = String(transformed.destinationKey || srcRec.id || srcRec._id);
+          const norm: Record<string, any> = {
+            id: destKey,
+          };
+          if (destKeyField && destKeyField !== 'id') {
+            norm[destKeyField] = destKey;
+          }
+          if (Array.isArray(obj.fields) && obj.fields.length > 0) {
+            for (const f of obj.fields) {
+              const dPath = f.destinationPath || f.destination || f.field || f.fieldPath;
+              if (dPath) {
+                norm[dPath] = transformed.payload?.[dPath];
+              }
+            }
+          } else {
+            Object.assign(norm, transformed.payload);
+          }
+          return norm;
+        } catch {
+          return srcRec;
+        }
+      };
+
+      const destNormalizer = (destRec: any) => {
+        try {
+          const destKey = String(destRec[destKeyField] || destRec.id || destRec.destination_key);
+          const norm: Record<string, any> = {
+            id: destKey,
+          };
+          if (destKeyField && destKeyField !== 'id') {
+            norm[destKeyField] = destKey;
+          }
+          if (Array.isArray(obj.fields) && obj.fields.length > 0) {
+            for (const f of obj.fields) {
+              const dPath = f.destinationPath || f.destination || f.field || f.fieldPath;
+              if (dPath) {
+                norm[dPath] = destRec[dPath];
+              }
+            }
+          } else {
+            Object.assign(norm, destRec);
+          }
+          return norm;
+        } catch {
+          return destRec;
+        }
+      };
+
       const engine = new ValidationEngine({
         migrationRunId: runId,
         workspaceId: run.workspace_id,
         fieldRules,
+        normalizer,
+        destNormalizer,
       });
 
       const summary = await engine.validate(sourceDataset, destinationDataset);
@@ -549,6 +685,8 @@ export class ValidationService {
 
     const valRun = {
       ...valRes.rows[0],
+      summaryJson,
+      summary_json: summaryJson,
       executionStatus,
       outcome,
     };

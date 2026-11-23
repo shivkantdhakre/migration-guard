@@ -13,10 +13,16 @@ import {
 } from '../types.js';
 
 export function quoteIdent(name: string): string {
-  if (!name || !/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name)) {
-    throw new Error(`[Security] Invalid SQL identifier: '${name}'. Must be alphanumeric and underscore only.`);
+  if (!name) {
+    throw new Error(`[Security] Invalid SQL identifier: empty string.`);
   }
-  return `"${name.replace(/"/g, '""')}"`;
+  const parts = name.split('.');
+  for (const part of parts) {
+    if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(part)) {
+      throw new Error(`[Security] Invalid SQL identifier: '${name}'. Must be alphanumeric and underscore only.`);
+    }
+  }
+  return parts.map((p) => `"${p.replace(/"/g, '""')}"`).join('.');
 }
 
 export function normalizeIpHost(host: string): string {

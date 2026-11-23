@@ -93,6 +93,7 @@ export class ReadinessService {
 
       if (srcSnap.rows.length > 0 && dstSnap.rows.length > 0) {
         const dstJson = dstSnap.rows[0].snapshot_json || {};
+        const dstEntities = dstJson.tables || dstJson.collections || dstJson.objects || [];
 
         if (version.mapping_version_id) {
           const mRes = await this.db.query('SELECT mapping_json FROM mapping_versions WHERE id = $1', [
@@ -107,10 +108,17 @@ export class ReadinessService {
               const sName = obj.source?.collection || obj.source?.object || (typeof obj.source === 'string' ? obj.source : 'customers');
               const dName = obj.destination?.table || obj.destination?.object || (typeof obj.destination === 'string' ? obj.destination : 'customers');
 
-              const dTable = dstJson.tables?.find((t: any) => t.name === dName);
-              if (dTable && Array.isArray(dTable.columns)) {
+              const dTable = dstEntities.find((t: any) => t.name === dName);
+              if (dTable) {
+                const rawCols = dTable.columns || dTable.fields || [];
+                const cols = rawCols.map((c: any) => ({
+                  name: c.name || c.path,
+                  nullable: c.nullable !== false && c.is_nullable !== 'NO',
+                  isPrimaryKey: !!(c.isPrimaryKey || c.name === 'id' || c.path === 'id'),
+                }));
+
                 // Verify required fields (non-nullable unmapped columns)
-                for (const col of dTable.columns) {
+                for (const col of cols) {
                   if (!col.nullable && !col.isPrimaryKey) {
                     const isMapped = Array.isArray(obj.fields)
                       ? obj.fields.some((f: any) => (f.destinationPath || f.destination) === col.name)
@@ -123,7 +131,7 @@ export class ReadinessService {
 
                 // Verify identity constraints (Requirement 8)
                 const destKey = obj.identity?.destinationKey || obj.destination?.key || 'id';
-                const keyCol = dTable.columns.find((c: any) => c.name === destKey);
+                const keyCol = cols.find((c: any) => c.name === destKey);
                 if (!keyCol) {
                   blockers.push(`Identity key '${destKey}' for '${dName}' does not exist in destination table schema.`);
                 }

@@ -42,7 +42,8 @@ export class HashValidator {
   public validate(
     sourceRecords: any[],
     destinationRecords: any[],
-    normalizer?: (sourceRecord: any) => any
+    normalizer?: (sourceRecord: any) => any,
+    destNormalizer?: (destRecord: any) => any
   ): ValidationCheckResult {
     const start = Date.now();
     const discrepancies: Discrepancy[] = [];
@@ -70,8 +71,9 @@ export class HashValidator {
       }
 
       const normalizedSrc = normalizer ? normalizer(src) : src;
+      const normalizedDest = destNormalizer ? destNormalizer(dest) : dest;
       const srcHash = computeCanonicalHash(normalizedSrc, this.canonicalOptions);
-      const destHash = computeCanonicalHash(dest, this.canonicalOptions);
+      const destHash = computeCanonicalHash(normalizedDest, this.canonicalOptions);
 
       if (srcHash !== destHash) {
         failedCount++;

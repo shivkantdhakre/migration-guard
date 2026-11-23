@@ -19,6 +19,7 @@ export interface MigrationJobPayload {
   writeMode: 'insert_only' | 'upsert' | 'skip_existing';
   conflictColumns?: string[];
   updateColumns?: string[];
+  destinationKey?: string;
   sourceConnectionId?: string;
   destinationConnectionId?: string;
 }

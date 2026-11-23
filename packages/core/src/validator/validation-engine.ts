@@ -29,6 +29,8 @@ export interface ValidationEngineConfig {
   maxDiscrepancies?: number;
   fieldRules?: FieldComparisonRule[];
   metadataAttributes?: string[];
+  normalizer?: (sourceRecord: any) => any;
+  destNormalizer?: (destRecord: any) => any;
   enableChecks?: {
     count?: boolean;
     missing?: boolean;
@@ -221,7 +223,12 @@ export class ValidationEngine {
           ],
         },
       });
-      const res = hashVal.validate(sourceRecords, destRecords);
+      const res = hashVal.validate(
+        sourceRecords,
+        destRecords,
+        this.config.normalizer,
+        this.config.destNormalizer,
+      );
       checkResults.push(res);
       allDiscrepancies.push(...res.discrepancies);
     }

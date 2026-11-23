@@ -1,4 +1,5 @@
 import { ToolExecutionRequest, ToolExecutionResponse, ToolExecutionGuard } from './tool-guard.js';
+import { v4 as uuidv4 } from 'uuid';
 
 export class ToolCatalog {
   private static mockSnapshots: Map<string, any> = new Map();
@@ -299,50 +300,164 @@ export class ToolCatalog {
         }
 
         case 'compare_sample_records': {
+          let srcRec = input.sourceRecord as Record<string, any> | undefined;
+          let dstRec = input.destinationRecord as Record<string, any> | undefined;
+
+          if (!srcRec && !dstRec && input.sourceRecordId && input.destinationRecordId && this.db) {
+            const mRes = await this.db.query(
+              `SELECT * FROM record_manifests WHERE source_key = $1 AND destination_key = $2 LIMIT 1`,
+              [input.sourceRecordId, input.destinationRecordId],
+            );
+            if (mRes.rows.length === 0) {
+              rawResult = {
+                status: 'NOT_FOUND',
+                sourceRecordId: input.sourceRecordId,
+                destinationRecordId: input.destinationRecordId,
+                message: `Sample records ${input.sourceRecordId} and ${input.destinationRecordId} not found in workspace evidence.`,
+              };
+              break;
+            }
+          }
+
+          if (!srcRec && !dstRec) {
+            rawResult = {
+              status: 'NOT_FOUND',
+              sourceRecordId: input.sourceRecordId,
+              destinationRecordId: input.destinationRecordId,
+              message: `Sample records not provided or found for comparison.`,
+            };
+            break;
+          }
+
+          const matchedFields: string[] = [];
+          const divergentFields: Array<{
+            field: string;
+            sourceValue: any;
+            destinationValue: any;
+            differenceReason: string;
+          }> = [];
+
+          const s = srcRec || {};
+          const d = dstRec || {};
+          const allKeys = new Set([...Object.keys(s), ...Object.keys(d)]);
+
+          for (const k of allKeys) {
+            const sVal = s[k];
+            const dVal = d[k];
+            if (sVal === dVal || JSON.stringify(sVal) === JSON.stringify(dVal)) {
+              matchedFields.push(k);
+            } else {
+              divergentFields.push({
+                field: k,
+                sourceValue: sVal ?? null,
+                destinationValue: dVal ?? null,
+                differenceReason: sVal === undefined ? 'Missing in source' : dVal === undefined ? 'Unmapped in destination' : 'Value mismatch',
+              });
+            }
+          }
+
           rawResult = {
             sourceRecordId: input.sourceRecordId,
             destinationRecordId: input.destinationRecordId,
-            matchedFields: ['name', 'created_at'],
-            divergentFields: [
-              {
-                field: 'email',
-                sourceValue: 'user@example.com',
-                destinationValue: null,
-                differenceReason: 'Unmapped or failed cast',
-              },
-            ],
+            matchedFields,
+            divergentFields,
           };
           break;
         }
 
         case 'validate_plan_draft': {
+          const draft = (input.planDraft || input.mapping || input.plan) as Record<string, any> | undefined;
+          if (!draft) {
+            rawResult = {
+              status: 'UNAVAILABLE',
+              valid: false,
+              findings: [
+                {
+                  code: 'MISSING_PLAN_DRAFT',
+                  severity: 'ERROR',
+                  message: 'Plan draft payload is required for validation.',
+                },
+              ],
+            };
+            break;
+          }
+
+          const findings: Array<{ code: string; severity: string; message: string }> = [];
+          const objects: any[] = Array.isArray(draft.objects) ? draft.objects : (draft.source ? [draft] : []);
+          if (objects.length === 0) {
+            findings.push({
+              code: 'NO_MAPPED_OBJECTS',
+              severity: 'ERROR',
+              message: 'Plan draft contains no mapped source/destination objects.',
+            });
+          }
+
+          for (const obj of objects) {
+            if (!obj.source?.collection && !obj.source?.object && typeof obj.source !== 'string') {
+              findings.push({
+                code: 'INVALID_SOURCE_OBJECT',
+                severity: 'ERROR',
+                message: 'Mapped object must specify a valid source collection.',
+              });
+            }
+            if (!obj.destination?.table && !obj.destination?.object && typeof obj.destination !== 'string') {
+              findings.push({
+                code: 'INVALID_DESTINATION_OBJECT',
+                severity: 'ERROR',
+                message: 'Mapped object must specify a valid destination table.',
+              });
+            }
+            if (!obj.identity?.sourceKey || !obj.identity?.destinationKey) {
+              findings.push({
+                code: 'MISSING_IDENTITY_KEYS',
+                severity: 'WARNING',
+                message: 'Object mapping should specify explicit source and destination identity keys.',
+              });
+            }
+          }
+
+          if (findings.length === 0) {
+            findings.push({
+              code: 'STRUCTURAL_VALIDATION_PASSED',
+              severity: 'INFO',
+              message: `Plan draft structure valid across ${objects.length} mapped object(s).`,
+            });
+          }
+
+          const hasErrors = findings.some((f) => f.severity === 'ERROR');
           rawResult = {
-            valid: true,
-            findings: [
-              {
-                code: 'COMPATIBILITY_OK',
-                severity: 'INFO',
-                message: 'MongoDB ObjectId mapped to PostgreSQL text column',
-              },
-            ],
+            valid: !hasErrors,
+            findings,
           };
           break;
         }
 
         case 'create_draft_proposal': {
-          const proposalId = `prop-${Date.now()}`;
+          const proposalId = uuidv4();
           if (this.db) {
-            await this.db.query(
-              `INSERT INTO audit_events (workspace_id, actor_id, actor_role, action, resource_type, resource_id, metadata_json)
-               VALUES ($1, $2, $3, 'CREATE_DRAFT_PROPOSAL', 'PROPOSAL', $4, $5)`,
-              [
-                context.workspaceId,
-                context.actorId,
-                context.actorRole,
-                proposalId,
-                JSON.stringify({ input, createdAt: new Date().toISOString() }),
-              ],
-            );
+            let actorId = context.actorId;
+            const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+            if (!isUuid.test(actorId)) {
+              try {
+                const uRes = await this.db.query('SELECT id FROM users WHERE workspace_id = $1 LIMIT 1', [context.workspaceId]);
+                if (uRes.rows.length > 0) actorId = uRes.rows[0].id;
+              } catch {}
+            }
+            try {
+              await this.db.query(
+                `INSERT INTO audit_events (workspace_id, project_id, actor_type, actor_id, action, resource_type, resource_id, details_json)
+                 VALUES ($1, $2, 'USER', $3, 'CREATE_DRAFT_PROPOSAL', 'PROPOSAL', $4, $5)`,
+                [
+                  context.workspaceId,
+                  context.projectId || null,
+                  actorId,
+                  proposalId,
+                  { input, createdAt: new Date().toISOString() },
+                ],
+              );
+            } catch (err: any) {
+              console.warn(`[ToolCatalog] Audit event persistence notice: ${err.message}`);
+            }
           }
           rawResult = {
             proposalId,
@@ -353,19 +468,31 @@ export class ToolCatalog {
         }
 
         case 'request_human_approval': {
-          const approvalRequestId = `appr-${Date.now()}`;
+          const approvalRequestId = uuidv4();
           if (this.db) {
-            await this.db.query(
-              `INSERT INTO audit_events (workspace_id, actor_id, actor_role, action, resource_type, resource_id, metadata_json)
-               VALUES ($1, $2, $3, 'REQUEST_HUMAN_APPROVAL', 'APPROVAL_REQUEST', $4, $5)`,
-              [
-                context.workspaceId,
-                context.actorId,
-                context.actorRole,
-                approvalRequestId,
-                JSON.stringify({ input, createdAt: new Date().toISOString() }),
-              ],
-            );
+            let actorId = context.actorId;
+            const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+            if (!isUuid.test(actorId)) {
+              try {
+                const uRes = await this.db.query('SELECT id FROM users WHERE workspace_id = $1 LIMIT 1', [context.workspaceId]);
+                if (uRes.rows.length > 0) actorId = uRes.rows[0].id;
+              } catch {}
+            }
+            try {
+              await this.db.query(
+                `INSERT INTO audit_events (workspace_id, project_id, actor_type, actor_id, action, resource_type, resource_id, details_json)
+                 VALUES ($1, $2, 'USER', $3, 'REQUEST_HUMAN_APPROVAL', 'APPROVAL_REQUEST', $4, $5)`,
+                [
+                  context.workspaceId,
+                  context.projectId || null,
+                  actorId,
+                  approvalRequestId,
+                  { input, createdAt: new Date().toISOString() },
+                ],
+              );
+            } catch (err: any) {
+              console.warn(`[ToolCatalog] Audit event persistence notice: ${err.message}`);
+            }
           }
           rawResult = {
             approvalRequestId,

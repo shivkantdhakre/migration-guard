@@ -108,6 +108,8 @@ export const ALLOWLISTED_TOOLS: Record<string, ToolDefinition> = {
     inputSchema: z.object({
       sourceRecordId: z.string().min(1),
       destinationRecordId: z.string().min(1),
+      sourceRecord: z.record(z.unknown()).optional(),
+      destinationRecord: z.record(z.unknown()).optional(),
     }),
     maxPayloadBytes: 64 * 1024,
   },
@@ -117,7 +119,7 @@ export const ALLOWLISTED_TOOLS: Record<string, ToolDefinition> = {
     isReadOnly: true,
     allowedRoles: ['OWNER', 'ADMIN', 'ENGINEER'],
     inputSchema: z.object({
-      planDraft: z.record(z.unknown()),
+      planDraft: z.record(z.unknown()).optional(),
     }),
     maxPayloadBytes: 128 * 1024,
   },

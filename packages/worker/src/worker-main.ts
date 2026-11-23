@@ -808,33 +808,35 @@ async function startWorker() {
               contentHash: calculateCanonicalHash(raw),
             };
           },
-          onNextBatchScheduled: async (nextPayload: MigrationJobPayload) => {
-            console.log(`[Worker] Scheduling streaming batch: ${nextPayload.batchKey} (seq: ${nextPayload.sequenceNo})`);
-            if (dbPool) {
-              await dbPool.query(
-                `INSERT INTO migration_batches (
-                   id, migration_run_id, batch_key, sequence_no, status,
-                   source_cursor_start, records_read, records_written, records_skipped, records_failed, attempt_count
-                 ) VALUES (
-                   gen_random_uuid(), $1, $2, $3, 'QUEUED', $4, 0, 0, 0, 0, 0
-                 ) ON CONFLICT (migration_run_id, batch_key) DO UPDATE SET status = 'QUEUED'`,
-                [
-                  nextPayload.migrationRunId,
-                  nextPayload.batchKey,
-                  nextPayload.sequenceNo,
-                  JSON.stringify(nextPayload.cursorStart || {}),
-                ],
-              );
-            }
-            if (executionQueue) {
-              const jobId = `${nextPayload.migrationRunId}_${nextPayload.batchKey}`;
-              await executionQueue.add('execute-batch', nextPayload, {
-                jobId,
-                removeOnComplete: false,
-                removeOnFail: false,
-              });
-            }
-          },
+          onNextBatchScheduled: process.env.ENABLE_WORKER_AUTO_STREAMING === 'true'
+            ? async (nextPayload: MigrationJobPayload) => {
+                console.log(`[Worker] Scheduling streaming batch: ${nextPayload.batchKey} (seq: ${nextPayload.sequenceNo})`);
+                if (dbPool) {
+                  await dbPool.query(
+                    `INSERT INTO migration_batches (
+                       id, migration_run_id, batch_key, sequence_no, status,
+                       source_cursor_start, records_read, records_written, records_skipped, records_failed, attempt_count
+                     ) VALUES (
+                       gen_random_uuid(), $1, $2, $3, 'QUEUED', $4, 0, 0, 0, 0, 0
+                     ) ON CONFLICT (migration_run_id, batch_key) DO UPDATE SET status = 'QUEUED'`,
+                    [
+                      nextPayload.migrationRunId,
+                      nextPayload.batchKey,
+                      nextPayload.sequenceNo,
+                      JSON.stringify(nextPayload.cursorStart || {}),
+                    ],
+                  );
+                }
+                if (executionQueue) {
+                  const jobId = `${nextPayload.migrationRunId}_${nextPayload.batchKey}`;
+                  await executionQueue.add('execute-batch', nextPayload, {
+                    jobId,
+                    removeOnComplete: false,
+                    removeOnFail: false,
+                  });
+                }
+              }
+            : undefined,
           isPausedOrCancelled: async (migrationRunId: string) => {
             if (!dbPool) return 'RUNNING';
             const check = await dbPool.query(

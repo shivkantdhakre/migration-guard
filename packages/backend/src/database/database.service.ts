@@ -703,7 +703,16 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
 
     const tableName = fromMatch[1].toLowerCase();
     const table = this.memoryStore.get(tableName);
-    if (!table) return { rows: [], rowCount: 0 };
+    if (!table) {
+      if (/SELECT\s+COUNT\(\*\)(?:\s+as\s+([a-zA-Z0-9_]+))?/i.test(sql)) {
+        const countMatch = /SELECT\s+COUNT\(\*\)(?:\s+as\s+([a-zA-Z0-9_]+))?/i.exec(sql);
+        const alias = countMatch && countMatch[1] ? countMatch[1].toLowerCase() : 'count';
+        const countRow: Record<string, any> = {};
+        countRow[alias] = '0';
+        return { rows: [countRow as unknown as T], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    }
 
     let results = Array.from(table.values()).map((r) => ({ ...r }));
 

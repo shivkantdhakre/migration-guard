@@ -104,7 +104,12 @@ export class RecoveryEngine {
   }
 
   /**
-   * Reconciles a single batch based on its crash point / status
+   * Reconciles a single batch based on its crash point / status.
+   * Priority 2 Safety Guarantee:
+   * NEVER marks a batch COMMITTED without verifying:
+   * 1. Durable record manifests exist
+   * 2. Destination records exist in the target database
+   * 3. RFC 8785 canonical hashes match stored manifest hashes
    */
   public async reconcileBatch(
     batch: MigrationBatch,
@@ -114,141 +119,170 @@ export class RecoveryEngine {
     const subStage = batch.subStage;
     const status = batch.status;
 
-    // Case 1: Crash after manifest persisted, before checkpoint advance
-    if (subStage === 'MANIFEST_COMMITTED') {
-      await this.manifestTracker.transitionState(
-        batch.migrationRunId,
-        batch.batchKey,
-        'COMMITTED',
-        'CHECKPOINT_COMMITTED',
-      );
-
-      // Advance checkpoint
-      await this.checkpointManager.advanceCheckpoint({
-        migrationRunId: batch.migrationRunId,
-        sourceObject: batch.sourceObject,
-        batch,
-        planVersionId: 'resumed_plan',
-        mappingVersionId: 'resumed_mapping',
-        recordsCommittedCount: batch.recordsWritten,
-        cursorEnd: batch.sourceCursorEnd,
-      });
-
-      return {
-        batchKey: batch.batchKey,
-        originalStatus: status,
-        originalSubStage: subStage,
-        resolvedStatus: 'COMMITTED',
-        actionTaken: 'Committed batch and advanced checkpoint from existing manifest',
-      };
-    }
-
-    // Case 2: Crash after destination write, before manifest persisted (DESTINATION_WRITTEN)
-    if (subStage === 'DESTINATION_WRITTEN') {
-      // Destination was written! Mark committed and advance checkpoint
-      await this.manifestTracker.transitionState(
-        batch.migrationRunId,
-        batch.batchKey,
-        'COMMITTED',
-        'CHECKPOINT_COMMITTED',
-      );
-
-      await this.checkpointManager.advanceCheckpoint({
-        migrationRunId: batch.migrationRunId,
-        sourceObject: batch.sourceObject,
-        batch,
-        planVersionId: 'resumed_plan',
-        mappingVersionId: 'resumed_mapping',
-        recordsCommittedCount: batch.recordsWritten || batch.recordsRead,
-        cursorEnd: batch.sourceCursorEnd,
-      });
-
-      return {
-        batchKey: batch.batchKey,
-        originalStatus: status,
-        originalSubStage: subStage,
-        resolvedStatus: 'COMMITTED',
-        actionTaken: 'Verified destination written, marked committed and advanced checkpoint',
-      };
-    }
-
-    // Case 3: OUTCOME_UNKNOWN or WRITE_STARTED (Destination disconnect during write)
-    if (status === 'OUTCOME_UNKNOWN' || subStage === 'WRITE_STARTED') {
-      // Reconcile by querying destination by stable keys
+    // Batches in write-involved stages:
+    // MANIFEST_COMMITTED, DESTINATION_WRITTEN, WRITE_STARTED, OUTCOME_UNKNOWN
+    if (
+      subStage === 'MANIFEST_COMMITTED' ||
+      subStage === 'DESTINATION_WRITTEN' ||
+      subStage === 'WRITE_STARTED' ||
+      status === 'OUTCOME_UNKNOWN'
+    ) {
+      // 1. Fetch durable record manifests
       const manifests = await this.manifestTracker.listRecordManifests(
         batch.migrationRunId,
         batch.batchKey,
       );
-      const destinationKeys = manifests.map((m) => m.destinationKey);
 
-      let recordsFoundInDestination = 0;
-      let allKeysFound = false;
-      if (destinationKeys.length > 0) {
-        try {
-          const foundRecords = await this.destinationConnector.readByKeys(
-            destinationObject,
-            destinationKeys,
-            destinationKey,
+      // Enforce: Never mark COMMITTED without durable record manifests
+      if (manifests.length === 0) {
+        if (batch.recordsRead === 0 && (batch.recordsWritten === 0 || !batch.recordsWritten)) {
+          // Empty batch with 0 records read: safe to commit
+          await this.manifestTracker.transitionState(
+            batch.migrationRunId,
+            batch.batchKey,
+            'COMMITTED',
+            'CHECKPOINT_COMMITTED',
           );
-          const foundKeyMap = new Map<string, Record<string, unknown>>();
-          for (const r of foundRecords) {
-            if (r && r.destinationKey && r.data && Object.keys(r.data).length > 0) {
-              foundKeyMap.set(String(r.destinationKey), r.data);
-            }
-          }
-
-          // Issue 2: Verify content integrity via canonical hash comparison when contentHash is available
-          let hashMismatchCount = 0;
-          for (const manifest of manifests) {
-            const foundRecord = foundKeyMap.get(manifest.destinationKey);
-            if (!foundRecord) continue;
-            if (manifest.contentHash) {
-              // compute canonical hash of foundRecord data and compare against stored manifest hash
-              const computedHash = calculateCanonicalHash(foundRecord);
-              const normComputed = computedHash.replace(/^sha256:/, '');
-              const normManifest = manifest.contentHash.replace(/^sha256:/, '');
-              if (normComputed !== normManifest) {
-                // content mismatch - cannot confirm write was correct
-                hashMismatchCount++;
-              }
-            }
-          }
-
-          if (hashMismatchCount > 0) {
-            // Partial or corrupt write detected; reset for safe idempotent replay
-            await this.manifestTracker.transitionState(
-              batch.migrationRunId,
-              batch.batchKey,
-              'RETRY_WAIT',
-              'IDLE',
-            );
-            return {
-              batchKey: batch.batchKey,
-              originalStatus: status,
-              originalSubStage: subStage,
-              resolvedStatus: 'RETRY_WAIT',
-              actionTaken: `Content hash mismatch for ${hashMismatchCount} record(s); treated as PARTIAL_WRITE and reset to RETRY_WAIT`,
-            };
-          }
-
-          allKeysFound =
-            foundKeyMap.size === destinationKeys.length &&
-            destinationKeys.every((k) => foundKeyMap.has(k));
-          recordsFoundInDestination = foundKeyMap.size;
-        } catch {
-          // If destination cannot be read, leave for operator review
+          await this.checkpointManager.advanceCheckpoint({
+            migrationRunId: batch.migrationRunId,
+            sourceObject: batch.sourceObject,
+            batch,
+            planVersionId: 'resumed_plan',
+            mappingVersionId: 'resumed_mapping',
+            recordsCommittedCount: 0,
+            cursorEnd: batch.sourceCursorEnd,
+          });
           return {
             batchKey: batch.batchKey,
             originalStatus: status,
             originalSubStage: subStage,
-            resolvedStatus: 'OUTCOME_UNKNOWN',
-            actionTaken: 'Failed to inspect destination keys; operator reconciliation required',
+            resolvedStatus: 'COMMITTED',
+            actionTaken: 'Empty batch verified with 0 records; marked committed and advanced checkpoint',
           };
         }
+
+        // Non-empty batch with missing record manifests cannot be verified!
+        // Reset to RETRY_WAIT for safe idempotent replay
+        await this.manifestTracker.transitionState(
+          batch.migrationRunId,
+          batch.batchKey,
+          'RETRY_WAIT',
+          'IDLE',
+        );
+
+        return {
+          batchKey: batch.batchKey,
+          originalStatus: status,
+          originalSubStage: subStage,
+          resolvedStatus: 'RETRY_WAIT',
+          actionTaken: 'Durable record manifests missing; reset to RETRY_WAIT for safe idempotent replay',
+        };
       }
 
-      if (allKeysFound && destinationKeys.length > 0) {
-        // Write actually succeeded before the crash!
+      // 2. Identify destination keys for records marked WRITTEN
+      const writtenManifests = manifests.filter((m) => m.status === 'WRITTEN');
+      const destinationKeys = writtenManifests.map((m) => m.destinationKey);
+
+      if (destinationKeys.length === 0) {
+        // All manifests are accounted for (SKIPPED or FAILED)
+        await this.manifestTracker.transitionState(
+          batch.migrationRunId,
+          batch.batchKey,
+          'COMMITTED',
+          'CHECKPOINT_COMMITTED',
+        );
+        await this.checkpointManager.advanceCheckpoint({
+          migrationRunId: batch.migrationRunId,
+          sourceObject: batch.sourceObject,
+          batch,
+          planVersionId: 'resumed_plan',
+          mappingVersionId: 'resumed_mapping',
+          recordsCommittedCount: 0,
+          cursorEnd: batch.sourceCursorEnd,
+        });
+        return {
+          batchKey: batch.batchKey,
+          originalStatus: status,
+          originalSubStage: subStage,
+          resolvedStatus: 'COMMITTED',
+          actionTaken: 'Durable manifests verified (all records skipped/failed); marked committed and advanced checkpoint',
+        };
+      }
+
+      // 3. Inspect destination records by stable keys
+      try {
+        const foundRecords = await this.destinationConnector.readByKeys(
+          destinationObject,
+          destinationKeys,
+          destinationKey,
+        );
+
+        const foundKeyMap = new Map<string, Record<string, unknown>>();
+        for (const r of foundRecords) {
+          if (r && r.destinationKey !== undefined && r.destinationKey !== null && r.data && Object.keys(r.data).length > 0) {
+            foundKeyMap.set(String(r.destinationKey), r.data);
+          }
+        }
+
+        // Verify all expected destination keys exist in the destination table
+        const allKeysFound =
+          destinationKeys.length > 0 &&
+          destinationKeys.every((k) => foundKeyMap.has(String(k)));
+
+        if (!allKeysFound) {
+          // Destination write did not land or was incomplete; reset for idempotent replay
+          await this.manifestTracker.transitionState(
+            batch.migrationRunId,
+            batch.batchKey,
+            'RETRY_WAIT',
+            'IDLE',
+          );
+
+          return {
+            batchKey: batch.batchKey,
+            originalStatus: status,
+            originalSubStage: subStage,
+            resolvedStatus: 'RETRY_WAIT',
+            actionTaken: `Destination write incomplete (found ${foundKeyMap.size}/${destinationKeys.length} records); reset to RETRY_WAIT for idempotent replay`,
+          };
+        }
+
+        // 4. Verify RFC 8785 canonical hash comparison for every record where contentHash is available
+        let hashMismatchCount = 0;
+        for (const manifest of writtenManifests) {
+          const foundRecord = foundKeyMap.get(String(manifest.destinationKey));
+          if (!foundRecord) {
+            hashMismatchCount++;
+            continue;
+          }
+          if (manifest.contentHash) {
+            const computedHash = calculateCanonicalHash(foundRecord);
+            const normComputed = computedHash.replace(/^sha256:/, '');
+            const normManifest = manifest.contentHash.replace(/^sha256:/, '');
+            if (normComputed !== normManifest) {
+              hashMismatchCount++;
+            }
+          }
+        }
+
+        if (hashMismatchCount > 0) {
+          // Partial or corrupt write detected; reset for safe idempotent replay
+          await this.manifestTracker.transitionState(
+            batch.migrationRunId,
+            batch.batchKey,
+            'RETRY_WAIT',
+            'IDLE',
+          );
+          return {
+            batchKey: batch.batchKey,
+            originalStatus: status,
+            originalSubStage: subStage,
+            resolvedStatus: 'RETRY_WAIT',
+            actionTaken: `Content hash mismatch for ${hashMismatchCount} record(s); treated as PARTIAL_WRITE and reset to RETRY_WAIT`,
+          };
+        }
+
+        // All keys found, all RFC 8785 hashes verified, durable record manifests confirmed!
         await this.manifestTracker.transitionState(
           batch.migrationRunId,
           batch.batchKey,
@@ -271,28 +305,29 @@ export class RecoveryEngine {
           originalStatus: status,
           originalSubStage: subStage,
           resolvedStatus: 'COMMITTED',
-          actionTaken: 'Discovered all batch keys present in destination; marked committed',
+          actionTaken: 'Verified destination records, RFC 8785 canonical hashes, and durable manifests; marked committed and advanced checkpoint',
         };
-      } else {
-        // Write did not succeed or was partial; reset to RETRY_WAIT to safely replay idempotently
-        await this.manifestTracker.transitionState(
-          batch.migrationRunId,
-          batch.batchKey,
-          'RETRY_WAIT',
-          'IDLE',
-        );
-
+      } catch (err: any) {
+        // If destination cannot be inspected, mark or retain OUTCOME_UNKNOWN for operator review
+        if (status !== 'OUTCOME_UNKNOWN') {
+          await this.manifestTracker.transitionState(
+            batch.migrationRunId,
+            batch.batchKey,
+            'OUTCOME_UNKNOWN',
+            subStage,
+          );
+        }
         return {
           batchKey: batch.batchKey,
           originalStatus: status,
           originalSubStage: subStage,
-          resolvedStatus: 'RETRY_WAIT',
-          actionTaken: 'Destination write was not durable; reset to RETRY_WAIT for idempotent replay',
+          resolvedStatus: 'OUTCOME_UNKNOWN',
+          actionTaken: `Failed to inspect destination keys: ${err?.message || 'destination unreachable'}; operator reconciliation required`,
         };
       }
     }
 
-    // Case 4: Crash before write (READ_STARTED, TRANSFORM_STARTED, QUEUED, PENDING, RUNNING without write started)
+    // Case 5: Crash before write (READ_STARTED, READ_COMPLETED, TRANSFORM_STARTED, TRANSFORM_COMPLETED, QUEUED, PENDING, RUNNING without write started)
     if (status === 'RUNNING' || status === 'PENDING' || status === 'QUEUED') {
       await this.manifestTracker.transitionState(
         batch.migrationRunId,

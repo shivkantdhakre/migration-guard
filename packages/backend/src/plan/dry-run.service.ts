@@ -83,7 +83,22 @@ export class DryRunService {
         version.destination_schema_snapshot_id,
       ]);
       if (destSnapRes.rows.length > 0) {
-        destJson = destSnapRes.rows[0].snapshot_json || {};
+        const dSnap = destSnapRes.rows[0];
+        // Validate destination schema snapshot is not stale
+        if (version.destination_connection_id) {
+          const newerRes = await this.db.query(
+            `SELECT id, schema_version FROM schema_snapshots
+             WHERE connection_id = $1 AND (schema_version > $2 OR created_at > $3)
+             LIMIT 1`,
+            [version.destination_connection_id, dSnap.schema_version, dSnap.created_at],
+          );
+          if (newerRes.rows.length > 0 && (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false')) {
+            throw new BadRequestException(
+              `Cannot perform dry run: destination schema snapshot ${version.destination_schema_snapshot_id} is stale. An updated destination schema snapshot is required in production.`,
+            );
+          }
+        }
+        destJson = dSnap.snapshot_json || {};
       }
     } else if (version.destination_connection_id) {
       const destSnapRes = await this.db.query(
@@ -119,16 +134,27 @@ export class DryRunService {
 
     // Iterate through EVERY mapped object (Requirement 6: Multi-object dry run)
     for (const mapping of mappings) {
-      const sourceObj = (mapping as any)?.source?.object || (mapping as any)?.source?.collection || (typeof (mapping as any)?.source === 'string' ? (mapping as any).source : 'customers');
-      const destObj = (mapping as any)?.destination?.object || (mapping as any)?.destination?.table || (typeof (mapping as any)?.destination === 'string' ? (mapping as any).destination : 'customers');
+      const rawSourceObj = (mapping as any)?.source?.object || (mapping as any)?.source?.collection || (typeof (mapping as any)?.source === 'string' ? (mapping as any).source : null);
+      const rawDestObj = (mapping as any)?.destination?.object || (mapping as any)?.destination?.table || (typeof (mapping as any)?.destination === 'string' ? (mapping as any).destination : null);
+
+      if (!rawSourceObj || !rawDestObj) {
+        if (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false') {
+          throw new BadRequestException('Cannot perform dry run: mapping object missing explicit source or destination specification. Implicit default customers fallback is forbidden in production.');
+        }
+      }
+      const sourceObj = rawSourceObj || 'customers';
+      const destObj = rawDestObj || 'customers';
 
       assertSafeIdentifier(sourceObj, 'dryRun source');
       assertSafeIdentifier(destObj, 'dryRun destination');
 
       let sampleRecords: any[] = [];
+      let liveSamplingAttempted = false;
+      let liveSamplingError: Error | null = null;
 
       // 1. Live source connection sampling using decrypted credentials (P1: Real Source Sampling)
       if (version.source_connection_id && this.credentialsService) {
+        liveSamplingAttempted = true;
         try {
           const srcConnRes = await this.db.query('SELECT * FROM connections WHERE id = $1', [version.source_connection_id]);
           if (srcConnRes.rows.length > 0) {
@@ -167,34 +193,82 @@ export class DryRunService {
                 } finally {
                   await pool.end().catch(() => {});
                 }
+              } else {
+                try {
+                  const sRes = await this.db.query(`SELECT * FROM "${sourceObj}" LIMIT 500`);
+                  if (sRes.rows.length > 0) {
+                    sampleRecords = sRes.rows;
+                  }
+                } catch {}
               }
             }
           }
         } catch (err: any) {
+          liveSamplingError = err;
           console.warn(`[DryRunService] Live source sampling notice for '${sourceObj}': ${err.message}`);
+          if (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false') {
+            throw new BadRequestException(
+              `Live source sampling failed for '${sourceObj}': ${err.message}. Dry run failed closed in production.`,
+            );
+          }
         }
       }
 
       // 2. Check schema snapshot samples if live sampling returned empty
+      // In production, NEVER substitute stale snapshot samples or fallback when live sampling failed
       if (sampleRecords.length === 0 && version.source_schema_snapshot_id) {
+        if (liveSamplingAttempted && liveSamplingError && (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false')) {
+          throw new BadRequestException(
+            `Cannot perform dry run: live source sampling failed for '${sourceObj}'. Refusing to substitute snapshot samples in production.`,
+          );
+        }
+
         const snapRes = await this.db.query('SELECT * FROM schema_snapshots WHERE id = $1', [
           version.source_schema_snapshot_id,
         ]);
         if (snapRes.rows.length > 0) {
-          const sJson = snapRes.rows[0].snapshot_json || {};
-          if (Array.isArray(sJson.samples?.[sourceObj])) {
-            sampleRecords = sJson.samples[sourceObj].slice(0, 500);
-          } else if (Array.isArray(sJson.collections)) {
-            const coll = sJson.collections.find((c: any) => c.name === sourceObj);
-            if (coll && Array.isArray(coll.sampleDocuments)) {
-              sampleRecords = coll.sampleDocuments.slice(0, 500);
+          const sSnap = snapRes.rows[0];
+
+          // Check if snapshot is stale
+          let isStale = false;
+          if (version.source_connection_id) {
+            const newerRes = await this.db.query(
+              `SELECT id, schema_version FROM schema_snapshots
+               WHERE connection_id = $1 AND (schema_version > $2 OR created_at > $3)
+               LIMIT 1`,
+              [version.source_connection_id, sSnap.schema_version, sSnap.created_at],
+            );
+            if (newerRes.rows.length > 0) {
+              isStale = true;
+            }
+            const srcConnCheck = await this.db.query('SELECT credential_version FROM connections WHERE id = $1', [version.source_connection_id]);
+            if (srcConnCheck.rows.length > 0 && sSnap.connection_version < (srcConnCheck.rows[0].credential_version || 1)) {
+              isStale = true;
+            }
+          }
+
+          if (isStale) {
+            if (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false') {
+              throw new BadRequestException(
+                `Cannot perform dry run: source schema snapshot ${version.source_schema_snapshot_id} is stale. Refusing to substitute stale snapshot samples in production.`,
+              );
+            }
+          } else {
+            const sJson = sSnap.snapshot_json || {};
+            if (Array.isArray(sJson.samples?.[sourceObj])) {
+              sampleRecords = sJson.samples[sourceObj].slice(0, 500);
+            } else if (Array.isArray(sJson.collections)) {
+              const coll = sJson.collections.find((c: any) => c.name === sourceObj);
+              if (coll && Array.isArray(coll.sampleDocuments)) {
+                sampleRecords = coll.sampleDocuments.slice(0, 500);
+              }
             }
           }
         }
       }
 
       // 3. Query source table from local database in non-production only
-      if (sampleRecords.length === 0 && process.env.NODE_ENV !== 'production') {
+      if (sampleRecords.length === 0 && process.env.NODE_ENV !== 'production' && process.env.ALLOW_SYNTHETIC_SOURCE !== 'false') {
         try {
           const sRes = await this.db.query(`SELECT * FROM "source_${sourceObj}" LIMIT 500`);
           if (sRes.rows.length > 0) {
@@ -258,12 +332,31 @@ export class DryRunService {
           const rawCols = destTable.columns || destTable.fields || [];
           const cols = rawCols.map((c: any) => ({
             name: c.name || c.path,
+            type: (c.type || c.dataType || c.data_type || c.udt_name || '').toLowerCase(),
             nullable: c.nullable !== false && c.is_nullable !== 'NO',
-            isPrimaryKey: !!(c.isPrimaryKey || c.name === 'id' || c.path === 'id'),
+            isPrimaryKey: !!(c.isPrimaryKey || c.name === 'id' || c.path === 'id' || c.is_primary_key),
+            isUnique: !!(c.isUnique || c.unique || c.is_unique),
+            maxLength: c.maxLength || c.character_maximum_length,
           }));
 
+          // 1. Identity Key Validation
+          const rawDestKey = mapping.identity?.destinationKey || (mapping.destination as any)?.key;
+          const destKey = rawDestKey || 'id';
+          if (!rawDestKey && (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false')) {
+            objConflicts.push(
+              `Mapping for '${destObj}' lacks explicit identity.destinationKey configuration. Implicit default 'id' is prohibited in production.`,
+            );
+          }
+          const keyExists = cols.some((c: any) => c.name === destKey);
+          if (!keyExists) {
+            objConflicts.push(
+              `Configured destination identity key '${destKey}' does not exist in destination table '${destObj}'.`,
+            );
+          }
+
+          // 2. Nullability Validation (including non-nullable columns and primary keys)
           for (const col of cols) {
-            if (!col.nullable && !col.isPrimaryKey) {
+            if (!col.nullable || col.isPrimaryKey) {
               const missingInTransformed = transformedRecords.some(
                 (tr) => tr[col.name] === undefined || tr[col.name] === null,
               );
@@ -275,15 +368,117 @@ export class DryRunService {
             }
           }
 
-          // Validate destination identity key
-          const destKey = mapping.identity?.destinationKey || (mapping.destination as any)?.key || 'id';
-          const keyExists = cols.some((c: any) => c.name === destKey);
-          if (!keyExists) {
+          // 3. Data Types Validation
+          for (const col of cols) {
+            if (!col.type) continue;
+            for (const tr of transformedRecords) {
+              const val = tr[col.name];
+              if (val === undefined || val === null) continue;
+
+              if (/int|integer|smallint|bigint/.test(col.type)) {
+                const num = Number(val);
+                if (!Number.isInteger(num)) {
+                  objConflicts.push(
+                    `Destination table '${destObj}' column '${col.name}' type mismatch: expected integer, received '${val}'`,
+                  );
+                  break;
+                }
+              } else if (/numeric|decimal|float|real|double/.test(col.type)) {
+                const num = Number(val);
+                if (isNaN(num)) {
+                  objConflicts.push(
+                    `Destination table '${destObj}' column '${col.name}' type mismatch: expected numeric, received '${val}'`,
+                  );
+                  break;
+                }
+              } else if (/bool|boolean/.test(col.type)) {
+                if (typeof val !== 'boolean' && val !== 0 && val !== 1 && val !== 'true' && val !== 'false') {
+                  objConflicts.push(
+                    `Destination table '${destObj}' column '${col.name}' type mismatch: expected boolean, received '${val}'`,
+                  );
+                  break;
+                }
+              } else if (/uuid/.test(col.type)) {
+                if (typeof val !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val)) {
+                  objConflicts.push(
+                    `Destination table '${destObj}' column '${col.name}' type mismatch: expected valid UUID, received '${val}'`,
+                  );
+                  break;
+                }
+              } else if (/date|timestamp|timestamptz/.test(col.type)) {
+                const parsed = new Date(val);
+                if (isNaN(parsed.getTime())) {
+                  objConflicts.push(
+                    `Destination table '${destObj}' column '${col.name}' type mismatch: expected valid timestamp/date, received '${val}'`,
+                  );
+                  break;
+                }
+              }
+              if (col.maxLength && typeof val === 'string' && val.length > col.maxLength) {
+                objConflicts.push(
+                  `Destination table '${destObj}' column '${col.name}' length exceeded: maximum ${col.maxLength}, received ${val.length}`,
+                );
+                break;
+              }
+            }
+          }
+
+          // 4. Unique Constraints Validation
+          const seenIdentityKeys = new Set<string>();
+          let hasDuplicateIdentity = false;
+          for (const tr of transformedRecords) {
+            const keyVal = tr[destKey];
+            if (keyVal !== undefined && keyVal !== null) {
+              const sKey = String(keyVal);
+              if (seenIdentityKeys.has(sKey)) {
+                hasDuplicateIdentity = true;
+                break;
+              }
+              seenIdentityKeys.add(sKey);
+            }
+          }
+          if (hasDuplicateIdentity) {
             objConflicts.push(
-              `Configured destination identity key '${destKey}' does not exist in destination table '${destObj}'.`,
+              `Destination table '${destObj}' unique constraint violation: duplicate identity key '${destKey}' found in sample records.`,
             );
           }
-        } else if (process.env.NODE_ENV === 'production') {
+
+          // Unique column groups from schema
+          const uniqueColGroups: string[][] = [];
+          for (const c of cols) {
+            if (c.isUnique) uniqueColGroups.push([c.name]);
+          }
+          if (Array.isArray(destTable.uniqueConstraints)) {
+            for (const uc of destTable.uniqueConstraints) {
+              const uCols = Array.isArray(uc) ? uc : (uc.columns || [uc.name || uc]);
+              uniqueColGroups.push(uCols);
+            }
+          }
+          if (Array.isArray(destTable.indexes)) {
+            for (const idx of destTable.indexes) {
+              if (idx.isUnique || idx.unique) {
+                const idxCols = Array.isArray(idx.columns) ? idx.columns : [idx.column || idx.name];
+                uniqueColGroups.push(idxCols);
+              }
+            }
+          }
+          for (const uCols of uniqueColGroups) {
+            const seenVals = new Set<string>();
+            for (const tr of transformedRecords) {
+              const hasAll = uCols.every(cn => tr[cn] !== undefined && tr[cn] !== null);
+              if (hasAll) {
+                const composite = uCols.map(cn => String(tr[cn])).join('::');
+                if (seenVals.has(composite)) {
+                  objConflicts.push(
+                    `Destination table '${destObj}' unique constraint violation on columns [${uCols.join(', ')}] in sample records.`,
+                  );
+                  break;
+                }
+                seenVals.add(composite);
+              }
+            }
+          }
+        } else {
           objConflicts.push(
             `Destination table '${destObj}' was not found in destination schema snapshot.`,
           );
@@ -308,7 +503,7 @@ export class DryRunService {
     const measuredDurationMs = Math.max(1, Date.now() - startTime);
     const measuredRatePerSec = Math.round((totalRecordsTransformed / (measuredDurationMs || 1)) * 1000);
     // Treat transformation errors and destination schema conflicts as strict approval blockers
-    const readyForApproval = totalTransformationErrors === 0 && allPotentialTypeConflicts.length === 0;
+    const readyForApproval = totalTransformationErrors === 0 && allPotentialTypeConflicts.length === 0 && totalRecordsTransformed > 0;
 
     const dryRunResult = {
       id: dryRunId,

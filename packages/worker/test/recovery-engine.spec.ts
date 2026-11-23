@@ -5,8 +5,11 @@ import { RecoveryEngine } from '../src/engine/recovery-engine.js';
 import { MockDestinationConnector } from './helpers/mock-connectors.js';
 
 describe('Recovery Engine & Crash Reconciliation Matrix', () => {
-  it('reconciles crash after target commit, before manifest (DESTINATION_WRITTEN)', async () => {
+  it('reconciles crash after target commit when destination records and manifests are verified (DESTINATION_WRITTEN)', async () => {
     const destinationConnector = new MockDestinationConnector();
+    // Simulate that the records landed in destination database
+    destinationConnector.store.set('ord_25', { id: 'ord_25', amount: 100 });
+
     const manifestTracker = new BatchManifestTracker();
     const checkpointManager = new CheckpointManager();
 
@@ -29,10 +32,23 @@ describe('Recovery Engine & Crash Reconciliation Matrix', () => {
     await manifestTracker.transitionState('run_crash_1', 'batch_dw', 'RUNNING');
     await manifestTracker.updateSubStage('run_crash_1', 'batch_dw', 'DESTINATION_WRITTEN');
     await manifestTracker.updateCounters('run_crash_1', 'batch_dw', {
-      recordsRead: 25,
-      recordsWritten: 25,
+      recordsRead: 1,
+      recordsWritten: 1,
       sourceCursorEnd: { lastId: 'ord_25' },
     });
+
+    // Record manifests for written records
+    await manifestTracker.recordManifests([
+      {
+        migrationRunId: 'run_crash_1',
+        batchKey: 'batch_dw',
+        sourceObject: 'orders',
+        sourceKey: 'src_ord_25',
+        destinationObject: 'orders',
+        destinationKey: 'ord_25',
+        status: 'WRITTEN',
+      },
+    ]);
 
     // Reconcile
     const plan = await engine.prepareResume('run_crash_1', 'orders', 'orders');
@@ -45,8 +61,48 @@ describe('Recovery Engine & Crash Reconciliation Matrix', () => {
     expect(updatedBatch?.status).toBe('COMMITTED');
   });
 
-  it('reconciles crash after manifest persisted, before checkpoint (MANIFEST_COMMITTED)', async () => {
+  it('resets DESTINATION_WRITTEN to RETRY_WAIT when durable manifests are missing', async () => {
     const destinationConnector = new MockDestinationConnector();
+    const manifestTracker = new BatchManifestTracker();
+    const checkpointManager = new CheckpointManager();
+
+    const engine = new RecoveryEngine({
+      destinationConnector,
+      manifestTracker,
+      checkpointManager,
+    });
+
+    await manifestTracker.createBatch({
+      migrationRunId: 'run_crash_dw_nomanifest',
+      batchKey: 'batch_dw_nm',
+      sequenceNo: 1,
+      sourceObject: 'orders',
+      destinationObject: 'orders',
+      sourceCursorStart: null,
+    });
+
+    await manifestTracker.transitionState('run_crash_dw_nomanifest', 'batch_dw_nm', 'RUNNING');
+    await manifestTracker.updateSubStage('run_crash_dw_nomanifest', 'batch_dw_nm', 'DESTINATION_WRITTEN');
+    await manifestTracker.updateCounters('run_crash_dw_nomanifest', 'batch_dw_nm', {
+      recordsRead: 25,
+      recordsWritten: 25,
+      sourceCursorEnd: { lastId: 'ord_25' },
+    });
+
+    // No manifests recorded!
+    const plan = await engine.prepareResume('run_crash_dw_nomanifest', 'orders', 'orders');
+
+    expect(plan.reconciledBatches[0].resolvedStatus).toBe('RETRY_WAIT');
+    expect(plan.lastCommittedSequenceNo).toBe(0);
+
+    const updatedBatch = await manifestTracker.getBatch('run_crash_dw_nomanifest', 'batch_dw_nm');
+    expect(updatedBatch?.status).toBe('RETRY_WAIT');
+  });
+
+  it('reconciles crash after manifest persisted with verified destination records (MANIFEST_COMMITTED)', async () => {
+    const destinationConnector = new MockDestinationConnector();
+    destinationConnector.store.set('cust_15', { id: 'cust_15', name: 'Customer 15' });
+
     const manifestTracker = new BatchManifestTracker();
     const checkpointManager = new CheckpointManager();
 
@@ -68,10 +124,22 @@ describe('Recovery Engine & Crash Reconciliation Matrix', () => {
     await manifestTracker.transitionState('run_crash_2', 'batch_mc', 'RUNNING');
     await manifestTracker.updateSubStage('run_crash_2', 'batch_mc', 'MANIFEST_COMMITTED');
     await manifestTracker.updateCounters('run_crash_2', 'batch_mc', {
-      recordsRead: 15,
-      recordsWritten: 15,
+      recordsRead: 1,
+      recordsWritten: 1,
       sourceCursorEnd: { lastId: 'cust_15' },
     });
+
+    await manifestTracker.recordManifests([
+      {
+        migrationRunId: 'run_crash_2',
+        batchKey: 'batch_mc',
+        sourceObject: 'customers',
+        sourceKey: 'src_cust_15',
+        destinationObject: 'customers',
+        destinationKey: 'cust_15',
+        status: 'WRITTEN',
+      },
+    ]);
 
     const plan = await engine.prepareResume('run_crash_2', 'customers', 'customers');
 
@@ -81,6 +149,108 @@ describe('Recovery Engine & Crash Reconciliation Matrix', () => {
 
     const checkpoint = await checkpointManager.getCheckpoint('run_crash_2', 'customers');
     expect(checkpoint?.lastCommittedSequenceNo).toBe(1);
+  });
+
+  it('resets MANIFEST_COMMITTED to RETRY_WAIT when destination records are missing', async () => {
+    const destinationConnector = new MockDestinationConnector();
+    // Destination store is empty: records did not land
+    const manifestTracker = new BatchManifestTracker();
+    const checkpointManager = new CheckpointManager();
+
+    const engine = new RecoveryEngine({
+      destinationConnector,
+      manifestTracker,
+      checkpointManager,
+    });
+
+    await manifestTracker.createBatch({
+      migrationRunId: 'run_crash_mc_missing',
+      batchKey: 'batch_mc_miss',
+      sequenceNo: 1,
+      sourceObject: 'customers',
+      destinationObject: 'customers',
+      sourceCursorStart: null,
+    });
+
+    await manifestTracker.transitionState('run_crash_mc_missing', 'batch_mc_miss', 'RUNNING');
+    await manifestTracker.updateSubStage('run_crash_mc_missing', 'batch_mc_miss', 'MANIFEST_COMMITTED');
+    await manifestTracker.updateCounters('run_crash_mc_missing', 'batch_mc_miss', {
+      recordsRead: 1,
+      recordsWritten: 1,
+      sourceCursorEnd: { lastId: 'cust_15' },
+    });
+
+    await manifestTracker.recordManifests([
+      {
+        migrationRunId: 'run_crash_mc_missing',
+        batchKey: 'batch_mc_miss',
+        sourceObject: 'customers',
+        sourceKey: 'src_cust_15',
+        destinationObject: 'customers',
+        destinationKey: 'cust_15',
+        status: 'WRITTEN',
+      },
+    ]);
+
+    const plan = await engine.prepareResume('run_crash_mc_missing', 'customers', 'customers');
+
+    expect(plan.reconciledBatches[0].resolvedStatus).toBe('RETRY_WAIT');
+    expect(plan.lastCommittedSequenceNo).toBe(0);
+
+    const updated = await manifestTracker.getBatch('run_crash_mc_missing', 'batch_mc_miss');
+    expect(updated?.status).toBe('RETRY_WAIT');
+  });
+
+  it('resets MANIFEST_COMMITTED to RETRY_WAIT when RFC 8785 canonical hash mismatches', async () => {
+    const destinationConnector = new MockDestinationConnector();
+    destinationConnector.store.set('cust_15', { id: 'cust_15', name: 'Corrupted Name' });
+
+    const manifestTracker = new BatchManifestTracker();
+    const checkpointManager = new CheckpointManager();
+
+    const engine = new RecoveryEngine({
+      destinationConnector,
+      manifestTracker,
+      checkpointManager,
+    });
+
+    await manifestTracker.createBatch({
+      migrationRunId: 'run_crash_mc_hash_mismatch',
+      batchKey: 'batch_mc_hm',
+      sequenceNo: 1,
+      sourceObject: 'customers',
+      destinationObject: 'customers',
+      sourceCursorStart: null,
+    });
+
+    await manifestTracker.transitionState('run_crash_mc_hash_mismatch', 'batch_mc_hm', 'RUNNING');
+    await manifestTracker.updateSubStage('run_crash_mc_hash_mismatch', 'batch_mc_hm', 'MANIFEST_COMMITTED');
+    await manifestTracker.updateCounters('run_crash_mc_hash_mismatch', 'batch_mc_hm', {
+      recordsRead: 1,
+      recordsWritten: 1,
+      sourceCursorEnd: { lastId: 'cust_15' },
+    });
+
+    await manifestTracker.recordManifests([
+      {
+        migrationRunId: 'run_crash_mc_hash_mismatch',
+        batchKey: 'batch_mc_hm',
+        sourceObject: 'customers',
+        sourceKey: 'src_cust_15',
+        destinationObject: 'customers',
+        destinationKey: 'cust_15',
+        contentHash: 'sha256:0000000000000000000000000000000000000000000000000000000000000000',
+        status: 'WRITTEN',
+      },
+    ]);
+
+    const plan = await engine.prepareResume('run_crash_mc_hash_mismatch', 'customers', 'customers');
+
+    expect(plan.reconciledBatches[0].resolvedStatus).toBe('RETRY_WAIT');
+    expect(plan.lastCommittedSequenceNo).toBe(0);
+
+    const updated = await manifestTracker.getBatch('run_crash_mc_hash_mismatch', 'batch_mc_hm');
+    expect(updated?.status).toBe('RETRY_WAIT');
   });
 
   it('reconciles OUTCOME_UNKNOWN when destination write actually succeeded before disconnect', async () => {
@@ -327,5 +497,89 @@ describe('Recovery Engine & Crash Reconciliation Matrix', () => {
     const failPlan = await engine.prepareResume('run_hash_corrupt', 'users', 'users');
     expect(failPlan.reconciledBatches[0].resolvedStatus).toBe('RETRY_WAIT');
     expect(failPlan.reconciledBatches[0].actionTaken).toContain('Content hash mismatch');
+  });
+
+  it('reconciles crash during WRITE_STARTED: resets to RETRY_WAIT if records did not land', async () => {
+    const destinationConnector = new MockDestinationConnector();
+    const manifestTracker = new BatchManifestTracker();
+    const checkpointManager = new CheckpointManager();
+
+    const engine = new RecoveryEngine({
+      destinationConnector,
+      manifestTracker,
+      checkpointManager,
+    });
+
+    await manifestTracker.createBatch({
+      migrationRunId: 'run_crash_write_started',
+      batchKey: 'batch_ws_1',
+      sequenceNo: 1,
+      sourceObject: 'orders',
+      destinationObject: 'orders',
+      sourceCursorStart: null,
+    });
+    await manifestTracker.transitionState('run_crash_write_started', 'batch_ws_1', 'RUNNING');
+    await manifestTracker.updateSubStage('run_crash_write_started', 'batch_ws_1', 'WRITE_STARTED');
+    await manifestTracker.recordManifests([
+      {
+        migrationRunId: 'run_crash_write_started',
+        batchKey: 'batch_ws_1',
+        sourceObject: 'orders',
+        sourceKey: 'src_ws_1',
+        destinationObject: 'orders',
+        destinationKey: 'dest_ws_1',
+        status: 'WRITTEN',
+      },
+    ]);
+
+    // Destination store is empty: process crashed right as write started before persistence
+    const plan = await engine.prepareResume('run_crash_write_started', 'orders', 'orders');
+    expect(plan.reconciledBatches[0].resolvedStatus).toBe('RETRY_WAIT');
+    expect(plan.lastCommittedSequenceNo).toBe(0);
+
+    const updated = await manifestTracker.getBatch('run_crash_write_started', 'batch_ws_1');
+    expect(updated?.status).toBe('RETRY_WAIT');
+  });
+
+  it('reconciles crash during WRITE_STARTED: commits if destination write completed before crash', async () => {
+    const destinationConnector = new MockDestinationConnector();
+    destinationConnector.store.set('dest_ws_2', { id: 'dest_ws_2', amount: 500 });
+    const manifestTracker = new BatchManifestTracker();
+    const checkpointManager = new CheckpointManager();
+
+    const engine = new RecoveryEngine({
+      destinationConnector,
+      manifestTracker,
+      checkpointManager,
+    });
+
+    await manifestTracker.createBatch({
+      migrationRunId: 'run_crash_write_started_ok',
+      batchKey: 'batch_ws_2',
+      sequenceNo: 1,
+      sourceObject: 'orders',
+      destinationObject: 'orders',
+      sourceCursorStart: null,
+    });
+    await manifestTracker.transitionState('run_crash_write_started_ok', 'batch_ws_2', 'RUNNING');
+    await manifestTracker.updateSubStage('run_crash_write_started_ok', 'batch_ws_2', 'WRITE_STARTED');
+    await manifestTracker.recordManifests([
+      {
+        migrationRunId: 'run_crash_write_started_ok',
+        batchKey: 'batch_ws_2',
+        sourceObject: 'orders',
+        sourceKey: 'src_ws_2',
+        destinationObject: 'orders',
+        destinationKey: 'dest_ws_2',
+        status: 'WRITTEN',
+      },
+    ]);
+
+    const plan = await engine.prepareResume('run_crash_write_started_ok', 'orders', 'orders');
+    expect(plan.reconciledBatches[0].resolvedStatus).toBe('COMMITTED');
+    expect(plan.lastCommittedSequenceNo).toBe(1);
+
+    const updated = await manifestTracker.getBatch('run_crash_write_started_ok', 'batch_ws_2');
+    expect(updated?.status).toBe('COMMITTED');
   });
 });

@@ -513,15 +513,112 @@ async function getDestinationConnector(payload: MigrationJobPayload): Promise<De
   return connector;
 }
 
+/**
+ * Priority 2: Reconcile in-flight/ambiguous runs and batches on worker startup/restart.
+ * Inspects PostgreSQL for batches or runs interrupted mid-flight (e.g. process crash, OOM, reboot).
+ * Calls RecoveryEngine.prepareResume() to verify destination records and advance checkpoints.
+ */
+async function reconcileStrandedRunsOnStartup(): Promise<void> {
+  if (!dbPool) return;
+  try {
+    const candidateRuns = await dbPool.query(
+      `SELECT DISTINCT mr.id, mr.status, mr.plan_version_id
+       FROM migration_runs mr
+       JOIN migration_batches mb ON mb.migration_run_id = mr.id
+       WHERE mr.status = 'RUNNING'
+          OR mb.status IN ('RUNNING', 'OUTCOME_UNKNOWN', 'RETRY_WAIT')
+          OR mb.sub_stage IN ('WRITE_STARTED', 'DESTINATION_WRITTEN', 'MANIFEST_COMMITTED')`,
+    );
+
+    if (candidateRuns.rows.length === 0) {
+      console.log('[Worker Recovery] No stranded or in-flight migration runs found on startup.');
+      return;
+    }
+
+    console.log(`[Worker Recovery] Found ${candidateRuns.rows.length} candidate run(s) for startup reconciliation.`);
+
+    for (const row of candidateRuns.rows) {
+      const runId = row.id;
+      const objectsRes = await dbPool.query(
+        `SELECT DISTINCT source_object, destination_object
+         FROM migration_batches
+         WHERE migration_run_id = $1`,
+        [runId],
+      );
+
+      let destConnector = defaultDestinationConnector;
+      let destKey = 'id';
+      try {
+        const planRes = await dbPool.query(
+          `SELECT mp.destination_connection_id, mp.destination_object,
+                  mpv.plan_json
+           FROM migration_plans mp
+           JOIN migration_plan_versions mpv ON mpv.plan_id = mp.id
+           WHERE mpv.id = $1`,
+          [row.plan_version_id],
+        );
+        if (planRes.rows.length > 0) {
+          const destConnId = planRes.rows[0].destination_connection_id;
+          if (destConnId) {
+            destConnector = await getDestinationConnector({ destinationConnectionId: destConnId } as any);
+          }
+          const planJson = typeof planRes.rows[0].plan_json === 'string'
+            ? JSON.parse(planRes.rows[0].plan_json)
+            : planRes.rows[0].plan_json || {};
+          if (planJson.destinationKey) {
+            destKey = planJson.destinationKey;
+          } else if (planJson.identity?.destinationKey) {
+            destKey = planJson.identity.destinationKey;
+          } else if (planJson.conflictColumns?.[0]) {
+            destKey = planJson.conflictColumns[0];
+          }
+        }
+      } catch (err: any) {
+        console.warn(`[Worker Recovery] Notice resolving plan details for run ${runId}: ${err.message}`);
+      }
+
+      const recoveryEngine = new RecoveryEngine({
+        destinationConnector: destConnector,
+        manifestTracker,
+        checkpointManager,
+        idTracker,
+      });
+
+      for (const objRow of objectsRes.rows) {
+        const srcObj = objRow.source_object || 'customers';
+        const dstObj = objRow.destination_object || 'customers';
+
+        const resumePlan = await recoveryEngine.prepareResume(
+          runId,
+          srcObj,
+          dstObj,
+          destKey,
+        );
+
+        console.log(
+          `[Worker Recovery] Startup resume prepared for run ${runId} (${srcObj} -> ${dstObj}): ` +
+          `checkpoint seq ${resumePlan.lastCommittedSequenceNo}, ` +
+          `reconciled ${resumePlan.reconciledBatches.length} batch(es)`,
+        );
+      }
+    }
+  } catch (err: any) {
+    console.warn(`[Worker Recovery] Notice during startup reconciliation: ${err.message}`);
+  }
+}
+
 async function startWorker() {
   try {
-    // 1. Verify control-plane database connectivity
+    // 1. Verify control-plane database connectivity and reconcile stranded runs on startup/restart
     if (dbPool) {
       try {
         await dbPool.query('SELECT 1');
       } catch (dbErr: any) {
         throw new Error(`Control-plane PostgreSQL connection failed: ${dbErr.message}`);
       }
+
+      // Reconcile any in-flight/ambiguous runs from worker restarts or crashes
+      await reconcileStrandedRunsOnStartup();
     }
 
     const redisTls = IS_REDIS_TLS ? { rejectUnauthorized: !allowInsecureTls } : undefined;
@@ -634,25 +731,57 @@ async function startWorker() {
           idTracker,
         });
 
+        const destKey = job.data.destinationKey || (job.data.conflictColumns && job.data.conflictColumns.length > 0 ? job.data.conflictColumns[0] : 'id');
+
         const existingBatch = await manifestTracker.getBatch(job.data.migrationRunId, job.data.batchKey);
-        if (existingBatch && existingBatch.status === 'COMMITTED') {
-          console.log(`[Worker] ✔ Batch ${job.data.batchKey} was already committed.`);
-          return {
-            migrationRunId: job.data.migrationRunId,
-            batchKey: job.data.batchKey,
-            sequenceNo: job.data.sequenceNo,
-            status: 'COMMITTED',
-            recordsRead: existingBatch.recordsRead,
-            recordsWritten: existingBatch.recordsWritten,
-            recordsSkipped: existingBatch.recordsSkipped,
-            recordsFailed: existingBatch.recordsFailed,
-            hasMore: false,
-          };
-        }
-        if (existingBatch && existingBatch.status === 'OUTCOME_UNKNOWN') {
-          console.log(`[Worker] Detected OUTCOME_UNKNOWN batch ${job.data.batchKey}. Reconciling via RecoveryEngine.`);
-          const destKey = job.data.destinationKey || (job.data.conflictColumns && job.data.conflictColumns.length > 0 ? job.data.conflictColumns[0] : 'id');
-          await recoveryEngine.reconcileBatch(existingBatch, job.data.destinationObject, destKey);
+        if (existingBatch) {
+          if (existingBatch.status === 'COMMITTED') {
+            console.log(`[Worker] ✔ Batch ${job.data.batchKey} was already committed.`);
+            return {
+              migrationRunId: job.data.migrationRunId,
+              batchKey: job.data.batchKey,
+              sequenceNo: job.data.sequenceNo,
+              status: 'COMMITTED',
+              recordsRead: existingBatch.recordsRead,
+              recordsWritten: existingBatch.recordsWritten,
+              recordsSkipped: existingBatch.recordsSkipped,
+              recordsFailed: existingBatch.recordsFailed,
+              hasMore: false,
+            };
+          }
+
+          if (
+            existingBatch.status === 'OUTCOME_UNKNOWN' ||
+            existingBatch.status === 'RUNNING' ||
+            existingBatch.subStage === 'WRITE_STARTED' ||
+            existingBatch.subStage === 'DESTINATION_WRITTEN' ||
+            existingBatch.subStage === 'MANIFEST_COMMITTED'
+          ) {
+            console.log(
+              `[Worker] Detected uncommitted/in-flight batch ${job.data.batchKey} (status: ${existingBatch.status}, subStage: ${existingBatch.subStage}). Reconciling via RecoveryEngine.`,
+            );
+            const reconciled = await recoveryEngine.reconcileBatch(existingBatch, job.data.destinationObject, destKey);
+            if (reconciled && reconciled.resolvedStatus === 'COMMITTED') {
+              console.log(`[Worker] ✔ Reconciled and committed batch ${job.data.batchKey} via RecoveryEngine.`);
+              const updatedBatch = await manifestTracker.getBatch(job.data.migrationRunId, job.data.batchKey);
+              return {
+                migrationRunId: job.data.migrationRunId,
+                batchKey: job.data.batchKey,
+                sequenceNo: job.data.sequenceNo,
+                status: 'COMMITTED',
+                recordsRead: updatedBatch?.recordsRead || existingBatch.recordsRead,
+                recordsWritten: updatedBatch?.recordsWritten || existingBatch.recordsWritten,
+                recordsSkipped: updatedBatch?.recordsSkipped || existingBatch.recordsSkipped,
+                recordsFailed: updatedBatch?.recordsFailed || existingBatch.recordsFailed,
+                hasMore: false,
+              };
+            }
+            if (reconciled && reconciled.resolvedStatus === 'OUTCOME_UNKNOWN') {
+              throw new Error(
+                `[Worker] Batch ${job.data.batchKey} ended in OUTCOME_UNKNOWN: destination records could not be verified.`,
+              );
+            }
+          }
         }
 
         // In production, strictly prohibit ALLOW_DEMO_MAPPING
@@ -799,17 +928,24 @@ async function startWorker() {
               };
             }
 
+            const effectiveDestKeyCol = job.data.destinationKey || 'id';
+            const recordDestKey = String(raw[effectiveDestKeyCol] !== undefined ? raw[effectiveDestKeyCol] : envelope.sourceKey);
+
             return {
               sourceObject: envelope.sourceObject,
               sourceKey: envelope.sourceKey,
               destinationObject: destObj,
-              destinationKey: envelope.sourceKey,
+              destinationKey: recordDestKey,
               data,
               contentHash: calculateCanonicalHash(raw),
             };
           },
           onNextBatchScheduled: process.env.ENABLE_WORKER_AUTO_STREAMING === 'true'
             ? async (nextPayload: MigrationJobPayload) => {
+                // Priority 2: Propagate identity.destinationKey through streaming batches
+                if (!nextPayload.destinationKey && job.data.destinationKey) {
+                  nextPayload.destinationKey = job.data.destinationKey;
+                }
                 console.log(`[Worker] Scheduling streaming batch: ${nextPayload.batchKey} (seq: ${nextPayload.sequenceNo})`);
                 if (dbPool) {
                   await dbPool.query(

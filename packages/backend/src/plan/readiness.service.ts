@@ -1,5 +1,7 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
+import { WorkspaceService } from '../workspace/workspace.service';
+import { ConnectionService } from '../connection/connection.service';
 
 export interface ReadinessCheckResult {
   planVersionId: string;
@@ -12,7 +14,11 @@ export interface ReadinessCheckResult {
 
 @Injectable()
 export class ReadinessService {
-  constructor(private db: DatabaseService) {}
+  constructor(
+    private db: DatabaseService,
+    @Optional() private workspaceService?: WorkspaceService,
+    @Optional() private connectionService?: ConnectionService,
+  ) {}
 
   async checkReadiness(planVersionId: string): Promise<ReadinessCheckResult> {
     const res = await this.db.query('SELECT * FROM migration_plan_versions WHERE id = $1', [
@@ -27,54 +33,112 @@ export class ReadinessService {
     const hypotheses: string[] = [];
     const blockers: string[] = [];
 
-    // Verify source connection
+    // 1. Verify source connection and live connectivity
     const sourceRes = await this.db.query('SELECT * FROM connections WHERE id = $1', [
       version.source_connection_id,
     ]);
     if (sourceRes.rows.length === 0) {
       blockers.push(`Source connection ${version.source_connection_id} does not exist.`);
     } else {
-      facts.push(`Source connection configured for engine ${sourceRes.rows[0].engine}.`);
-      if (sourceRes.rows[0].status === 'HEALTHY') {
+      const srcConn = sourceRes.rows[0];
+      facts.push(`Source connection configured for engine ${srcConn.engine}.`);
+      if (srcConn.status === 'HEALTHY') {
         facts.push('Source connection verified healthy.');
       } else {
-        // Issue 8 fix: non-HEALTHY source connection is a blocker, not a hypothesis
-        blockers.push(`Source connection is not HEALTHY (current status: ${sourceRes.rows[0].status}). Run a connectivity test before proceeding.`);
+        blockers.push(`Source connection is not HEALTHY (current status: ${srcConn.status}). Run a connectivity test before proceeding.`);
+      }
+
+      // Live connectivity probe if customProber is configured
+      if ((ConnectionService as any).customProber) {
+        try {
+          const probe = await (ConnectionService as any).customProber(srcConn);
+          if (probe && !probe.reachable) {
+            blockers.push(`Live source connectivity test failed: ${probe.errorMessage || 'Source connection unreachable'}.`);
+          }
+        } catch (probeErr: any) {
+          blockers.push(`Live source connectivity test failed: ${probeErr.message}.`);
+        }
       }
     }
 
-    // Verify destination connection
+    // 2. Verify destination connection and live connectivity
     const destRes = await this.db.query('SELECT * FROM connections WHERE id = $1', [
       version.destination_connection_id,
     ]);
     if (destRes.rows.length === 0) {
       blockers.push(`Destination connection ${version.destination_connection_id} does not exist.`);
     } else {
-      facts.push(`Destination connection configured for engine ${destRes.rows[0].engine}.`);
-      if (destRes.rows[0].status === 'HEALTHY') {
+      const dstConn = destRes.rows[0];
+      facts.push(`Destination connection configured for engine ${dstConn.engine}.`);
+      if (dstConn.status === 'HEALTHY') {
         facts.push('Destination connection verified healthy.');
       } else {
-        // Issue 8 fix: non-HEALTHY destination connection is a blocker, not silently ignored
-        blockers.push(`Destination connection is not HEALTHY (current status: ${destRes.rows[0].status}). Run a connectivity test before proceeding.`);
+        blockers.push(`Destination connection is not HEALTHY (current status: ${dstConn.status}). Run a connectivity test before proceeding.`);
+      }
+
+      // Live connectivity probe if customProber is configured
+      if ((ConnectionService as any).customProber) {
+        try {
+          const probe = await (ConnectionService as any).customProber(dstConn);
+          if (probe && !probe.reachable) {
+            blockers.push(`Live destination connectivity test failed: ${probe.errorMessage || 'Destination connection unreachable'}.`);
+          }
+        } catch (probeErr: any) {
+          blockers.push(`Live destination connectivity test failed: ${probeErr.message}.`);
+        }
       }
     }
 
-    // Verify mapping version
+    // 3. Verify mapping version and exact mapped objects
+    let objects: any[] = [];
     if (version.mapping_version_id) {
       const mapRes = await this.db.query('SELECT * FROM mapping_versions WHERE id = $1', [
         version.mapping_version_id,
       ]);
       if (mapRes.rows.length > 0) {
         facts.push(`Mapping version #${mapRes.rows[0].version} validated with hash ${mapRes.rows[0].mapping_hash.slice(0, 16)}...`);
+        const mRaw = mapRes.rows[0].mapping_json;
+        const parsedMap = typeof mRaw === 'string' ? JSON.parse(mRaw) : mRaw;
+        objects = Array.isArray(parsedMap.objects) ? parsedMap.objects : (parsedMap.source ? [parsedMap] : []);
+        if (objects.length === 0) {
+          blockers.push('Approved mapping version contains no mapped objects.');
+        } else {
+          for (const obj of objects) {
+            const rawSource = obj.source?.collection || obj.source?.object || (typeof obj.source === 'string' ? obj.source : null);
+            const rawDest = obj.destination?.table || obj.destination?.object || (typeof obj.destination === 'string' ? obj.destination : null);
+            if (!rawSource || !rawDest) {
+              blockers.push('Mapped object missing explicit source collection/object or destination table/object name.');
+            }
+          }
+          // Validate exact source/destination object matches with plan scope if defined
+          const scope = version.scope_json || {};
+          const scopeTables = scope.tables || scope.collections || [];
+          if (Array.isArray(scopeTables) && scopeTables.length > 0) {
+            for (const obj of objects) {
+              const sName = obj.source?.collection || obj.source?.object || (typeof obj.source === 'string' ? obj.source : null);
+              const dName = obj.destination?.table || obj.destination?.object || (typeof obj.destination === 'string' ? obj.destination : null);
+              if (sName && dName) {
+                const inScope = scopeTables.some((st: any) => {
+                  if (typeof st === 'string') return st === sName || st === dName;
+                  const s = st.source || st.collection || st.table;
+                  const d = st.destination || st.table || st.collection;
+                  return s === sName && (!d || d === dName);
+                });
+                if (!inScope) {
+                  blockers.push(`Mapped object '${sName}' -> '${dName}' is not defined in the approved plan scope.`);
+                }
+              }
+            }
+          }
+        }
       } else {
         blockers.push('Configured mapping version not found.');
       }
     } else {
-      // Issue 9 fix: missing mapping version is a blocker, not a hypothesis
       blockers.push('No mapping version configured; migration cannot proceed without an explicit approved mapping.');
     }
 
-    // Check execution config
+    // 4. Check execution config
     const execConfig = version.execution_config_json || {};
     if (execConfig.batchSize > 5000) {
       hypotheses.push(`Batch size (${execConfig.batchSize}) is high; may increase memory pressure.`);
@@ -82,71 +146,143 @@ export class ReadinessService {
       facts.push(`Bounded batch size set to ${execConfig.batchSize || 1000}.`);
     }
 
-    // Verify source and destination schema compatibility
-    if (version.source_schema_snapshot_id && version.destination_schema_snapshot_id) {
-      const srcSnap = await this.db.query('SELECT snapshot_json FROM schema_snapshots WHERE id = $1', [
+    // 5. Source Schema Snapshot Verification (Missing & Stale Checks)
+    let srcSnapRow: any = null;
+    if (version.source_schema_snapshot_id) {
+      const srcSnapRes = await this.db.query('SELECT * FROM schema_snapshots WHERE id = $1', [
         version.source_schema_snapshot_id,
       ]);
-      const dstSnap = await this.db.query('SELECT snapshot_json FROM schema_snapshots WHERE id = $1', [
-        version.destination_schema_snapshot_id,
-      ]);
-
-      if (srcSnap.rows.length > 0 && dstSnap.rows.length > 0) {
-        const dstJson = dstSnap.rows[0].snapshot_json || {};
-        const dstEntities = dstJson.tables || dstJson.collections || dstJson.objects || [];
-
-        if (version.mapping_version_id) {
-          const mRes = await this.db.query('SELECT mapping_json FROM mapping_versions WHERE id = $1', [
-            version.mapping_version_id,
-          ]);
-          if (mRes.rows.length > 0) {
-            const mRaw = mRes.rows[0].mapping_json;
-            const parsedMap = typeof mRaw === 'string' ? JSON.parse(mRaw) : mRaw;
-            const objects: any[] = Array.isArray(parsedMap.objects) ? parsedMap.objects : [parsedMap];
-
-            for (const obj of objects) {
-              const sName = obj.source?.collection || obj.source?.object || (typeof obj.source === 'string' ? obj.source : 'customers');
-              const dName = obj.destination?.table || obj.destination?.object || (typeof obj.destination === 'string' ? obj.destination : 'customers');
-
-              const dTable = dstEntities.find((t: any) => t.name === dName);
-              if (dTable) {
-                const rawCols = dTable.columns || dTable.fields || [];
-                const cols = rawCols.map((c: any) => ({
-                  name: c.name || c.path,
-                  nullable: c.nullable !== false && c.is_nullable !== 'NO',
-                  isPrimaryKey: !!(c.isPrimaryKey || c.name === 'id' || c.path === 'id'),
-                }));
-
-                // Verify required fields (non-nullable unmapped columns)
-                for (const col of cols) {
-                  if (!col.nullable && !col.isPrimaryKey) {
-                    const isMapped = Array.isArray(obj.fields)
-                      ? obj.fields.some((f: any) => (f.destinationPath || f.destination) === col.name)
-                      : true;
-                    if (!isMapped) {
-                      blockers.push(`Destination table '${dName}' column '${col.name}' is non-nullable but not mapped from source '${sName}'.`);
-                    }
-                  }
-                }
-
-                // Verify identity constraints (Requirement 8)
-                const destKey = obj.identity?.destinationKey || obj.destination?.key || 'id';
-                const keyCol = cols.find((c: any) => c.name === destKey);
-                if (!keyCol) {
-                  blockers.push(`Identity key '${destKey}' for '${dName}' does not exist in destination table schema.`);
-                }
-              }
-            }
-            if (blockers.length === 0) {
-              facts.push(`Source and destination schema compatibility verified across ${objects.length} mapped object(s).`);
-            }
+      if (srcSnapRes.rows.length === 0) {
+        blockers.push(`Source schema snapshot '${version.source_schema_snapshot_id}' does not exist.`);
+      } else {
+        srcSnapRow = srcSnapRes.rows[0];
+        // Check if source snapshot is stale
+        if (version.source_connection_id) {
+          const newerRes = await this.db.query(
+            `SELECT id, schema_version FROM schema_snapshots
+             WHERE connection_id = $1 AND (schema_version > $2 OR created_at > $3)
+             LIMIT 1`,
+            [version.source_connection_id, srcSnapRow.schema_version, srcSnapRow.created_at],
+          );
+          if (newerRes.rows.length > 0) {
+            blockers.push(`Source schema snapshot '${version.source_schema_snapshot_id}' is stale; a newer snapshot is available.`);
+          }
+          if (sourceRes.rows.length > 0 && srcSnapRow.connection_version < (sourceRes.rows[0].credential_version || 1)) {
+            blockers.push(`Source schema snapshot '${version.source_schema_snapshot_id}' is stale; connection credentials were updated after the snapshot was captured.`);
           }
         }
       }
+    } else if (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false') {
+      blockers.push('Missing source schema snapshot. In production, an approved source schema snapshot is required before migration can proceed.');
+    } else if (version.source_connection_id) {
+      // In non-production, check for latest available snapshot for source connection
+      const latestSrc = await this.db.query(
+        'SELECT * FROM schema_snapshots WHERE connection_id = $1 ORDER BY schema_version DESC, created_at DESC LIMIT 1',
+        [version.source_connection_id],
+      );
+      if (latestSrc.rows.length > 0) {
+        srcSnapRow = latestSrc.rows[0];
+      } else {
+        hypotheses.push('No source schema snapshot configured; schema compatibility was evaluated without source snapshot constraints.');
+      }
     }
 
-    const ready = blockers.length === 0;
-    const score = ready ? (hypotheses.length === 0 ? 100 : 85) : 30;
+    // 6. Destination Schema Snapshot Verification (Missing & Stale Checks)
+    let dstSnapRow: any = null;
+    if (version.destination_schema_snapshot_id) {
+      const dstSnapRes = await this.db.query('SELECT * FROM schema_snapshots WHERE id = $1', [
+        version.destination_schema_snapshot_id,
+      ]);
+      if (dstSnapRes.rows.length === 0) {
+        blockers.push(`Destination schema snapshot '${version.destination_schema_snapshot_id}' does not exist.`);
+      } else {
+        dstSnapRow = dstSnapRes.rows[0];
+        // Check if destination snapshot is stale
+        if (version.destination_connection_id) {
+          const newerRes = await this.db.query(
+            `SELECT id, schema_version FROM schema_snapshots
+             WHERE connection_id = $1 AND (schema_version > $2 OR created_at > $3)
+             LIMIT 1`,
+            [version.destination_connection_id, dstSnapRow.schema_version, dstSnapRow.created_at],
+          );
+          if (newerRes.rows.length > 0) {
+            blockers.push(`Destination schema snapshot '${version.destination_schema_snapshot_id}' is stale; a newer snapshot is available.`);
+          }
+          if (destRes.rows.length > 0 && dstSnapRow.connection_version < (destRes.rows[0].credential_version || 1)) {
+            blockers.push(`Destination schema snapshot '${version.destination_schema_snapshot_id}' is stale; connection credentials were updated after the snapshot was captured.`);
+          }
+        }
+      }
+    } else if (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false') {
+      blockers.push('Missing destination schema snapshot. In production, an approved destination schema snapshot is required before migration can proceed.');
+    } else if (version.destination_connection_id) {
+      // In non-production, check for latest available snapshot for destination connection
+      const latestDst = await this.db.query(
+        'SELECT * FROM schema_snapshots WHERE connection_id = $1 ORDER BY schema_version DESC, created_at DESC LIMIT 1',
+        [version.destination_connection_id],
+      );
+      if (latestDst.rows.length > 0) {
+        dstSnapRow = latestDst.rows[0];
+      } else {
+        hypotheses.push('No destination schema snapshot configured; schema compatibility was evaluated without destination snapshot constraints.');
+      }
+    }
+
+    // 7. Verify Schema Compatibility & Missing Destination Tables across ALL Mapped Objects
+    if (dstSnapRow && objects.length > 0) {
+      const dstJson = dstSnapRow.snapshot_json || {};
+      const dstEntities = dstJson.tables || dstJson.collections || dstJson.objects || [];
+
+      for (const obj of objects) {
+        const sName = obj.source?.collection || obj.source?.object || (typeof obj.source === 'string' ? obj.source : 'customers');
+        const dName = obj.destination?.table || obj.destination?.object || (typeof obj.destination === 'string' ? obj.destination : 'customers');
+
+        const dTable = dstEntities.find((t: any) => t.name === dName);
+        if (!dTable) {
+          blockers.push(`Destination table '${dName}' does not exist in destination schema snapshot.`);
+          continue;
+        }
+
+        const rawCols = dTable.columns || dTable.fields || [];
+        const cols = rawCols.map((c: any) => ({
+          name: c.name || c.path,
+          nullable: c.nullable !== false && c.is_nullable !== 'NO',
+          isPrimaryKey: !!(c.isPrimaryKey || c.name === 'id' || c.path === 'id' || c.is_primary_key),
+          type: (c.type || c.dataType || c.data_type || '').toLowerCase(),
+        }));
+
+        // Verify required fields (non-nullable unmapped columns)
+        for (const col of cols) {
+          if (!col.nullable && !col.isPrimaryKey) {
+            const isMapped = Array.isArray(obj.fields)
+              ? obj.fields.some((f: any) => (f.destinationPath || f.destination || f.field || f.fieldPath) === col.name)
+              : true;
+            if (!isMapped) {
+              blockers.push(`Destination table '${dName}' column '${col.name}' is non-nullable but not mapped from source '${sName}'.`);
+            }
+          }
+        }
+
+        // Verify identity constraints (Requirement 8)
+        const rawDestKey = obj.identity?.destinationKey || obj.destination?.key;
+        const destKey = rawDestKey || 'id';
+        if (!rawDestKey && (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false')) {
+          blockers.push(`Identity key is not explicitly configured for mapped object '${sName}' -> '${dName}'.`);
+        }
+        const keyCol = cols.find((c: any) => c.name === destKey);
+        if (!keyCol) {
+          blockers.push(`Identity key '${destKey}' for '${dName}' does not exist in destination table schema.`);
+        }
+      }
+
+      if (blockers.length === 0) {
+        facts.push(`Source and destination schema compatibility verified across ${objects.length} mapped object(s).`);
+      }
+    }
+
+    // Never return ready: true without verifying conditions (must have facts and zero blockers)
+    const ready = blockers.length === 0 && facts.length > 0;
+    const score = ready ? (hypotheses.length === 0 ? 100 : 85) : Math.max(0, 50 - blockers.length * 15);
 
     return {
       planVersionId,

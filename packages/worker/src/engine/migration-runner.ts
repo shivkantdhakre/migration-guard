@@ -99,11 +99,24 @@ export class MigrationRunner {
     let sequenceNo = 1;
     let cursor: SourceCursor | null = config.initialCursor ?? null;
 
-    // Check existing checkpoint (if any)
-    const existingCheckpoint = await this.checkpointManager.getCheckpoint(runId, config.sourceObject);
-    if (existingCheckpoint) {
-      sequenceNo = existingCheckpoint.lastCommittedSequenceNo + 1;
-      cursor = existingCheckpoint.lastCommittedCursor;
+    // Check existing batches/checkpoints and reconcile if existing execution detected
+    const existingBatches = await this.manifestTracker.listBatches(runId);
+    if (existingBatches.length > 0) {
+      const destKey = config.destinationKey || config.conflictColumns?.[0] || 'id';
+      const resumePlan = await this.recoveryEngine.prepareResume(
+        runId,
+        config.sourceObject,
+        config.destinationObject,
+        destKey,
+      );
+      sequenceNo = resumePlan.lastCommittedSequenceNo + 1;
+      cursor = resumePlan.startingCursor;
+    } else {
+      const existingCheckpoint = await this.checkpointManager.getCheckpoint(runId, config.sourceObject);
+      if (existingCheckpoint) {
+        sequenceNo = existingCheckpoint.lastCommittedSequenceNo + 1;
+        cursor = existingCheckpoint.lastCommittedCursor;
+      }
     }
 
     await this.runLoop(config, sequenceNo, cursor, abortController.signal);
@@ -128,15 +141,33 @@ export class MigrationRunner {
   /**
    * Resume a paused or interrupted migration run
    */
-  public async resume(migrationRunId: string): Promise<void> {
+  public async resume(migrationRunId: string, overrideConfig?: StartMigrationConfig): Promise<void> {
     const currentStatus = this.getStatus(migrationRunId);
     if (currentStatus !== 'PAUSED' && currentStatus !== 'FAILED') {
       throw new Error(`Cannot resume migration run in status: ${currentStatus}`);
     }
 
-    const config = this.activeConfigs.get(migrationRunId);
+    if (overrideConfig) {
+      this.activeConfigs.set(migrationRunId, overrideConfig);
+    }
+    let config = this.activeConfigs.get(migrationRunId);
     if (!config) {
-      throw new Error(`No active configuration found for migration run: ${migrationRunId}`);
+      // Reconstruct config from existing batches / checkpoint if available across process restart
+      const batches = await this.manifestTracker.listBatches(migrationRunId);
+      const firstBatch = batches[0];
+      const checkpoint = firstBatch ? await this.checkpointManager.getCheckpoint(migrationRunId, firstBatch.sourceObject) : null;
+      if (firstBatch) {
+        config = {
+          migrationRunId,
+          sourceObject: firstBatch.sourceObject,
+          destinationObject: firstBatch.destinationObject,
+          planVersionId: checkpoint?.planVersionId || 'resumed_plan',
+          mappingVersionId: checkpoint?.mappingVersionId || 'resumed_mapping',
+        };
+        this.activeConfigs.set(migrationRunId, config);
+      } else {
+        throw new Error(`No active configuration found for migration run: ${migrationRunId}`);
+      }
     }
 
     // Reconcile crash states & prepare resume
@@ -249,6 +280,7 @@ export class MigrationRunner {
       }
 
       const batchKey = `batch_${config.sourceObject}_seq_${String(currentSequence).padStart(6, '0')}`;
+      const destKey = config.destinationKey || (config.conflictColumns && config.conflictColumns.length > 0 ? config.conflictColumns[0] : 'id');
       const payload: MigrationJobPayload = {
         jobId: `job_${config.migrationRunId}_${batchKey}`,
         migrationRunId: config.migrationRunId,
@@ -263,6 +295,7 @@ export class MigrationRunner {
         writeMode: config.writeMode ?? 'insert_only',
         conflictColumns: config.conflictColumns,
         updateColumns: config.updateColumns,
+        destinationKey: destKey,
       };
 
       const result = await queueHandler.processJob(payload);

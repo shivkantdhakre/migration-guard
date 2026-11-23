@@ -160,6 +160,32 @@ export class ValidationService {
       );
     }
 
+    // Validate that mapped objects match plan scope if defined
+    const scope = planVersion?.scope_json || {};
+    const scopeTables = scope.tables || scope.collections || [];
+    if (Array.isArray(scopeTables) && scopeTables.length > 0) {
+      for (const obj of objectMappings) {
+        const sName = obj.source?.collection || obj.source?.object || (typeof obj.source === 'string' ? obj.source : null);
+        const dName = obj.destination?.table || obj.destination?.object || (typeof obj.destination === 'string' ? obj.destination : null);
+        if (sName && dName) {
+          const inScope = scopeTables.some((st: any) => {
+            if (typeof st === 'string') return st === sName || st === dName;
+            const s = st.source || st.collection || st.table;
+            const d = st.destination || st.table || st.collection;
+            return s === sName && (!d || d === dName);
+          });
+          if (!inScope && (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false')) {
+            await this.recordFailedValidation(
+              run.workspace_id,
+              runId,
+              `Mapped object '${sName}' -> '${dName}' is not defined in the approved plan scope.`,
+            );
+            throw new Error(`Mapped object '${sName}' -> '${dName}' is not defined in the approved plan scope. Validation failed closed.`);
+          }
+        }
+      }
+    }
+
     const parseDateSafe = (d: any) => {
       if (!d) return new Date().toISOString();
       const parsed = new Date(d);
@@ -322,24 +348,43 @@ export class ValidationService {
 
     // Loop through ALL mapped objects in plan version (P0: Multi-object validation)
     for (const obj of objectMappings) {
-      const sourceObjectName =
+      const rawSource =
         obj.source?.collection ||
         obj.source?.object ||
-        (typeof obj.source === 'string' ? obj.source : 'customers');
-      const destObjectName =
+        (typeof obj.source === 'string' ? obj.source : null);
+      const rawDest =
         obj.destination?.table ||
         obj.destination?.object ||
-        (typeof obj.destination === 'string' ? obj.destination : 'customers');
+        (typeof obj.destination === 'string' ? obj.destination : null);
+
+      if (!rawSource || !rawDest) {
+        if (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false') {
+          await this.recordFailedValidation(
+            run.workspace_id,
+            runId,
+            'Mapping object lacks explicit source or destination specification. Implicit default customers fallback is forbidden in production.',
+          );
+          throw new Error(
+            'Mapping object lacks explicit source or destination specification. Implicit default customers fallback is forbidden in production.',
+          );
+        }
+      }
+
+      const sourceObjectName = rawSource || 'customers';
+      const destObjectName = rawDest || 'customers';
       const sourceKeyField = obj.identity?.sourceKey || obj.source?.key || '_id';
       const destKeyField = obj.identity?.destinationKey || obj.destination?.key || 'id';
 
       objectsValidated.push(`${sourceObjectName} -> ${destObjectName}`);
 
-      // Issue 2 fix: Independent count check — enumerate ALL source and destination records
+      // Independent count check — enumerate ALL source and destination records
       // regardless of what is in record_manifests. This catches 0-record silent-pass scenarios.
       let sourceCount = 0;
       let destCount = 0;
+      let sourceCountQueried = false;
+      let destCountQueried = false;
 
+      // 1. Source record count from live MongoDB
       if (srcConn?.engine === 'MONGODB' && sourceCredentials) {
         const uri = sourceCredentials.uri || sourceCredentials.connectionString;
         if (uri) {
@@ -361,6 +406,31 @@ export class ValidationService {
         }
       }
 
+      // 2. Source record count from PostgreSQL (Priority 3: Fix PostgreSQL source record-count verification)
+      if (srcConn?.engine === 'POSTGRESQL' && sourceCredentials) {
+        const connStr = sourceCredentials.connectionString || sourceCredentials.uri;
+        if (connStr && connStr !== appConfig.databaseUrl) {
+          try {
+            const pg = require('pg');
+            const pool = new pg.Pool({ connectionString: connStr, connectionTimeoutMillis: 2000 });
+            try {
+              assertSafeIdentifier(sourceObjectName, 'COUNT_MISMATCH source pg count');
+              const cRes = await pool.query(`SELECT COUNT(*) AS cnt FROM "${sourceObjectName}"`);
+              sourceCount = parseInt(cRes.rows[0]?.cnt ?? '0', 10);
+            } finally {
+              await pool.end().catch(() => {});
+            }
+          } catch (cErr: any) {
+            console.warn(`[ValidationService] Source PostgreSQL count query failed: ${cErr.message}`);
+            if (process.env.NODE_ENV === 'production') {
+              await this.recordFailedValidation(run.workspace_id, runId, `Source PostgreSQL count query failed for ${sourceObjectName}: ${cErr.message}`);
+              throw new Error(`Source count query failed for ${sourceObjectName}: ${cErr.message}. Validation failed closed.`);
+            }
+          }
+        }
+      }
+
+      // 3. Destination record count from PostgreSQL
       if (destConn?.engine === 'POSTGRESQL' && destCredentials) {
         const connStr = destCredentials.connectionString || destCredentials.uri;
         if (connStr && connStr !== appConfig.databaseUrl) {
@@ -390,7 +460,7 @@ export class ValidationService {
         allCheckResults.push({
           checkId: `COUNT_MISMATCH_${sourceObjectName}`,
           checkName: `Record Count: ${sourceObjectName} → ${destObjectName}`,
-          evaluatedCount: 1,
+          evaluatedCount: Math.max(sourceCount, destCount),
           passedCount: countMatches ? 1 : 0,
           failedCount: countMatches ? 0 : 1,
           failCount: countMatches ? 0 : 1,
@@ -449,23 +519,97 @@ export class ValidationService {
         }
       }
 
+      // Check for incomplete evidence: manifested records that cannot be retrieved
+      if (sourceKeys.length > 0 && sourceRecords.length < sourceKeys.length) {
+        const missingCount = sourceKeys.length - sourceRecords.length;
+        allDiscrepancies.push({
+          category: 'METADATA',
+          severity: 'CRITICAL',
+          sourceObject: sourceObjectName,
+          destinationObject: destObjectName,
+          sourceKey: 'N/A',
+          destinationKey: 'N/A',
+          explanation: `Incomplete source evidence: ${missingCount} of ${sourceKeys.length} manifested source records could not be retrieved from source.`,
+        });
+      }
+
+      if (destKeys.length > 0 && destRecords.length < destKeys.length) {
+        const missingCount = destKeys.length - destRecords.length;
+        allDiscrepancies.push({
+          category: 'RECORD_COUNT_MISMATCH',
+          severity: 'CRITICAL',
+          sourceObject: sourceObjectName,
+          destinationObject: destObjectName,
+          sourceKey: 'N/A',
+          destinationKey: 'N/A',
+          explanation: `Incomplete destination evidence: ${missingCount} of ${destKeys.length} manifested destination records could not be retrieved from destination.`,
+        });
+      }
+
+      if (sourceKeys.length > 0 && sourceRecords.length === 0) {
+        if (process.env.NODE_ENV === 'production') {
+          await this.recordFailedValidation(
+            run.workspace_id,
+            runId,
+            `No source records could be retrieved from source for ${sourceObjectName}. Cannot prove migration correctness.`,
+          );
+          throw new Error(
+            `Source records could not be retrieved from source connection for ${sourceObjectName}. Validation failed closed.`,
+          );
+        }
+      }
+
+      // Check for incomplete evidence: manifested records that cannot be retrieved
+      if (sourceKeys.length > 0 && sourceRecords.length < sourceKeys.length) {
+        const missingCount = sourceKeys.length - sourceRecords.length;
+        allDiscrepancies.push({
+          category: 'METADATA',
+          severity: 'CRITICAL',
+          sourceObject: sourceObjectName,
+          destinationObject: destObjectName,
+          sourceKey: 'N/A',
+          destinationKey: 'N/A',
+          explanation: `Incomplete source evidence: ${missingCount} of ${sourceKeys.length} manifested source records could not be retrieved from source.`,
+        });
+      }
+
+      if (destKeys.length > 0 && destRecords.length < destKeys.length) {
+        const missingCount = destKeys.length - destRecords.length;
+        allDiscrepancies.push({
+          category: 'RECORD_COUNT_MISMATCH',
+          severity: 'CRITICAL',
+          sourceObject: sourceObjectName,
+          destinationObject: destObjectName,
+          sourceKey: 'N/A',
+          destinationKey: 'N/A',
+          explanation: `Incomplete destination evidence: ${missingCount} of ${destKeys.length} manifested destination records could not be retrieved from destination.`,
+        });
+      }
+
       let sourceDataset: ValidationDataset;
       let destinationDataset: ValidationDataset;
 
       if (manifests.length === 0 && sourceRecords.length === 0 && destRecords.length === 0) {
         if (process.env.NODE_ENV === 'production') {
-          await this.recordFailedValidation(
-            run.workspace_id,
-            runId,
-            'No migration manifests or destination records exist for this run. Cannot validate in production.',
-          );
-          throw new Error('No manifests or records found for migration run. Validation failed closed.');
+          // If both source and destination were verified to contain 0 records, handle zero-record dataset safely
+          if (sourceCountQueried && destCountQueried && sourceCount === 0 && destCount === 0) {
+            sourceDataset = { objectName: sourceObjectName, records: [], orders: [], attachments: [] };
+            destinationDataset = { objectName: destObjectName, records: [], orders: [], attachments: [] };
+          } else {
+            await this.recordFailedValidation(
+              run.workspace_id,
+              runId,
+              'No migration manifests or destination records exist for this run. Cannot validate with incomplete evidence.',
+            );
+            throw new Error('No manifests or records found for migration run. Validation failed closed.');
+          }
+        } else {
+          // Non-production test harness fallback for synthetic validation test suites
+          const benchmark = generateSyntheticDataset({ totalRecords: 200 });
+          const faultResult = injectFaults(benchmark);
+          destinationDataset = faultResult.faultedDataset;
+          sourceDataset = benchmark;
         }
-        // Non-production test harness fallback for synthetic validation test suites
-        const benchmark = generateSyntheticDataset({ totalRecords: 200 });
-        const faultResult = injectFaults(benchmark);
-        destinationDataset = faultResult.faultedDataset;
-        sourceDataset = benchmark;
       } else {
         const mappingObj: ObjectMapping = {
           source: {
@@ -647,11 +791,17 @@ export class ValidationService {
     const completedAt = new Date().toISOString();
     const durationMs = Math.max(1, Date.now() - startTime);
 
-    const totalFailedChecks = allCheckResults.filter((c: any) => (c.failedCount ?? c.failCount ?? 0) > 0).length;
-    const totalPassedChecks = allCheckResults.filter((c: any) => (c.failedCount ?? c.failCount ?? 0) === 0).length;
+    const totalFailedChecks = allCheckResults.filter(
+      (c: any) => (c.failedCount ?? c.failCount ?? 0) > 0 || (c.state || c.status) === 'FAIL',
+    ).length;
+    const totalPassedChecks = allCheckResults.filter(
+      (c: any) => (c.failedCount ?? c.failCount ?? 0) === 0 && (c.state || c.status) === 'PASS',
+    ).length;
 
     // Explicit distinction between execution status ('COMPLETED') and verification outcome ('PASSED' / 'FAILED')
-    const outcome = totalFailedChecks > 0 ? 'FAILED' : 'PASSED';
+    // Ensure validation cannot pass with incomplete evidence (no checks evaluated or unresolved discrepancies)
+    const hasIncompleteEvidence = allCheckResults.length === 0 || allDiscrepancies.length > 0;
+    const outcome = (totalFailedChecks > 0 || hasIncompleteEvidence) ? 'FAILED' : 'PASSED';
     const executionStatus = 'COMPLETED';
 
     const summaryJson = {
@@ -728,6 +878,10 @@ export class ValidationService {
       const destKey = d.destinationKey || d.destinationKeyRef || d.sourceKey || d.sourceKeyRef || 'N/A';
       const summaryText = d.explanation || d.summary || `${d.category} discrepancy detected on ${srcKey}`;
 
+      const defaultObj = process.env.NODE_ENV === 'production' ? 'UNKNOWN' : 'customers';
+      const srcObject = d.sourceObject || (objectMappings.length === 1 ? (objectMappings[0].source?.collection || objectMappings[0].source?.object || (typeof objectMappings[0].source === 'string' ? objectMappings[0].source : defaultObj)) : defaultObj);
+      const dstObject = d.destinationObject || (objectMappings.length === 1 ? (objectMappings[0].destination?.table || objectMappings[0].destination?.object || (typeof objectMappings[0].destination === 'string' ? objectMappings[0].destination : defaultObj)) : defaultObj);
+
       await this.db.query(
         `INSERT INTO discrepancies (
            validation_run_id, category, severity, source_object,
@@ -739,9 +893,9 @@ export class ValidationService {
           valRun.id,
           cat,
           d.severity,
-          d.sourceObject || 'customers',
+          srcObject,
           srcKey,
-          d.destinationObject || 'customers',
+          dstObject,
           destKey,
           d.fieldPath || null,
           summaryText,

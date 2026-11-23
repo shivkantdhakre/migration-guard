@@ -210,13 +210,20 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Dispatches multiple batches in bulk
+   * Dispatches multiple batches in bulk with optional per-batch callback
+   * to eliminate Redis enqueue / database state inconsistency.
    */
-  async dispatchBatches(payloads: MigrationJobPayload[]): Promise<string[]> {
+  async dispatchBatches(
+    payloads: MigrationJobPayload[],
+    onDispatched?: (payload: MigrationJobPayload, jobId: string) => Promise<void> | void,
+  ): Promise<string[]> {
     const jobIds: string[] = [];
     for (const p of payloads) {
       const id = await this.dispatchBatchJob(p);
       jobIds.push(id);
+      if (onDispatched) {
+        await onDispatched(p, id);
+      }
     }
     return jobIds;
   }

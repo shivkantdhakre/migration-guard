@@ -86,7 +86,8 @@ export class ReadinessService {
         version.mapping_version_id,
       ]);
       if (mapRes.rows.length > 0) {
-        facts.push(`Mapping version #${mapRes.rows[0].version} validated with hash ${mapRes.rows[0].mapping_hash.slice(0, 16)}...`);
+        const hashStr = mapRes.rows[0].mapping_hash ? `${mapRes.rows[0].mapping_hash.slice(0, 16)}...` : 'N/A';
+        facts.push(`Mapping version #${mapRes.rows[0].version} validated with hash ${hashStr}`);
         const mRaw = mapRes.rows[0].mapping_json;
         const parsedMap = typeof mRaw === 'string' ? JSON.parse(mRaw) : mRaw;
         objects = Array.isArray(parsedMap.objects) ? parsedMap.objects : (parsedMap.source ? [parsedMap] : []);
@@ -220,66 +221,106 @@ export class ReadinessService {
 
     // In addition to snapshots, inspect live destination PostgreSQL database schema if available
     let liveDstEntities: any[] | null = null;
-    if (version.destination_connection_id && this.credentialsService) {
-      try {
-        const dConnRes = await this.db.query('SELECT * FROM connections WHERE id = $1', [version.destination_connection_id]);
-        if (dConnRes.rows.length > 0 && dConnRes.rows[0].engine === 'POSTGRESQL') {
-          const dConn = dConnRes.rows[0];
-          const dCreds = await this.credentialsService.getDecryptedCredentials(dConn.id, dConn.credential_version);
-          const connStr = dCreds?.connectionString || dCreds?.uri || dCreds?.url;
-          if (connStr) {
-            const pg = require('pg');
-            const pool = new pg.Pool({ connectionString: connStr, connectionTimeoutMillis: 2000 });
-            try {
-              const tRes = await pool.query(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'`);
-              const cRes = await pool.query(`
-                SELECT table_name, column_name, data_type, udt_name, is_nullable, character_maximum_length
-                FROM information_schema.columns
-                WHERE table_schema = 'public'
-              `);
-              const kRes = await pool.query(`
-                SELECT tc.table_name, kcu.column_name, tc.constraint_type
-                FROM information_schema.table_constraints tc
-                JOIN information_schema.key_column_usage kcu
-                  ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
-                WHERE tc.table_schema = 'public' AND tc.constraint_type IN ('PRIMARY KEY', 'UNIQUE')
-              `);
-              const tableMap = new Map<string, any>();
-              for (const t of tRes.rows) {
-                tableMap.set(t.table_name, { name: t.table_name, columns: [] });
+    let liveDstInspectionFailed = false;
+
+    if (version.destination_connection_id) {
+      if (!this.credentialsService && (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false')) {
+        blockers.push('CredentialsService is unavailable for live destination schema validation.');
+      } else if (this.credentialsService) {
+        try {
+          const dConnRes = await this.db.query('SELECT * FROM connections WHERE id = $1', [version.destination_connection_id]);
+          if (dConnRes.rows.length === 0) {
+            if (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false') {
+              blockers.push(`Destination connection '${version.destination_connection_id}' not found in workspace.`);
+            }
+          } else {
+            const dConn = dConnRes.rows[0];
+            if (dConn.engine !== 'POSTGRESQL') {
+              if (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false') {
+                blockers.push(`Destination engine '${dConn.engine}' is unsupported for live schema catalog validation.`);
               }
-              for (const c of cRes.rows) {
-                let tbl = tableMap.get(c.table_name);
-                if (!tbl) {
-                  tbl = { name: c.table_name, columns: [] };
-                  tableMap.set(c.table_name, tbl);
+            } else {
+              const dCreds = await this.credentialsService.getDecryptedCredentials(dConn.id, dConn.credential_version);
+              const connStr = dCreds?.connectionString || dCreds?.uri || dCreds?.url;
+              if (!connStr) {
+                if (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false') {
+                  blockers.push('Destination connection credentials are missing or unavailable in vault for live schema validation.');
                 }
-                const isPk = kRes.rows.some((k: any) => k.table_name === c.table_name && k.column_name === c.column_name && k.constraint_type === 'PRIMARY KEY');
-                const isUnq = isPk || kRes.rows.some((k: any) => k.table_name === c.table_name && k.column_name === c.column_name && k.constraint_type === 'UNIQUE');
-                tbl.columns.push({
-                  name: c.column_name,
-                  type: c.udt_name || c.data_type,
-                  data_type: c.data_type,
-                  udt_name: c.udt_name,
-                  nullable: c.is_nullable !== 'NO',
-                  is_nullable: c.is_nullable,
-                  isPrimaryKey: isPk,
-                  isUnique: isUnq,
-                  maxLength: c.character_maximum_length,
-                });
+              } else {
+                const pg = require('pg');
+                const pool = new pg.Pool({ connectionString: connStr, connectionTimeoutMillis: 2000 });
+                try {
+                  const tRes = await pool.query(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'`);
+                  const cRes = await pool.query(`
+                    SELECT table_name, column_name, data_type, udt_name, is_nullable, character_maximum_length
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                  `);
+                  const kRes = await pool.query(`
+                    SELECT tc.table_name, tc.constraint_name, tc.constraint_type, kcu.column_name, kcu.ordinal_position
+                    FROM information_schema.table_constraints tc
+                    JOIN information_schema.key_column_usage kcu
+                      ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
+                    WHERE tc.table_schema = 'public' AND tc.constraint_type IN ('PRIMARY KEY', 'UNIQUE')
+                    ORDER BY tc.table_name, tc.constraint_name, kcu.ordinal_position
+                  `);
+                  const tableMap = new Map<string, any>();
+                  for (const t of tRes.rows) {
+                    tableMap.set(t.table_name, { name: t.table_name, columns: [], constraints: new Map() });
+                  }
+                  for (const c of cRes.rows) {
+                    let tbl = tableMap.get(c.table_name);
+                    if (!tbl) {
+                      tbl = { name: c.table_name, columns: [], constraints: new Map() };
+                      tableMap.set(c.table_name, tbl);
+                    }
+                    const isPk = kRes.rows.some((k: any) => k.table_name === c.table_name && k.column_name === c.column_name && k.constraint_type === 'PRIMARY KEY');
+                    const isUnq = isPk || kRes.rows.some((k: any) => k.table_name === c.table_name && k.column_name === c.column_name && k.constraint_type === 'UNIQUE');
+                    tbl.columns.push({
+                      name: c.column_name,
+                      type: c.udt_name || c.data_type,
+                      data_type: c.data_type,
+                      udt_name: c.udt_name,
+                      nullable: c.is_nullable !== 'NO',
+                      is_nullable: c.is_nullable,
+                      isPrimaryKey: isPk,
+                      isUnique: isUnq,
+                      maxLength: c.character_maximum_length,
+                    });
+                  }
+                  for (const k of kRes.rows) {
+                    const tbl = tableMap.get(k.table_name);
+                    if (tbl) {
+                      let c = tbl.constraints.get(k.constraint_name);
+                      if (!c) {
+                        c = { name: k.constraint_name, type: k.constraint_type, columns: [] };
+                        tbl.constraints.set(k.constraint_name, c);
+                      }
+                      c.columns.push(k.column_name);
+                    }
+                  }
+                  liveDstEntities = Array.from(tableMap.values()).map(tbl => ({
+                    ...tbl,
+                    constraints: Array.from(tbl.constraints.values()),
+                  }));
+                } finally {
+                  await pool.end().catch(() => {});
+                }
               }
-              liveDstEntities = Array.from(tableMap.values());
-            } finally {
-              await pool.end().catch(() => {});
             }
           }
+        } catch (err: any) {
+          liveDstInspectionFailed = true;
+          console.warn(`[ReadinessService] Live destination catalog inspection notice: ${err.message}`);
+          if (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false') {
+            blockers.push(`Live destination schema catalog inspection failed: ${err.message}`);
+          }
         }
-      } catch (err: any) {
-        console.warn(`[ReadinessService] Live destination catalog inspection notice: ${err.message}`);
       }
     }
 
     // 7. Verify Schema Compatibility & Missing Destination Tables across ALL Mapped Objects
+    // Precedence: Live destination database catalog takes precedence over schema snapshots.
     const effectiveDstEntities = (liveDstEntities && liveDstEntities.length > 0)
       ? liveDstEntities
       : (dstSnapRow ? ((dstSnapRow.snapshot_json || {}).tables || (dstSnapRow.snapshot_json || {}).collections || (dstSnapRow.snapshot_json || {}).objects || []) : []);
@@ -293,7 +334,7 @@ export class ReadinessService {
 
         const dTable = dstEntities.find((t: any) => t.name === dName);
         if (!dTable) {
-          blockers.push(`Destination table '${dName}' does not exist in destination schema snapshot.`);
+          blockers.push(liveDstEntities ? `Destination table '${dName}' does not exist in live destination database.` : `Destination table '${dName}' does not exist in destination schema snapshot.`);
           continue;
         }
 
@@ -317,6 +358,22 @@ export class ReadinessService {
           }
         }
 
+        // Verify composite unique constraints: every column of a composite unique/PK must be mapped or nullable
+        const constraints = dTable.constraints || [];
+        for (const constraint of constraints) {
+          if (Array.isArray(constraint.columns) && constraint.columns.length > 1) {
+            for (const colName of constraint.columns) {
+              const isMapped = Array.isArray(obj.fields)
+                ? obj.fields.some((f: any) => (f.destinationPath || f.destination || f.field || f.fieldPath) === colName)
+                : true;
+              const colDef = cols.find((c: any) => c.name === colName);
+              if (!isMapped && colDef && !colDef.nullable) {
+                blockers.push(`Destination table '${dName}' composite ${constraint.type} column '${colName}' is not mapped from source '${sName}'.`);
+              }
+            }
+          }
+        }
+
         // Verify identity constraints (Requirement 8)
         const rawDestKey = obj.identity?.destinationKey || obj.destination?.key;
         const destKey = rawDestKey || 'id';
@@ -330,7 +387,11 @@ export class ReadinessService {
       }
 
       if (blockers.length === 0) {
-        facts.push(`Source and destination schema compatibility verified across ${objects.length} mapped object(s).`);
+        if (liveDstEntities && liveDstEntities.length > 0) {
+          facts.push(`Source and destination schema compatibility verified against live destination database catalog across ${objects.length} mapped object(s).`);
+        } else {
+          facts.push(`Source and destination schema compatibility verified across ${objects.length} mapped object(s).`);
+        }
       }
     }
 

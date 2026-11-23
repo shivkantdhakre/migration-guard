@@ -944,22 +944,18 @@ export class ToolCatalog {
             let actorId: string | null = context.actorId;
             const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
             let verifiedActorId: string | null = null;
-            if (this.db.isDbConnected) {
-              if (actorId && isUuid.test(actorId)) {
-                try {
-                  const uRes = await this.db.query(
-                    'SELECT u.id FROM users u JOIN workspace_members wm ON wm.user_id = u.id WHERE wm.workspace_id = $1 AND u.id = $2 LIMIT 1',
-                    [context.workspaceId, actorId],
-                  );
-                  if (uRes.rows.length > 0) {
-                    verifiedActorId = uRes.rows[0].id;
-                  }
-                } catch {
-                  verifiedActorId = null;
+            if (actorId && isUuid.test(actorId)) {
+              try {
+                const uRes = await this.db.query(
+                  'SELECT u.id FROM users u JOIN workspace_members wm ON wm.user_id = u.id WHERE wm.workspace_id = $1 AND u.id = $2 LIMIT 1',
+                  [context.workspaceId, actorId],
+                );
+                if (uRes.rows.length > 0) {
+                  verifiedActorId = uRes.rows[0].id;
                 }
+              } catch {
+                verifiedActorId = null;
               }
-            } else if (actorId && isUuid.test(actorId)) {
-              verifiedActorId = actorId;
             }
             if (verifiedActorId) {
               try {
@@ -991,22 +987,18 @@ export class ToolCatalog {
             let actorId: string | null = context.actorId;
             const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
             let verifiedActorId: string | null = null;
-            if (this.db.isDbConnected) {
-              if (actorId && isUuid.test(actorId)) {
-                try {
-                  const uRes = await this.db.query(
-                    'SELECT u.id FROM users u JOIN workspace_members wm ON wm.user_id = u.id WHERE wm.workspace_id = $1 AND u.id = $2 LIMIT 1',
-                    [context.workspaceId, actorId],
-                  );
-                  if (uRes.rows.length > 0) {
-                    verifiedActorId = uRes.rows[0].id;
-                  }
-                } catch {
-                  verifiedActorId = null;
+            if (actorId && isUuid.test(actorId)) {
+              try {
+                const uRes = await this.db.query(
+                  'SELECT u.id FROM users u JOIN workspace_members wm ON wm.user_id = u.id WHERE wm.workspace_id = $1 AND u.id = $2 LIMIT 1',
+                  [context.workspaceId, actorId],
+                );
+                if (uRes.rows.length > 0) {
+                  verifiedActorId = uRes.rows[0].id;
                 }
+              } catch {
+                verifiedActorId = null;
               }
-            } else if (actorId && isUuid.test(actorId)) {
-              verifiedActorId = actorId;
             }
             if (verifiedActorId) {
               try {

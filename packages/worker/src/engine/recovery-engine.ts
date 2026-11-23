@@ -78,7 +78,28 @@ export class RecoveryEngine {
     // Examine each batch in sequence
     for (const batch of objectBatches) {
       if (batch.status === 'COMMITTED') {
-        // Already durably committed, no action needed
+        const currentSeq = checkpoint?.lastCommittedSequenceNo ?? 0;
+        if (batch.sequenceNo > currentSeq) {
+          // Reliable reconciliation of committed batch with missing checkpoint:
+          // Advance checkpoint to reflect this committed batch!
+          await this.checkpointManager.advanceCheckpoint({
+            migrationRunId,
+            sourceObject,
+            batch,
+            planVersionId: 'resumed_plan',
+            mappingVersionId: 'resumed_mapping',
+            recordsCommittedCount: batch.recordsWritten ?? 0,
+            cursorEnd: batch.sourceCursorEnd,
+          });
+          checkpoint = await this.checkpointManager.getCheckpoint(migrationRunId, sourceObject);
+          reconciliationResults.push({
+            batchKey: batch.batchKey,
+            originalStatus: 'COMMITTED',
+            originalSubStage: batch.subStage,
+            resolvedStatus: 'COMMITTED',
+            actionTaken: `Committed batch ${batch.batchKey} had missing checkpoint advancement; reconciled checkpoint to sequence ${batch.sequenceNo}`,
+          });
+        }
         continue;
       }
 

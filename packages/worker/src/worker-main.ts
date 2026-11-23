@@ -546,6 +546,10 @@ async function reconcileStrandedRunsOnStartup(): Promise<void> {
         [runId],
       );
 
+      if (!row.plan_version_id && (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE !== 'true')) {
+        throw new Error(`[Worker Recovery] Missing plan_version_id for stranded run ${runId}. Startup recovery failed closed.`);
+      }
+
       let planRow: any = null;
       let objects: any[] = [];
 
@@ -579,27 +583,42 @@ async function reconcileStrandedRunsOnStartup(): Promise<void> {
         objects = Array.isArray(mappingJson.objects)
           ? mappingJson.objects
           : (mappingJson.source ? [mappingJson] : []);
+
+        if (objects.length === 0 && (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE !== 'true')) {
+          throw new Error(`[Worker Recovery] No mapped objects found on plan version ${row.plan_version_id} for stranded run ${runId}. Startup recovery failed closed.`);
+        }
       }
 
-      // Priority 6: Resolve each object's destination connector, mapping, and identity key independently.
-      // Never reuse the first object's identity key across different objects!
+      // Resolve each object's destination connector, mapping, and identity key independently.
+      // Fail closed when plan version, mapping, destination connector, or identity key is missing or ambiguous.
       for (const objRow of objectsRes.rows) {
+        if ((!objRow.source_object || !objRow.destination_object) && (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE !== 'true')) {
+          throw new Error(`[Worker Recovery] Ambiguous or missing source/destination object in batch for run ${runId}. Startup recovery failed closed.`);
+        }
         const srcObj = objRow.source_object || 'customers';
         const dstObj = objRow.destination_object || 'customers';
 
         let objDestConnector = defaultDestinationConnector;
-        let objDestKey = 'id';
+        let objDestKey: string | null = null;
 
         if (planRow) {
-          const matched = objects.find(
+          const exactMatches = objects.filter(
             (o: any) =>
               ((o.destination?.table || o.destination?.object || o.destination) === dstObj) &&
               ((o.source?.collection || o.source?.object || o.source) === srcObj),
-          ) || objects.find(
-            (o: any) =>
-              (o.destination?.table || o.destination?.object || o.destination) === dstObj ||
-              (o.source?.collection || o.source?.object || o.source) === srcObj,
-          ) || (objects.length === 1 ? objects[0] : null);
+          );
+
+          if (exactMatches.length > 1 && (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE !== 'true')) {
+            throw new Error(`[Worker Recovery] Ambiguous mapping: multiple objects match '${srcObj}' -> '${dstObj}' in run ${runId}. Startup recovery failed closed.`);
+          }
+
+          const matched = exactMatches.length === 1
+            ? exactMatches[0]
+            : (objects.length === 1 ? objects[0] : null);
+
+          if (!matched && (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE !== 'true')) {
+            throw new Error(`[Worker Recovery] No matching object mapping found for '${srcObj}' -> '${dstObj}' in plan version ${row.plan_version_id} for run ${runId}. Startup recovery failed closed.`);
+          }
 
           if (matched?.identity?.destinationKey || matched?.destination?.key || matched?.destination?.identityKey) {
             objDestKey = matched.identity?.destinationKey || matched.destination?.key || matched.destination?.identityKey;
@@ -608,12 +627,27 @@ async function reconcileStrandedRunsOnStartup(): Promise<void> {
           }
 
           const objDestConnId = matched?.destinationConnectionId || matched?.destination?.connectionId || planRow.destination_connection_id;
+          if (!objDestConnId && (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE !== 'true')) {
+            throw new Error(`[Worker Recovery] No destination connection configured for object '${dstObj}' in run ${runId}. Refusing control-plane fallback in production.`);
+          }
+
           if (objDestConnId) {
             objDestConnector = await getDestinationConnector({ destinationConnectionId: objDestConnId } as any);
             if (!objDestConnector) {
               throw new Error(`[Worker Recovery] Failed to resolve destination connector for connection ${objDestConnId} in run ${runId} for object ${dstObj}`);
             }
+          } else if (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE !== 'true') {
+            throw new Error(`[Worker Recovery] Missing destination connector for object '${dstObj}' in run ${runId}. Refusing control-plane fallback in production.`);
           }
+        } else if (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE !== 'true') {
+          throw new Error(`[Worker Recovery] Plan row missing for run ${runId}. Refusing control-plane fallback in production.`);
+        }
+
+        if (!objDestKey) {
+          if (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE !== 'true') {
+            throw new Error(`[Worker Recovery] Missing destination identity key for object '${dstObj}' in run ${runId}. Refusing default 'id' fallback in production.`);
+          }
+          objDestKey = 'id';
         }
 
         const recoveryEngine = new RecoveryEngine({
@@ -999,6 +1033,22 @@ async function startWorker() {
                 }
                 if (!nextPayload.destinationConnectionId && job.data.destinationConnectionId) {
                   nextPayload.destinationConnectionId = job.data.destinationConnectionId;
+                }
+
+                // Validate all required streaming metadata before outbox persistence
+                if (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE !== 'true') {
+                  if (!nextPayload.sourceObject || !nextPayload.destinationObject) {
+                    throw new Error(`[Worker Streaming] Missing required sourceObject or destinationObject for streaming batch ${nextPayload.batchKey}`);
+                  }
+                  if (!nextPayload.destinationKey) {
+                    throw new Error(`[Worker Streaming] Missing required destinationKey for streaming batch ${nextPayload.batchKey}`);
+                  }
+                  if (!nextPayload.planVersionId) {
+                    throw new Error(`[Worker Streaming] Missing required planVersionId for streaming batch ${nextPayload.batchKey}`);
+                  }
+                  if (!nextPayload.mappingVersionId) {
+                    throw new Error(`[Worker Streaming] Missing required mappingVersionId for streaming batch ${nextPayload.batchKey}`);
+                  }
                 }
 
                 console.log(`[Worker] Routing streaming batch through durable PENDING outbox: ${nextPayload.batchKey} (seq: ${nextPayload.sequenceNo})`);

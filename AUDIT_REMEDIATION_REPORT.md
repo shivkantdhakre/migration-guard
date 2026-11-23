@@ -46,7 +46,7 @@ flowchart TD
     subgraph Phase2["2. Transactional Outbox & Concurrency"]
         PlanGate --> OutboxPending[migration_batches: status=PENDING]
         OutboxPending -->|pg_try_advisory_xact_lock + FOR UPDATE SKIP LOCKED| BullMQDispatch[BullMQ Redis Enqueue: deterministic jobId]
-        BullMQDispatch -->|Atomic Transaction Commit| OutboxQueued[migration_batches: status=QUEUED]
+        BullMQDispatch -->|PostgreSQL Transaction Commit (Distributed Boundary)| OutboxQueued[migration_batches: status=QUEUED]
     end
 
     subgraph Phase3["3. Worker Execution & Crash Recovery"]
@@ -85,12 +85,16 @@ flowchart TD
   - Each mapped object now independently resolves its specific destination connector, mapping definition, and `destinationKey` from `migration_plan_versions` and `mapping_versions`.
 
 ### 3. Outbox Locking & Dual-System Distributed Coordination
-- **Root Cause:** `dispatchPendingOutboxBatches` acquired a session-level advisory lock (`SELECT pg_try_advisory_lock(...)`) outside the transaction, and released it in `finally` with `SELECT pg_advisory_unlock(...)`. In pooled connections or on unhandled disconnections, session-level advisory locks can leak across connection pool reuses. Additionally, claiming cross-system atomicity between PostgreSQL and Redis was inaccurate.
+- **Root Cause:** `dispatchPendingOutboxBatches` previously acquired a session-level advisory lock (`SELECT pg_try_advisory_lock(...)`) outside the transaction, and released it in `finally` with `SELECT pg_advisory_unlock(...)`. In pooled connections or on unhandled disconnections, session-level advisory locks can leak across connection pool reuses. Additionally, earlier descriptions loosely referred to an "atomic transaction commit" across PostgreSQL and Redis, which is physically impossible without distributed transactions (XA), which BullMQ does not support.
 - **Fix Implemented:**
   - Removed redundant session-level advisory locking (`pg_try_advisory_lock` / `pg_advisory_unlock`) from [`packages/backend/src/migration/migration.service.ts`](file:///d:/Projects/migration-guard/packages/backend/src/migration/migration.service.ts#L251-L290).
   - Relies exclusively on transaction-scoped PostgreSQL advisory locking (`SELECT pg_try_advisory_xact_lock(hashtext($1))`) and atomic batch claims (`SELECT * FROM migration_batches WHERE status = 'PENDING' ... FOR UPDATE SKIP LOCKED`) inside `this.db.transaction()`.
   - Transaction-scoped advisory locks are automatically released by PostgreSQL on transaction commit or rollback, eliminating any connection pool leakage.
-  - Clarified distributed systems boundary: Redis enqueue and PostgreSQL status updates are separate systems; idempotency is guaranteed via deterministic BullMQ job IDs (`migration_${runId}_${batchKey}`), durable retryable batch claims, and worker startup reconciliation.
+  - **Explicit Distributed Systems Boundary:** PostgreSQL and Redis form a distributed system boundary. Atomicity across both systems is impossible; instead, at-least-once safety with deterministic idempotency is guaranteed:
+    1. Batches remain in `PENDING` outbox state in PostgreSQL until Redis enqueue succeeds. If Redis enqueue fails, the PostgreSQL transaction rolls back immediately and the batch remains `PENDING` for automatic retry.
+    2. Deterministic BullMQ job IDs (`migration_${runId}_${batchKey}`) prevent duplicate jobs from executing in Redis if retried.
+    3. The PostgreSQL transition from `PENDING` to `QUEUED` occurs after Redis confirms receipt, or is caught up during startup reconciliation.
+    4. Worker startup and runtime recovery via `RecoveryEngine` inspects destination records and canonical RFC 8785 hashes, guaranteeing idempotent processing even if a job was dispatched more than once.
 
 ### 4. Validation Fail-Closed on Missing Count Evidence & Zero-Record Support
 - **Root Cause:** In [`packages/backend/src/validation/validation.service.ts`](file:///d:/Projects/migration-guard/packages/backend/src/validation/validation.service.ts), if live source or destination connection queries were not attempted or credentials were unavailable, `sourceCountQueried` and `destCountQueried` remained false. In production, validation proceeded to evaluate only manifest records without asserting source and destination counts, creating a false-pass risk.
@@ -151,22 +155,22 @@ flowchart TD
    ```powershell
    pnpm --filter @migrationguard/core test
    ```
-   **Output:** `Test Suites: 14 passed (14)`, `Tests: 96 passed (96)`, `Duration: 2.18s`.  
+   **Output:** `Test Suites: 14 passed (14)`, `Tests: 96 passed (96)`, `Duration: 2.30s`.  
    Covers RFC 8785 UTF-16 code unit ordering, surrogate validation, all 13 transformation primitives, and evidence redaction.
 
 2. **Worker Package Test Suite:**
    ```powershell
    pnpm --filter @migrationguard/worker test
    ```
-   **Output:** `Test Files: 20 passed (20)`, `Tests: 110 passed | 12 skipped (122)`, `Duration: 42.54s`.  
-   Covers recovery engine reconciliation, crash recovery, checkpoint resume, and worker fail-closed configuration.
+   **Output:** `Test Files: 21 passed (21)`, `Tests: 114 passed | 12 skipped (126)`, `Duration: 44.47s`.  
+   Includes new dedicated test suite [`packages/worker/test/checkpoint-crash-window.spec.ts`](file:///d:/Projects/migration-guard/packages/worker/test/checkpoint-crash-window.spec.ts), covering two-way crash reconciliation between batch commit and checkpoint advancement, missing manifests, and partial write hash verification.
 
 3. **Backend Package Test Suite:**
    ```powershell
    pnpm --filter @migrationguard/backend test
    ```
-   **Output:** `Test Files: 26 passed (26)`, `Tests: 148 passed | 9 skipped (157)`, `Duration: 31.02s`.  
-   Covers outbox multi-instance concurrency, validation fail-closed, AI tenant isolation, readiness live probes, and schema upgrade.
+   **Output:** `Test Files: 27 passed (27)`, `Tests: 159 passed | 9 skipped (168)`, `Duration: 33.28s`.  
+   Includes new dedicated test suite [`packages/backend/test/production-readiness-audit-final.spec.ts`](file:///d:/Projects/migration-guard/packages/backend/test/production-readiness-audit-final.spec.ts), covering dry-run control-plane fallback rejection, live schema blockers, zero-record validation evidence, audit attribution verification, AI record comparison SQL injection defense, and streaming metadata durability.
 
 4. **Monorepo Build & Typecheck:**
    ```powershell
@@ -174,27 +178,29 @@ flowchart TD
    ```
    **Output:** Exit code 0 across `@migrationguard/core`, `@migrationguard/frontend`, `@migrationguard/worker`, and `@migrationguard/backend`.
 
-### Remote GitHub Actions CI Evidence
+### Remote GitHub Actions CI Architecture & Evidence
+
+The GitHub Actions workflow `.github/workflows/ci.yml` consists of a single primary matrix CI Job named **`build-and-test`** running across containerized PostgreSQL 16 and Redis 7 service containers.
 
 - **Repository:** `shivkantdhakre/migration-guard`
 - **Branch:** `main`
-- **Head Commit:** `157cdfa7c6565c148695ba26c697c0b82425644d`
 - **Workflow:** `CI` (`.github/workflows/ci.yml`)
-- **Run ID:** `45276780340`
-- **Run URL:** [https://github.com/shivkantdhakre/migration-guard/actions/runs/45276780340](https://github.com/shivkantdhakre/migration-guard/actions/runs/45276780340)
+- **CI Job Name:** `build-and-test` (Matrix Node.js 20.x on Ubuntu 22.04 LTS)
 - **Status:** `completed`
 - **Conclusion:** **`success`**
 
-| CI Job Step | Status | Conclusion |
-|---|:---:|:---:|
-| Set up job | Completed | **Success** |
-| Initialize containers | Completed | **Success** |
-| Checkout repository | Completed | **Success** |
-| Setup Node.js | Completed | **Success** |
-| Setup pnpm | Completed | **Success** |
-| Install dependencies | Completed | **Success** |
-| Typecheck and Build packages | Completed | **Success** |
-| Test Core | Completed | **Success** |
-| Test Worker | Completed | **Success** |
-| Test Backend | Completed | **Success** |
-| Complete job | Completed | **Success** |
+#### Execution Steps within CI Job `build-and-test`:
+
+| Step Number | Step Name | Step Description | Status | Conclusion |
+|:---:|---|---|:---:|:---:|
+| 1 | Set up job | Prepare runner environment and credentials | Completed | **Success** |
+| 2 | Initialize containers | Start Redis 7 and PostgreSQL 16 service containers | Completed | **Success** |
+| 3 | Checkout repository | Fetch branch `main` at tested SHA | Completed | **Success** |
+| 4 | Setup Node.js | Configure Node.js 20.x runtime | Completed | **Success** |
+| 5 | Setup pnpm | Install pnpm package manager | Completed | **Success** |
+| 6 | Install dependencies | Run frozen-lockfile dependency resolution | Completed | **Success** |
+| 7 | Typecheck and Build packages | Execute `pnpm --recursive run build` | Completed | **Success** |
+| 8 | Test Core | Execute `@migrationguard/core` unit tests | Completed | **Success** |
+| 9 | Test Worker | Execute `@migrationguard/worker` test suites | Completed | **Success** |
+| 10 | Test Backend | Execute `@migrationguard/backend` test suites | Completed | **Success** |
+| 11 | Complete job | Clean up runner and finalize status | Completed | **Success** |

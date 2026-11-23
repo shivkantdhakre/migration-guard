@@ -53,8 +53,8 @@ export class ValidationService {
         {
           error: errorReason,
           executionStatus: 'ERROR',
-          outcome: 'ERROR',
-          overallStatus: 'ERROR',
+          outcome: 'FAILED',
+          overallStatus: 'FAILED',
         },
       ],
     );

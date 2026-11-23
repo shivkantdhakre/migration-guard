@@ -268,6 +268,10 @@ export class DryRunService {
                 } finally {
                   await pool.end().catch(() => {});
                 }
+              } else if (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false') {
+                throw new BadRequestException(
+                  `Cannot sample source records for '${sourceObj}': source PostgreSQL requires dedicated external connection credentials. Control-plane database substitution is strictly forbidden in production.`,
+                );
               } else {
                 try {
                   const sRes = await this.db.query(`SELECT * FROM "${sourceObj}" LIMIT 500`);

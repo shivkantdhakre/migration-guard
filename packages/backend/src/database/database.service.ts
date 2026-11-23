@@ -716,6 +716,28 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
 
     let results = Array.from(table.values()).map((r) => ({ ...r }));
 
+    // If query has JOIN workspace_members wm, enrich rows with workspace_members info
+    if (/JOIN\s+workspace_members\s+/i.test(sql)) {
+      const wmTable = this.memoryStore.get('workspace_members');
+      if (wmTable) {
+        const enriched: any[] = [];
+        for (const r of results) {
+          const members = Array.from(wmTable.values()).filter(
+            (wm: any) => wm.user_id === (r.id || r.user_id),
+          );
+          for (const wm of members) {
+            enriched.push({
+              ...r,
+              workspace_id: wm.workspace_id,
+              member_role: wm.role,
+              role: wm.role,
+            });
+          }
+        }
+        results = enriched;
+      }
+    }
+
     // If query has JOIN users u, enrich rows with user info
     if (/JOIN\s+users\s+/i.test(sql)) {
       const usersTable = this.memoryStore.get('users');
@@ -732,6 +754,26 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
               actor_name: u.name,
               approver_email: u.email,
               approver_name: u.name,
+            };
+          }
+          return r;
+        });
+      }
+    }
+
+    // If query has JOIN migration_runs mr, enrich rows with run info
+    if (/JOIN\s+migration_runs\s+/i.test(sql)) {
+      const runsTable = this.memoryStore.get('migration_runs');
+      if (runsTable) {
+        results = results.map((r) => {
+          const runId = r.migration_run_id || r.run_id || r.id;
+          if (runId && runsTable.has(runId)) {
+            const run = runsTable.get(runId);
+            return {
+              ...r,
+              workspace_id: run.workspace_id,
+              project_id: run.project_id,
+              plan_version_id: run.plan_version_id,
             };
           }
           return r;

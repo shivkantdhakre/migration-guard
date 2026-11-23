@@ -991,7 +991,7 @@ describe('P0/P1 Regression: Schema Discovery Fail-Closed', () => {
       }
 
       if (profileResult) {
-        const summary = profileResult.summary || profileResult;
+        const summary = profileResult.summary_json || profileResult.summary || profileResult;
         // Must NOT contain hardcoded values like 2.4, 15.1
         const str = JSON.stringify(summary);
         expect(str).not.toMatch(/2\.4/);
@@ -1217,6 +1217,16 @@ describe('P0/P1 Regression: AI Tool Guard and Real Telemetry (Requirement 9)', (
       actorId: '33333333-3333-3333-3333-333333333333',
       actorRole: 'ENGINEER' as const,
     };
+
+    // Seed verified actor and workspace membership in database
+    await db.query(
+      'INSERT INTO users (id, email, name) VALUES ($1, $2, $3)',
+      [context.actorId, 'engineer@example.com', 'Engineer User'],
+    );
+    await db.query(
+      'INSERT INTO workspace_members (id, workspace_id, user_id, role) VALUES ($1, $2, $3, $4)',
+      ['44444444-4444-4444-4444-444444444444', context.workspaceId, context.actorId, 'ENGINEER'],
+    );
 
     // 1. compare_sample_records: missing records return NOT_FOUND (never canned synthetic data)
     const compareRes = await ToolCatalog.executeTool({

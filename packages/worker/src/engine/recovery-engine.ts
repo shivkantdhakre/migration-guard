@@ -195,6 +195,42 @@ export class RecoveryEngine {
               foundKeyMap.set(String(r.destinationKey), r.data);
             }
           }
+
+          // Issue 2: Verify content integrity via hash comparison when canonicalHash is available
+          let hashMismatchCount = 0;
+          const { createHash } = await import('node:crypto');
+          for (const manifest of manifests) {
+            const foundRecord = foundKeyMap.get(manifest.destinationKey);
+            if (!foundRecord) continue;
+            if (manifest.contentHash) {
+              // compute hash of foundRecord data and compare against stored manifest hash
+              const foundHash = createHash('sha256')
+                .update(JSON.stringify(foundRecord))
+                .digest('hex');
+              if (foundHash !== manifest.contentHash) {
+                // content mismatch - cannot confirm write was correct
+                hashMismatchCount++;
+              }
+            }
+          }
+
+          if (hashMismatchCount > 0) {
+            // Partial or corrupt write detected; reset for safe idempotent replay
+            await this.manifestTracker.transitionState(
+              batch.migrationRunId,
+              batch.batchKey,
+              'RETRY_WAIT',
+              'IDLE',
+            );
+            return {
+              batchKey: batch.batchKey,
+              originalStatus: status,
+              originalSubStage: subStage,
+              resolvedStatus: 'RETRY_WAIT',
+              actionTaken: `Content hash mismatch for ${hashMismatchCount} record(s); treated as PARTIAL_WRITE and reset to RETRY_WAIT`,
+            };
+          }
+
           allKeysFound =
             foundKeyMap.size === destinationKeys.length &&
             destinationKeys.every((k) => foundKeyMap.has(k));

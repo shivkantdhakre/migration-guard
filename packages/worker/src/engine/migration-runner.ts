@@ -48,6 +48,10 @@ export class MigrationRunner {
   private recoveryEngine: RecoveryEngine;
 
   // Run states by runId
+  // NOTE: In-memory state is authoritative only within the current process lifetime.
+  // Persistent state recovery uses PostgreSQL checkpoints and batch manifests.
+  // On worker restart, resume() re-reconciles via RecoveryEngine.prepareResume() which
+  // reads durable state from PostgreSQL — in-memory maps are not persisted intentionally.
   private runStatuses = new Map<string, MigrationRunStatus>();
   private abortControllers = new Map<string, AbortController>();
   private activeConfigs = new Map<string, StartMigrationConfig>();

@@ -28,8 +28,11 @@ export class SchemaController {
   }
 
   @Get('schema-discovery-jobs/:jobId')
-  async getDiscoveryJob(@Param('jobId') jobId: string) {
-    return this.schemaService.getDiscoveryJob(jobId);
+  async getDiscoveryJob(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('jobId') jobId: string,
+  ) {
+    return this.schemaService.getDiscoveryJob(jobId, user.id);
   }
 
   @Get('connections/:connectionId/schema-snapshots')

@@ -86,7 +86,7 @@ export class PlanController {
     @Param('versionId') versionId: string,
   ) {
     await this.planService.getPlanVersion(versionId, user.id);
-    return this.dryRunService.startDryRun(versionId);
+    return this.dryRunService.startDryRun(versionId, user.id);
   }
 
   @Get('dry-runs/:dryRunId')

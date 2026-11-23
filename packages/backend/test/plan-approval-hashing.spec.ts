@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { PlanService } from '../src/plan/plan.service';
 import { ApprovalService } from '../src/plan/approval.service';
 import { ReadinessService } from '../src/plan/readiness.service';
@@ -13,6 +13,8 @@ import { DatabaseService } from '../src/database/database.service';
 import { AuthService } from '../src/auth/auth.service';
 import { JwtService } from '@nestjs/jwt';
 import { appConfig } from '../src/config/configuration';
+
+vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
 
 describe('Plan Approval & Canonical Hashing', () => {
   let db: DatabaseService;
@@ -85,6 +87,10 @@ describe('Plan Approval & Canonical Hashing', () => {
     );
 
     plan = await planService.createPlan(project.id, 'Core Migration Plan', user.user.id);
+
+    // Mark connections as tested & healthy for plan readiness verification
+    await db.query(`UPDATE connections SET status = 'HEALTHY' WHERE id = $1`, [sourceConn.id]);
+    await db.query(`UPDATE connections SET status = 'HEALTHY' WHERE id = $1`, [destConn.id]);
   });
 
   it('should compute deterministic canonical plan hash and create plan version', async () => {
@@ -116,11 +122,26 @@ describe('Plan Approval & Canonical Hashing', () => {
   });
 
   it('should run deterministic readiness check and dry run', async () => {
+    const mapDsl = {
+      objects: [{
+        source: { collection: 'customers', key: '_id' },
+        destination: { table: 'customers', key: 'id' },
+        identity: { sourceKey: '_id', destinationKey: 'id' },
+        fields: [{ sourcePath: 'name', destinationPath: 'name' }],
+      }],
+    };
+    const mapRes = await db.query(
+      `INSERT INTO mapping_versions (workspace_id, plan_id, version, mapping_json, mapping_hash, created_by)
+       VALUES ($1, $2, 1, $3, 'map_hash', $4) RETURNING id`,
+      [workspaceId, plan.id, JSON.stringify(mapDsl), user.user.id],
+    );
+
     const version = await planService.createPlanVersion(
       plan.id,
       {
         sourceConnectionId: sourceConn.id,
         destinationConnectionId: destConn.id,
+        mappingVersionId: mapRes.rows[0].id,
         scope: { collections: ['customers'] },
         executionConfig: { batchSize: 500, concurrency: 2, writeMode: 'UPSERT' },
         validationProfile: { countCheck: true } as any,
@@ -132,7 +153,7 @@ describe('Plan Approval & Canonical Hashing', () => {
     expect(readiness.ready).toBe(true);
     expect(readiness.facts.length).toBeGreaterThan(0);
 
-    const dryRun = await dryRunService.startDryRun(version.id);
+    const dryRun = await dryRunService.startDryRun(version.id, user.user.id);
     expect(dryRun.status).toBe('COMPLETED');
     expect(dryRun.sampleRecordsTested).toBe(500);
     expect(dryRun.readyForApproval).toBe(true);

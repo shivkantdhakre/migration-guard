@@ -122,6 +122,21 @@ export class MigrationService implements OnModuleInit, OnModuleDestroy {
     const payloads: MigrationJobPayload[] = [];
     let overallSeq = 0;
 
+    // Resolve mapping version for identity keys (Requirement 4 & 5)
+    let mappingObjects: any[] = [];
+    if (version.mapping_version_id) {
+      const mapRes = await this.db.query(
+        'SELECT mapping_json FROM mapping_versions WHERE id = $1',
+        [version.mapping_version_id],
+      );
+      if (mapRes.rows.length > 0) {
+        const m = typeof mapRes.rows[0].mapping_json === 'string'
+          ? JSON.parse(mapRes.rows[0].mapping_json)
+          : mapRes.rows[0].mapping_json;
+        mappingObjects = Array.isArray(m?.objects) ? m.objects : (m ? [m] : []);
+      }
+    }
+
     // Support dynamic streaming: if batchesPerTable is not explicitly configured,
     // seed initial streaming batch (seq 1, cursorStart = null) per collection/table.
     // The worker's streaming scheduler (onNextBatchScheduled) continues reading dynamically.
@@ -131,6 +146,13 @@ export class MigrationService implements OnModuleInit, OnModuleDestroy {
       const sourceObject = table.source;
       const destinationObject = table.destination;
       const numBatches = explicitBatchesPerTable || 1;
+
+      const matched = mappingObjects.find(
+        (o: any) =>
+          (o.source?.collection || o.source?.object || o.source) === sourceObject ||
+          (o.destination?.table || o.destination?.object || o.destination) === destinationObject,
+      );
+      const destKey = matched?.identity?.destinationKey || matched?.destination?.key || 'id';
 
       for (let i = 1; i <= numBatches; i++) {
         overallSeq++;
@@ -176,6 +198,7 @@ export class MigrationService implements OnModuleInit, OnModuleDestroy {
           planVersionId,
           mappingVersionId: version.mapping_version_id || 'default-mapping',
           writeMode,
+          conflictColumns: [destKey],
           sourceConnectionId: version.source_connection_id,
           destinationConnectionId: version.destination_connection_id,
         });
@@ -230,18 +253,52 @@ export class MigrationService implements OnModuleInit, OnModuleDestroy {
       const bRunId = b.migration_run_id;
       let version = planCache.get(bRunId);
       if (!version) {
-        const planRes = await this.db.query(
-          `SELECT mpv.* FROM migration_plan_versions mpv
-           JOIN migration_runs mr ON mr.plan_version_id = mpv.id
-           WHERE mr.id = $1`,
+        const runRes = await this.db.query(
+          `SELECT plan_version_id FROM migration_runs WHERE id = $1`,
           [bRunId],
         );
-        version = planRes.rows[0];
-        planCache.set(bRunId, version);
+        if (runRes.rows.length > 0 && runRes.rows[0].plan_version_id) {
+          const planRes = await this.db.query(
+            `SELECT * FROM migration_plan_versions WHERE id = $1`,
+            [runRes.rows[0].plan_version_id],
+          );
+          version = planRes.rows[0];
+          planCache.set(bRunId, version);
+        }
       }
 
       const batchSize = version?.execution_config_json?.batchSize || 1000;
       const writeMode = version?.execution_config_json?.writeMode || 'upsert';
+
+      // Resolve destinationKey from mapping version
+      let destKey = 'id';
+      const mapVersionId = b.mapping_version_id || version?.mapping_version_id;
+      if (mapVersionId) {
+        let mappingJson = planCache.get(`map_${mapVersionId}`);
+        if (!mappingJson) {
+          const mapRes = await this.db.query(
+            'SELECT mapping_json FROM mapping_versions WHERE id = $1',
+            [mapVersionId],
+          );
+          if (mapRes.rows.length > 0) {
+            mappingJson = typeof mapRes.rows[0].mapping_json === 'string'
+              ? JSON.parse(mapRes.rows[0].mapping_json)
+              : mapRes.rows[0].mapping_json;
+            planCache.set(`map_${mapVersionId}`, mappingJson);
+          }
+        }
+        const objects: any[] = Array.isArray(mappingJson?.objects)
+          ? mappingJson.objects
+          : (mappingJson ? [mappingJson] : []);
+        const matched = objects.find(
+          (o: any) =>
+            (o.source?.collection || o.source?.object || o.source) === b.source_object ||
+            (o.destination?.table || o.destination?.object || o.destination) === b.destination_object,
+        );
+        if (matched?.identity?.destinationKey || matched?.destination?.key) {
+          destKey = matched.identity?.destinationKey || matched?.destination?.key;
+        }
+      }
 
       payloads.push({
         jobId: b.attempt_count > 0 ? `${bRunId}_${b.batch_key}_att${b.attempt_count}` : `${bRunId}_${b.batch_key}`,
@@ -256,11 +313,13 @@ export class MigrationService implements OnModuleInit, OnModuleDestroy {
         planVersionId: version?.id || '',
         mappingVersionId: b.mapping_version_id || version?.mapping_version_id || 'default-mapping',
         writeMode,
+        conflictColumns: [destKey],
         sourceConnectionId: version?.source_connection_id,
         destinationConnectionId: version?.destination_connection_id,
       });
     }
 
+    // Only transition PENDING -> QUEUED after successful queue dispatch
     await this.queueService.dispatchBatches(payloads);
     for (const p of payloads) {
       await this.db.query(

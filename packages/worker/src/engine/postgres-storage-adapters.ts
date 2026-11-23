@@ -21,6 +21,19 @@ export class PostgresStorageAdapters
 {
   private pool: pg.Pool;
 
+  /**
+   * Validates that a string is a safe SQL identifier (table name, column name, object name).
+   * Rejects any value that does not match /^[a-zA-Z_][a-zA-Z0-9_]*$/ to prevent SQL injection
+   * when identifiers must be used in dynamic SQL or as JSONB key paths.
+   */
+  private static validateIdentifier(value: string, fieldName: string): void {
+    if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(value)) {
+      throw new Error(
+        `Invalid SQL identifier for '${fieldName}': '${value}'. Identifiers must match /^[a-zA-Z_][a-zA-Z0-9_]*$/.`,
+      );
+    }
+  }
+
   constructor(poolOrConnectionString: pg.Pool | string) {
     if (typeof poolOrConnectionString === 'string') {
       this.pool = new pg.Pool({
@@ -297,6 +310,7 @@ export class PostgresStorageAdapters
    * commit batches for the same migration run.
    */
   async advanceCheckpoint(params: CheckpointAdvanceParams): Promise<MigrationCheckpoint> {
+    PostgresStorageAdapters.validateIdentifier(params.sourceObject, 'sourceObject');
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
@@ -353,6 +367,7 @@ export class PostgresStorageAdapters
    * Save checkpoint directly within a row-locked transaction.
    */
   async saveCheckpoint(checkpoint: MigrationCheckpoint): Promise<void> {
+    PostgresStorageAdapters.validateIdentifier(checkpoint.sourceObject, 'sourceObject');
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');

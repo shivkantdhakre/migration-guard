@@ -1,6 +1,7 @@
 import {
   Injectable,
   NotFoundException,
+  BadRequestException,
   Optional,
 } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
@@ -13,6 +14,15 @@ import {
   generateSyntheticDataset,
   injectFaults,
 } from '@migrationguard/core';
+
+/** Only allow safe SQL identifiers: letters, digits, underscores, starting with letter/underscore */
+function assertSafeIdentifier(name: string, context: string): void {
+  if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name)) {
+    throw new BadRequestException(
+      `Unsafe SQL identifier rejected in ${context}: "${name}". Only [a-zA-Z_][a-zA-Z0-9_]* allowed.`,
+    );
+  }
+}
 
 @Injectable()
 export class ValidationService {
@@ -82,7 +92,8 @@ export class ValidationService {
             srcConn.credential_version,
           );
         } catch (err: any) {
-          console.warn(`[ValidationService] Source credentials notice: ${err.message}`);
+          await this.recordFailedValidation(run.workspace_id, runId, `Source credential fetch failed: ${err.message}`);
+          throw new Error(`Source credential fetch failed: ${err.message}. Validation failed closed.`);
         }
       }
     }
@@ -107,7 +118,8 @@ export class ValidationService {
             destConn.credential_version,
           );
         } catch (err: any) {
-          console.warn(`[ValidationService] Destination credentials notice: ${err.message}`);
+          await this.recordFailedValidation(run.workspace_id, runId, `Destination credential fetch failed: ${err.message}`);
+          throw new Error(`Destination credential fetch failed: ${err.message}. Validation failed closed.`);
         }
       }
     }
@@ -130,15 +142,14 @@ export class ValidationService {
     }
 
     if (objectMappings.length === 0) {
-      objectMappings.push({
-        source: { collection: 'customers', key: 'id' },
-        destination: { table: 'customers', key: 'id' },
-        identity: { sourceKey: 'id', destinationKey: 'id' },
-        fields: [
-          { sourcePath: 'name', destinationPath: 'name' },
-          { sourcePath: 'email', destinationPath: 'email' },
-        ],
-      });
+      await this.recordFailedValidation(
+        run.workspace_id,
+        runId,
+        'No object mappings found in plan version. Cannot validate without an explicit approved mapping.',
+      );
+      throw new Error(
+        'No object mappings found in plan version mapping_json. Validation failed closed — refusing to fabricate a default mapping.',
+      );
     }
 
     const parseDateSafe = (d: any) => {
@@ -150,6 +161,9 @@ export class ValidationService {
     // Helper: read source documents from real MongoDB or PostgreSQL fallback
     const fetchSourceRecords = async (sourceObjectName: string, sourceKeyField: string, sourceKeys: string[]): Promise<any[]> => {
       if (sourceKeys.length === 0) return [];
+
+      // Validate identifier to prevent SQL injection
+      assertSafeIdentifier(sourceObjectName, 'fetchSourceRecords');
 
       // 1. Live MongoDB connection using decrypted credentials
       if (srcConn?.engine === 'MONGODB' && sourceCredentials) {
@@ -179,15 +193,46 @@ export class ValidationService {
             await client.close().catch(() => {});
             if (docs.length > 0) return docs;
           } catch (mErr: any) {
-            console.warn(`[ValidationService] Live MongoDB fetch notice: ${mErr.message}`);
+            // Issue 3 fix: fail closed in ALL environments when MongoDB credentials exist but query fails
+            throw new Error(`Failed to query source MongoDB for ${sourceObjectName}: ${mErr.message}`);
+          }
+        }
+      }
+
+      // 2. Live PostgreSQL source connection using decrypted credentials
+      if (srcConn?.engine === 'POSTGRESQL' && sourceCredentials) {
+        const connStr = sourceCredentials.connectionString || sourceCredentials.uri;
+        if (connStr && connStr !== appConfig.databaseUrl) {
+          try {
+            const pg = require('pg');
+            const pool = new pg.Pool({ connectionString: connStr, connectionTimeoutMillis: 2000 });
+            try {
+              assertSafeIdentifier(sourceObjectName, 'fetchSourceRecords source pg table');
+              assertSafeIdentifier(sourceKeyField, 'fetchSourceRecords source pg key');
+              const sRes = await pool.query(
+                `SELECT * FROM "${sourceObjectName}" WHERE "${sourceKeyField}" = ANY($1)`,
+                [sourceKeys],
+              );
+              if (sRes.rows.length > 0) return sRes.rows;
+            } finally {
+              await pool.end().catch(() => {});
+            }
+          } catch (pErr: any) {
             if (process.env.NODE_ENV === 'production') {
-              throw new Error(`Failed to query source MongoDB for ${sourceObjectName}: ${mErr.message}`);
+              throw new Error(`Failed to query source PostgreSQL for ${sourceObjectName}: ${pErr.message}`);
             }
           }
         }
       }
 
-      // 2. Query separate source table in PostgreSQL (e.g. source_customers)
+      // In production: no local DB fallback for source records
+      if (process.env.NODE_ENV === 'production') {
+        throw new Error(
+          `Source records for ${sourceObjectName} could not be retrieved from live source connection. Validation failed closed.`,
+        );
+      }
+
+      // Non-production test harness fallback (e.g. source_customers or customers in test DB)
       try {
         const sRes = await this.db.query(`SELECT * FROM "source_${sourceObjectName}"`);
         const matched = sRes.rows.filter((r: any) =>
@@ -211,6 +256,10 @@ export class ValidationService {
     const fetchDestRecords = async (destObjectName: string, destKeyField: string, destKeys: string[]): Promise<any[]> => {
       if (destKeys.length === 0) return [];
 
+      // Validate identifier to prevent SQL injection
+      assertSafeIdentifier(destObjectName, 'fetchDestRecords');
+      assertSafeIdentifier(destKeyField, 'fetchDestRecords key field');
+
       // 1. External PostgreSQL destination if distinct connection configured
       if (destConn?.engine === 'POSTGRESQL' && destCredentials) {
         const connStr = destCredentials.connectionString || destCredentials.uri;
@@ -228,12 +277,23 @@ export class ValidationService {
               await pool.end().catch(() => {});
             }
           } catch (pErr: any) {
+            // In production, external destination query failures must fail closed
+            if (process.env.NODE_ENV === 'production') {
+              throw new Error(`Failed to query destination PostgreSQL for ${destObjectName}: ${pErr.message}`);
+            }
             console.warn(`[ValidationService] Live PostgreSQL destination query notice: ${pErr.message}`);
           }
         }
       }
 
-      // 2. Query destination table in local database
+      // Issue 3 fix: No local DB fallback for destination in production
+      if (process.env.NODE_ENV === 'production') {
+        throw new Error(
+          `Destination records for ${destObjectName} could not be fetched: no external destination connection available. Validation failed closed.`,
+        );
+      }
+
+      // Non-production only: query local DB for testing purposes
       try {
         const dRes = await this.db.query(`SELECT * FROM "${destObjectName}"`);
         return dRes.rows.filter((r: any) =>
@@ -267,13 +327,81 @@ export class ValidationService {
 
       objectsValidated.push(`${sourceObjectName} -> ${destObjectName}`);
 
-      // Load manifests scoped to this exact run and object mapping
+      // Issue 2 fix: Independent count check — enumerate ALL source and destination records
+      // regardless of what is in record_manifests. This catches 0-record silent-pass scenarios.
+      let sourceCount = 0;
+      let destCount = 0;
+
+      if (srcConn?.engine === 'MONGODB' && sourceCredentials) {
+        const uri = sourceCredentials.uri || sourceCredentials.connectionString;
+        if (uri) {
+          try {
+            const { MongoClient } = require('mongodb');
+            const client = new MongoClient(uri, { serverSelectionTimeoutMS: 2000 });
+            await client.connect();
+            const dbName = srcConn.config_json?.database;
+            const coll = client.db(dbName).collection(sourceObjectName);
+            sourceCount = await coll.countDocuments();
+            await client.close().catch(() => {});
+          } catch (cErr: any) {
+            console.warn(`[ValidationService] Source count query failed: ${cErr.message}`);
+          }
+        }
+      }
+
+      if (destConn?.engine === 'POSTGRESQL' && destCredentials) {
+        const connStr = destCredentials.connectionString || destCredentials.uri;
+        if (connStr && connStr !== appConfig.databaseUrl) {
+          try {
+            const pg = require('pg');
+            const pool = new pg.Pool({ connectionString: connStr, connectionTimeoutMillis: 2000 });
+            try {
+              assertSafeIdentifier(destObjectName, 'COUNT_MISMATCH dest count');
+              const cRes = await pool.query(`SELECT COUNT(*) AS cnt FROM "${destObjectName}"`);
+              destCount = parseInt(cRes.rows[0]?.cnt ?? '0', 10);
+            } finally {
+              await pool.end().catch(() => {});
+            }
+          } catch (cErr: any) {
+            console.warn(`[ValidationService] Destination count query failed: ${cErr.message}`);
+          }
+        }
+      }
+
+      // Add COUNT_MISMATCH check result — this is PRIMARY, manifest-based check is SUPPLEMENTARY
+      if (sourceCount > 0 || destCount > 0) {
+        const countMatches = sourceCount === destCount;
+        allCheckResults.push({
+          checkId: `COUNT_MISMATCH_${sourceObjectName}`,
+          checkName: `Record Count: ${sourceObjectName} → ${destObjectName}`,
+          evaluatedCount: 1,
+          passedCount: countMatches ? 1 : 0,
+          failedCount: countMatches ? 0 : 1,
+          failCount: countMatches ? 0 : 1,
+          durationMs: 0,
+          state: countMatches ? 'PASS' : 'FAIL',
+        });
+        if (!countMatches) {
+          allDiscrepancies.push({
+            category: 'RECORD_COUNT_MISMATCH',
+            severity: 'CRITICAL',
+            sourceObject: sourceObjectName,
+            destinationObject: destObjectName,
+            sourceKey: 'N/A',
+            destinationKey: 'N/A',
+            explanation: `Source count (${sourceCount}) does not match destination count (${destCount}) for ${sourceObjectName} → ${destObjectName}.`,
+          });
+        }
+      }
+
+      // Load manifests scoped to this exact run and object mapping (Requirement 2: exact mapping identity)
       const manifestsRes = await this.db.query(
         `SELECT * FROM record_manifests
          WHERE migration_run_id = $1
-           AND (source_object = $2 OR destination_object = $3 OR $4 = 1)
+           AND source_object = $2
+           AND destination_object = $3
          ORDER BY created_at ASC`,
-        [runId, sourceObjectName, destObjectName, objectMappings.length],
+        [runId, sourceObjectName, destObjectName],
       );
       const manifests = manifestsRes.rows;
 
@@ -352,14 +480,20 @@ export class ValidationService {
         };
       }
 
-      // Configure field rules from approved object mapping
+      // Configure field rules from approved object mapping (Requirement 3: preserve sourcePath and destinationPath)
       const fieldRules = Array.isArray(obj.fields)
-        ? obj.fields.map((f: any) => ({
-            fieldPath: f.destinationPath || f.sourcePath || f.destination || f.source || f.fieldPath || f.field,
-          }))
+        ? obj.fields.map((f: any) => {
+            const sPath = f.sourcePath || f.source || f.field || f.fieldPath;
+            const dPath = f.destinationPath || f.destination || f.field || f.fieldPath;
+            return {
+              fieldPath: dPath || sPath,
+              sourcePath: sPath,
+              destinationPath: dPath,
+            };
+          })
         : [
-            { fieldPath: 'name' },
-            { fieldPath: 'email' },
+            { fieldPath: 'name', sourcePath: 'name', destinationPath: 'name' },
+            { fieldPath: 'email', sourcePath: 'email', destinationPath: 'email' },
           ];
 
       const engine = new ValidationEngine({

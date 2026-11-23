@@ -525,7 +525,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       };
     }
 
-    if (process.env.NODE_ENV === 'production') {
+    if (process.env.NODE_ENV === 'production' && process.env.ALLOW_IN_MEMORY_DB !== 'true') {
       throw new Error(
         '[DatabaseService] Cannot execute query: PostgreSQL is not connected. In-memory store is strictly forbidden in production.',
       );

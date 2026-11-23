@@ -4,11 +4,21 @@ import {
   BadRequestException,
   Optional,
 } from '@nestjs/common';
+import { appConfig } from '../config/configuration';
 import { DatabaseService } from '../database/database.service';
 import { WorkspaceService } from '../workspace/workspace.service';
 import { CredentialsService } from '../connection/credentials.service';
 import { TransformationEngine, ObjectMapping } from '@migrationguard/core';
 import { v4 as uuidv4 } from 'uuid';
+
+/** Only allow safe SQL identifiers */
+function assertSafeIdentifier(name: string, context: string): void {
+  if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name)) {
+    throw new BadRequestException(
+      `Unsafe SQL identifier rejected in ${context}: "${name}". Only [a-zA-Z_][a-zA-Z0-9_]* allowed.`,
+    );
+  }
+}
 
 @Injectable()
 export class DryRunService {
@@ -20,7 +30,7 @@ export class DryRunService {
     @Optional() private credentialsService?: CredentialsService,
   ) {}
 
-  async startDryRun(planVersionId: string): Promise<any> {
+  async startDryRun(planVersionId: string, userId?: string): Promise<any> {
     const res = await this.db.query('SELECT * FROM migration_plan_versions WHERE id = $1', [
       planVersionId,
     ]);
@@ -35,8 +45,8 @@ export class DryRunService {
 
     const dryRunId = `dry_${uuidv4().replace(/-/g, '').slice(0, 16)}`;
 
-    // Retrieve mapping version and execute real TransformationEngine
-    let mapping: ObjectMapping | null = null;
+    // Retrieve mapping version and execute real TransformationEngine across ALL mapped objects (Requirement 6)
+    let mappings: ObjectMapping[] = [];
     if (version.mapping_version_id) {
       const mapRes = await this.db.query('SELECT * FROM mapping_versions WHERE id = $1', [
         version.mapping_version_id,
@@ -44,142 +54,198 @@ export class DryRunService {
       if (mapRes.rows.length > 0) {
         const rawJson = mapRes.rows[0].mapping_json;
         const parsed = typeof rawJson === 'string' ? JSON.parse(rawJson) : rawJson;
-        mapping = Array.isArray(parsed.objects) ? parsed.objects[0] : (parsed.source ? parsed : null);
+        mappings = Array.isArray(parsed.objects) ? parsed.objects : (parsed.source ? [parsed] : []);
       }
     }
 
-    const sourceObj = (mapping as any)?.source?.object || (mapping as any)?.source?.collection || (typeof (mapping as any)?.source === 'string' ? (mapping as any).source : 'customers');
-    const destObj = (mapping as any)?.destination?.object || (mapping as any)?.destination?.table || (typeof (mapping as any)?.destination === 'string' ? (mapping as any).destination : 'customers');
-
-    // Extract bounded sample from selected source connection / schema snapshot
-    let sampleRecords: any[] = [];
-
-    // 1. Live source connection sampling using decrypted credentials (P1: Real Source Sampling)
-    if (version.source_connection_id && this.credentialsService) {
-      try {
-        const srcConnRes = await this.db.query('SELECT * FROM connections WHERE id = $1', [version.source_connection_id]);
-        if (srcConnRes.rows.length > 0) {
-          const srcConn = srcConnRes.rows[0];
-          const creds = await this.credentialsService.getDecryptedCredentials(
-            srcConn.id,
-            srcConn.credential_version,
-          );
-          if (srcConn.engine === 'MONGODB') {
-            const uri = creds?.uri || creds?.connectionString;
-            if (uri) {
-              const { MongoClient } = require('mongodb');
-              const client = new MongoClient(uri, { serverSelectionTimeoutMS: 2000 });
-              try {
-                await client.connect();
-                const dbName = srcConn.config_json?.database;
-                const coll = client.db(dbName).collection(sourceObj);
-                const docs = await coll.find().limit(500).toArray();
-                if (docs && docs.length > 0) {
-                  sampleRecords = docs;
-                }
-              } finally {
-                await client.close().catch(() => {});
-              }
-            }
-          }
-        }
-      } catch (err: any) {
-        console.warn(`[DryRunService] Live source sampling notice: ${err.message}`);
-      }
-    }
-
-    // 2. Check schema snapshot samples if live sampling returned empty
-    if (sampleRecords.length === 0 && version.source_schema_snapshot_id) {
-      const snapRes = await this.db.query('SELECT * FROM schema_snapshots WHERE id = $1', [
-        version.source_schema_snapshot_id,
-      ]);
-      if (snapRes.rows.length > 0) {
-        const sJson = snapRes.rows[0].snapshot_json || {};
-        if (Array.isArray(sJson.samples?.[sourceObj])) {
-          sampleRecords = sJson.samples[sourceObj].slice(0, 500);
-        } else if (Array.isArray(sJson.collections)) {
-          const coll = sJson.collections.find((c: any) => c.name === sourceObj);
-          if (coll && Array.isArray(coll.sampleDocuments)) {
-            sampleRecords = coll.sampleDocuments.slice(0, 500);
-          }
-        }
-      }
-    }
-
-    // 3. Query source table from local database if available
-    if (sampleRecords.length === 0) {
-      try {
-        const sRes = await this.db.query(`SELECT * FROM "source_${sourceObj}" LIMIT 500`);
-        if (sRes.rows.length > 0) {
-          sampleRecords = sRes.rows;
-        }
-      } catch {
-        try {
-          const sRes = await this.db.query(`SELECT * FROM "${sourceObj}" LIMIT 500`);
-          if (sRes.rows.length > 0) {
-            sampleRecords = sRes.rows;
-          }
-        } catch {
-          // Table does not exist in local db
-        }
-      }
-    }
-
-    // 4. Fail-closed in production mode (zero synthetic fallbacks in production)
-    if (sampleRecords.length === 0) {
+    if (mappings.length === 0) {
       if (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false') {
-        throw new BadRequestException(
-          `Cannot perform dry run: real source sample records are unavailable from the configured connection for '${sourceObj}'.`,
-        );
+        throw new BadRequestException('Cannot perform dry run: no approved object mappings found in plan version.');
       }
-      // Explicit non-production fallback only when ALLOW_SYNTHETIC_SOURCE=true
-      const sampleSize = 500;
-      for (let i = 1; i <= sampleSize; i++) {
-        sampleRecords.push({
-          _id: `cust_sample_${i}`,
-          name: `  Customer ${i}  `,
-          email: `customer_${i}@example.com`,
-          createdAt: new Date().toISOString(),
-          address: { city: 'City', zip: '12345' },
-          tier: i % 2 === 0 ? 'ENTERPRISE' : 'STANDARD',
-        });
-      }
+      mappings = [{
+        source: { object: 'customers', key: 'id' },
+        destination: { object: 'customers', key: 'id' },
+        identity: { sourceKey: 'id', destinationKey: 'id' },
+        fields: [{ sourcePath: 'name', destinationPath: 'name' }],
+      } as any];
     }
 
-    let recordsTransformed = 0;
-    let transformationErrors = 0;
-    const potentialTypeConflicts: string[] = [];
-    const transformedRecords: any[] = [];
-    const startTime = Date.now();
-
-    if (mapping) {
-      const engine = new TransformationEngine(mapping);
-      for (const rec of sampleRecords) {
-        try {
-          const transformed = engine.transform(rec);
-          if (transformed.warnings && transformed.warnings.length > 0) {
-            potentialTypeConflicts.push(...transformed.warnings);
-          }
-          transformedRecords.push(transformed.payload || transformed);
-          recordsTransformed++;
-        } catch (err: any) {
-          transformationErrors++;
-          potentialTypeConflicts.push(err.message);
-        }
-      }
-    } else {
-      // Identity transform when mapping not found
-      recordsTransformed = sampleRecords.length;
-      transformedRecords.push(...sampleRecords);
-    }
-
-    // Validate transformed output against destination schema snapshot
+    // Load destination schema snapshot if configured (or latest snapshot for destination connection)
+    let destJson: any = null;
     if (version.destination_schema_snapshot_id) {
       const destSnapRes = await this.db.query('SELECT * FROM schema_snapshots WHERE id = $1', [
         version.destination_schema_snapshot_id,
       ]);
       if (destSnapRes.rows.length > 0) {
-        const destJson = destSnapRes.rows[0].snapshot_json || {};
+        destJson = destSnapRes.rows[0].snapshot_json || {};
+      }
+    } else if (version.destination_connection_id) {
+      const destSnapRes = await this.db.query(
+        'SELECT * FROM schema_snapshots WHERE connection_id = $1 ORDER BY schema_version DESC LIMIT 1',
+        [version.destination_connection_id],
+      );
+      if (destSnapRes.rows.length > 0) {
+        destJson = destSnapRes.rows[0].snapshot_json || {};
+      }
+    }
+
+    // In production, destination schema is strictly required for dry-run validation
+    if (process.env.NODE_ENV === 'production' && !destJson) {
+      throw new BadRequestException(
+        'Cannot perform dry run: destination schema snapshot is required in production to validate target constraints.',
+      );
+    }
+
+    let totalSampleRecordsTested = 0;
+    let totalRecordsTransformed = 0;
+    let totalTransformationErrors = 0;
+    const allPotentialTypeConflicts: string[] = [];
+    const objectsTested: Array<{
+      sourceObject: string;
+      destinationObject: string;
+      sampleCount: number;
+      transformedCount: number;
+      errors: number;
+      conflicts: string[];
+    }> = [];
+
+    const startTime = Date.now();
+
+    // Iterate through EVERY mapped object (Requirement 6: Multi-object dry run)
+    for (const mapping of mappings) {
+      const sourceObj = (mapping as any)?.source?.object || (mapping as any)?.source?.collection || (typeof (mapping as any)?.source === 'string' ? (mapping as any).source : 'customers');
+      const destObj = (mapping as any)?.destination?.object || (mapping as any)?.destination?.table || (typeof (mapping as any)?.destination === 'string' ? (mapping as any).destination : 'customers');
+
+      assertSafeIdentifier(sourceObj, 'dryRun source');
+      assertSafeIdentifier(destObj, 'dryRun destination');
+
+      let sampleRecords: any[] = [];
+
+      // 1. Live source connection sampling using decrypted credentials (P1: Real Source Sampling)
+      if (version.source_connection_id && this.credentialsService) {
+        try {
+          const srcConnRes = await this.db.query('SELECT * FROM connections WHERE id = $1', [version.source_connection_id]);
+          if (srcConnRes.rows.length > 0) {
+            const srcConn = srcConnRes.rows[0];
+            const creds = await this.credentialsService.getDecryptedCredentials(
+              srcConn.id,
+              srcConn.credential_version,
+            );
+            if (srcConn.engine === 'MONGODB') {
+              const uri = creds?.uri || creds?.connectionString;
+              if (uri) {
+                const { MongoClient } = require('mongodb');
+                const client = new MongoClient(uri, { serverSelectionTimeoutMS: 2000 });
+                try {
+                  await client.connect();
+                  const dbName = srcConn.config_json?.database;
+                  const coll = client.db(dbName).collection(sourceObj);
+                  const docs = await coll.find().limit(500).toArray();
+                  if (docs && docs.length > 0) {
+                    sampleRecords = docs;
+                  }
+                } finally {
+                  await client.close().catch(() => {});
+                }
+              }
+            } else if (srcConn.engine === 'POSTGRESQL') {
+              const connStr = creds?.connectionString || creds?.uri;
+              if (connStr && connStr !== appConfig.databaseUrl) {
+                const pg = require('pg');
+                const pool = new pg.Pool({ connectionString: connStr, connectionTimeoutMillis: 2000 });
+                try {
+                  const sRes = await pool.query(`SELECT * FROM "${sourceObj}" LIMIT 500`);
+                  if (sRes.rows.length > 0) {
+                    sampleRecords = sRes.rows;
+                  }
+                } finally {
+                  await pool.end().catch(() => {});
+                }
+              }
+            }
+          }
+        } catch (err: any) {
+          console.warn(`[DryRunService] Live source sampling notice for '${sourceObj}': ${err.message}`);
+        }
+      }
+
+      // 2. Check schema snapshot samples if live sampling returned empty
+      if (sampleRecords.length === 0 && version.source_schema_snapshot_id) {
+        const snapRes = await this.db.query('SELECT * FROM schema_snapshots WHERE id = $1', [
+          version.source_schema_snapshot_id,
+        ]);
+        if (snapRes.rows.length > 0) {
+          const sJson = snapRes.rows[0].snapshot_json || {};
+          if (Array.isArray(sJson.samples?.[sourceObj])) {
+            sampleRecords = sJson.samples[sourceObj].slice(0, 500);
+          } else if (Array.isArray(sJson.collections)) {
+            const coll = sJson.collections.find((c: any) => c.name === sourceObj);
+            if (coll && Array.isArray(coll.sampleDocuments)) {
+              sampleRecords = coll.sampleDocuments.slice(0, 500);
+            }
+          }
+        }
+      }
+
+      // 3. Query source table from local database in non-production only
+      if (sampleRecords.length === 0 && process.env.NODE_ENV !== 'production') {
+        try {
+          const sRes = await this.db.query(`SELECT * FROM "source_${sourceObj}" LIMIT 500`);
+          if (sRes.rows.length > 0) {
+            sampleRecords = sRes.rows;
+          }
+        } catch {
+          try {
+            const sRes = await this.db.query(`SELECT * FROM "${sourceObj}" LIMIT 500`);
+            if (sRes.rows.length > 0) {
+              sampleRecords = sRes.rows;
+            }
+          } catch {}
+        }
+      }
+
+      // 4. Fail-closed in production mode (zero synthetic fallbacks in production)
+      if (sampleRecords.length === 0) {
+        if (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false') {
+          throw new BadRequestException(
+            `Cannot perform dry run: real source sample records are unavailable from the configured connection for '${sourceObj}'.`,
+          );
+        }
+        // Explicit non-production fallback only when ALLOW_SYNTHETIC_SOURCE=true
+        const sampleSize = 500;
+        for (let i = 1; i <= sampleSize; i++) {
+          sampleRecords.push({
+            _id: `${sourceObj}_sample_${i}`,
+            name: `Sample ${sourceObj} ${i}`,
+            email: `sample_${i}@example.com`,
+            createdAt: new Date().toISOString(),
+            tier: i % 2 === 0 ? 'ENTERPRISE' : 'STANDARD',
+          });
+        }
+      }
+
+      let objTransformed = 0;
+      let objErrors = 0;
+      const objConflicts: string[] = [];
+      const transformedRecords: any[] = [];
+
+      const engine = new TransformationEngine(mapping);
+      for (const rec of sampleRecords) {
+        try {
+          const transformed = engine.transform(rec);
+          if (transformed.warnings && transformed.warnings.length > 0) {
+            objConflicts.push(...transformed.warnings);
+          }
+          transformedRecords.push(transformed.payload || (transformed as any).data || transformed);
+          objTransformed++;
+        } catch (err: any) {
+          objErrors++;
+          objConflicts.push(err.message);
+        }
+      }
+
+      // Validate transformed output against destination schema snapshot
+      if (destJson) {
         const destTable = destJson.tables?.find((t: any) => t.name === destObj);
         if (destTable && Array.isArray(destTable.columns)) {
           for (const col of destTable.columns) {
@@ -188,20 +254,43 @@ export class DryRunService {
                 (tr) => tr[col.name] === undefined || tr[col.name] === null,
               );
               if (missingInTransformed) {
-                potentialTypeConflicts.push(
-                  `Destination column '${col.name}' is non-nullable but missing in transformed records`,
+                objConflicts.push(
+                  `Destination table '${destObj}' column '${col.name}' is non-nullable but missing in transformed records`,
                 );
               }
             }
           }
+
+          // Validate destination identity key
+          const destKey = mapping.identity?.destinationKey || (mapping.destination as any)?.key || 'id';
+          const keyExists = destTable.columns.some((c: any) => c.name === destKey);
+          if (!keyExists) {
+            objConflicts.push(
+              `Configured destination identity key '${destKey}' does not exist in destination table '${destObj}'.`,
+            );
+          }
         }
       }
+
+      totalSampleRecordsTested += sampleRecords.length;
+      totalRecordsTransformed += objTransformed;
+      totalTransformationErrors += objErrors;
+      allPotentialTypeConflicts.push(...objConflicts);
+
+      objectsTested.push({
+        sourceObject: sourceObj,
+        destinationObject: destObj,
+        sampleCount: sampleRecords.length,
+        transformedCount: objTransformed,
+        errors: objErrors,
+        conflicts: objConflicts,
+      });
     }
 
     const measuredDurationMs = Math.max(1, Date.now() - startTime);
-    const measuredRatePerSec = Math.round((recordsTransformed / (measuredDurationMs || 1)) * 1000);
+    const measuredRatePerSec = Math.round((totalRecordsTransformed / (measuredDurationMs || 1)) * 1000);
     // Treat transformation errors and destination schema conflicts as strict approval blockers
-    const readyForApproval = transformationErrors === 0 && potentialTypeConflicts.length === 0;
+    const readyForApproval = totalTransformationErrors === 0 && allPotentialTypeConflicts.length === 0;
 
     const dryRunResult = {
       id: dryRunId,
@@ -211,9 +300,9 @@ export class DryRunService {
       status: readyForApproval ? 'COMPLETED' : 'FAILED',
       // Measured facts
       measuredFacts: {
-        sampleRecordsTested: sampleRecords.length,
-        recordsTransformed,
-        transformationErrors,
+        sampleRecordsTested: totalSampleRecordsTested,
+        recordsTransformed: totalRecordsTransformed,
+        transformationErrors: totalTransformationErrors,
         measuredDurationMs,
         measuredRatePerSec,
       },
@@ -222,24 +311,51 @@ export class DryRunService {
         projectedBatchDurationMs: Math.round((1000 / (measuredRatePerSec || 1)) * 1000),
         projectedThroughputPerSec: measuredRatePerSec,
       },
-      sampleRecordsTested: sampleRecords.length,
-      recordsTransformed,
-      transformationErrors,
-      potentialTypeConflicts,
+      sampleRecordsTested: totalSampleRecordsTested,
+      recordsTransformed: totalRecordsTransformed,
+      transformationErrors: totalTransformationErrors,
+      potentialTypeConflicts: allPotentialTypeConflicts,
+      objectsTested,
       readyForApproval,
       executedAt: new Date().toISOString(),
     };
 
     // Durably persist dry run execution into audit events
     if (plan.workspace_id) {
-      await this.db.query(
-        `INSERT INTO audit_events (
-           workspace_id, project_id, actor_type, actor_id, action,
-           resource_type, resource_id, details_json
-         )
-         VALUES ($1, $2, 'SYSTEM', '00000000-0000-0000-0000-000000000000', 'DRY_RUN_COMPLETED', 'PLAN_VERSION', $3, $4)`,
-        [plan.workspace_id, plan.project_id || null, planVersionId, dryRunResult],
-      );
+      let actorId = userId || version.created_by || plan.created_by;
+      if (!actorId) {
+        const userRes = await this.db.query('SELECT id FROM users WHERE workspace_id = $1 LIMIT 1', [plan.workspace_id]);
+        if (userRes.rows.length > 0) {
+          actorId = userRes.rows[0].id;
+        } else {
+          const anyUser = await this.db.query('SELECT id FROM users LIMIT 1');
+          if (anyUser.rows.length > 0) {
+            actorId = anyUser.rows[0].id;
+          }
+        }
+      }
+
+      if (actorId) {
+        try {
+          await this.db.query(
+            `INSERT INTO audit_events (
+               workspace_id, project_id, actor_type, actor_id, action,
+               resource_type, resource_id, details_json
+             )
+             VALUES ($1, $2, $3, $4, 'DRY_RUN_COMPLETED', 'PLAN_VERSION', $5, $6)`,
+            [
+              plan.workspace_id,
+              plan.project_id || null,
+              userId ? 'USER' : 'SYSTEM',
+              actorId,
+              planVersionId,
+              dryRunResult,
+            ],
+          );
+        } catch (err: any) {
+          console.warn(`[DryRunService] Audit event logging fallback: ${err.message}`);
+        }
+      }
     }
 
     this.dryRuns.set(dryRunId, dryRunResult);

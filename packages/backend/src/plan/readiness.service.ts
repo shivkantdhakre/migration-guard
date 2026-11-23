@@ -38,7 +38,8 @@ export class ReadinessService {
       if (sourceRes.rows[0].status === 'HEALTHY') {
         facts.push('Source connection verified healthy.');
       } else {
-        hypotheses.push('Source connection not recently tested; recommend running connectivity test.');
+        // Issue 8 fix: non-HEALTHY source connection is a blocker, not a hypothesis
+        blockers.push(`Source connection is not HEALTHY (current status: ${sourceRes.rows[0].status}). Run a connectivity test before proceeding.`);
       }
     }
 
@@ -52,6 +53,9 @@ export class ReadinessService {
       facts.push(`Destination connection configured for engine ${destRes.rows[0].engine}.`);
       if (destRes.rows[0].status === 'HEALTHY') {
         facts.push('Destination connection verified healthy.');
+      } else {
+        // Issue 8 fix: non-HEALTHY destination connection is a blocker, not silently ignored
+        blockers.push(`Destination connection is not HEALTHY (current status: ${destRes.rows[0].status}). Run a connectivity test before proceeding.`);
       }
     }
 
@@ -66,7 +70,8 @@ export class ReadinessService {
         blockers.push('Configured mapping version not found.');
       }
     } else {
-      hypotheses.push('No explicit mapping version attached; default 1:1 field mappings will be assumed.');
+      // Issue 9 fix: missing mapping version is a blocker, not a hypothesis
+      blockers.push('No mapping version configured; migration cannot proceed without an explicit approved mapping.');
     }
 
     // Check execution config
@@ -104,15 +109,23 @@ export class ReadinessService {
 
               const dTable = dstJson.tables?.find((t: any) => t.name === dName);
               if (dTable && Array.isArray(dTable.columns)) {
+                // Verify required fields (non-nullable unmapped columns)
                 for (const col of dTable.columns) {
                   if (!col.nullable && !col.isPrimaryKey) {
                     const isMapped = Array.isArray(obj.fields)
-                      ? obj.fields.some((f: any) => f.destinationPath === col.name)
+                      ? obj.fields.some((f: any) => (f.destinationPath || f.destination) === col.name)
                       : true;
                     if (!isMapped) {
                       blockers.push(`Destination table '${dName}' column '${col.name}' is non-nullable but not mapped from source '${sName}'.`);
                     }
                   }
+                }
+
+                // Verify identity constraints (Requirement 8)
+                const destKey = obj.identity?.destinationKey || obj.destination?.key || 'id';
+                const keyCol = dTable.columns.find((c: any) => c.name === destKey);
+                if (!keyCol) {
+                  blockers.push(`Identity key '${destKey}' for '${dName}' does not exist in destination table schema.`);
                 }
               }
             }

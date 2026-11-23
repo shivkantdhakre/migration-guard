@@ -405,6 +405,8 @@ export class QueueHandler {
             writeMode: payload.writeMode,
             conflictColumns: payload.conflictColumns,
             updateColumns: payload.updateColumns,
+            sourceConnectionId: payload.sourceConnectionId,
+            destinationConnectionId: payload.destinationConnectionId,
           };
 
           if (this.onNextBatchScheduled) {

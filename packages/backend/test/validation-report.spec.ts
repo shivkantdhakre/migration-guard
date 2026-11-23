@@ -54,11 +54,16 @@ describe('Validation & Report Generation', () => {
        VALUES ($1, 'Dest PG', 'POSTGRESQL', 'DESTINATION', $2) RETURNING id`,
       [wsId, user.user.id],
     );
+    const mappingRes = await db.query(
+      `INSERT INTO mapping_versions (workspace_id, plan_id, version, mapping_json, mapping_hash, created_by)
+       VALUES ($1, $2, 1, '{"objects": [{"source": {"collection": "customers", "key": "id"}, "destination": {"table": "customers", "key": "id"}, "identity": {"sourceKey": "id", "destinationKey": "id"}, "fields": [{"sourcePath": "name", "destinationPath": "name"}, {"sourcePath": "email", "destinationPath": "email"}, {"sourcePath": "createdAt", "destinationPath": "created_at"}]}]}', 'hash', $3) RETURNING id`,
+      [wsId, planRes.rows[0].id, user.user.id],
+    );
     const versionRes = await db.query(
       `INSERT INTO migration_plan_versions (
-         plan_id, version, source_connection_id, destination_connection_id, plan_hash, created_by
-       ) VALUES ($1, 1, $2, $3, 'sha256:abc', $4) RETURNING id`,
-      [planRes.rows[0].id, conn1.rows[0].id, conn2.rows[0].id, user.user.id],
+         plan_id, version, source_connection_id, destination_connection_id, mapping_version_id, plan_hash, created_by
+       ) VALUES ($1, 1, $2, $3, $4, 'sha256:abc', $5) RETURNING id`,
+      [planRes.rows[0].id, conn1.rows[0].id, conn2.rows[0].id, mappingRes.rows[0].id, user.user.id],
     );
     const runRes = await db.query(
       `INSERT INTO migration_runs (workspace_id, project_id, plan_version_id, status)

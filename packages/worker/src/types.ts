@@ -224,6 +224,7 @@ export interface MigrationJobPayload {
   writeMode: WriteMode;
   conflictColumns?: string[];
   updateColumns?: string[];
+  destinationKey?: string;
   sourceConnectionId?: string;
   destinationConnectionId?: string;
 }

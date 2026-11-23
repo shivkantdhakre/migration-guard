@@ -651,7 +651,7 @@ async function startWorker() {
         }
         if (existingBatch && existingBatch.status === 'OUTCOME_UNKNOWN') {
           console.log(`[Worker] Detected OUTCOME_UNKNOWN batch ${job.data.batchKey}. Reconciling via RecoveryEngine.`);
-          const destKey = (job.data.conflictColumns && job.data.conflictColumns.length > 0) ? job.data.conflictColumns[0] : 'id';
+          const destKey = job.data.destinationKey || (job.data.conflictColumns && job.data.conflictColumns.length > 0 ? job.data.conflictColumns[0] : 'id');
           await recoveryEngine.reconcileBatch(existingBatch, job.data.destinationObject, destKey);
         }
 

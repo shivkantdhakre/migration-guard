@@ -253,4 +253,79 @@ describe('Recovery Engine & Crash Reconciliation Matrix', () => {
     const updated = await manifestTracker.getBatch('run_crash_custom_key', 'batch_telemetry_01');
     expect(updated?.status).toBe('COMMITTED');
   });
+
+  it('reconciles OUTCOME_UNKNOWN by verifying destination canonical hash matches manifest contentHash', async () => {
+    const { calculateCanonicalHash } = await import('@migrationguard/core');
+    const destinationConnector = new MockDestinationConnector();
+    const manifestTracker = new BatchManifestTracker();
+    const checkpointManager = new CheckpointManager();
+
+    const recordData = { id: 'rec_hash_1', name: 'Alice', score: 100 };
+    destinationConnector.store.set('rec_hash_1', recordData);
+
+    const engine = new RecoveryEngine({
+      destinationConnector,
+      manifestTracker,
+      checkpointManager,
+    });
+
+    await manifestTracker.createBatch({
+      migrationRunId: 'run_hash_verify',
+      batchKey: 'batch_hash_1',
+      sequenceNo: 1,
+      sourceObject: 'users',
+      destinationObject: 'users',
+      sourceCursorStart: null,
+    });
+    await manifestTracker.transitionState('run_hash_verify', 'batch_hash_1', 'RUNNING');
+    await manifestTracker.updateSubStage('run_hash_verify', 'batch_hash_1', 'WRITE_STARTED');
+    await manifestTracker.transitionState('run_hash_verify', 'batch_hash_1', 'OUTCOME_UNKNOWN');
+
+    // Matching hash
+    const contentHash = calculateCanonicalHash(recordData);
+    await manifestTracker.recordManifests([
+      {
+        migrationRunId: 'run_hash_verify',
+        batchKey: 'batch_hash_1',
+        sourceObject: 'users',
+        sourceKey: 'src_u1',
+        destinationObject: 'users',
+        destinationKey: 'rec_hash_1',
+        contentHash,
+        status: 'WRITTEN',
+      },
+    ]);
+
+    const successPlan = await engine.prepareResume('run_hash_verify', 'users', 'users');
+    expect(successPlan.reconciledBatches[0].resolvedStatus).toBe('COMMITTED');
+
+    // Corrupted / mismatching hash resets to RETRY_WAIT
+    await manifestTracker.createBatch({
+      migrationRunId: 'run_hash_corrupt',
+      batchKey: 'batch_hash_2',
+      sequenceNo: 1,
+      sourceObject: 'users',
+      destinationObject: 'users',
+      sourceCursorStart: null,
+    });
+    await manifestTracker.transitionState('run_hash_corrupt', 'batch_hash_2', 'RUNNING');
+    await manifestTracker.updateSubStage('run_hash_corrupt', 'batch_hash_2', 'WRITE_STARTED');
+    await manifestTracker.transitionState('run_hash_corrupt', 'batch_hash_2', 'OUTCOME_UNKNOWN');
+    await manifestTracker.recordManifests([
+      {
+        migrationRunId: 'run_hash_corrupt',
+        batchKey: 'batch_hash_2',
+        sourceObject: 'users',
+        sourceKey: 'src_u2',
+        destinationObject: 'users',
+        destinationKey: 'rec_hash_1',
+        contentHash: 'sha256:0000000000000000000000000000000000000000000000000000000000000000', // Intentional mismatch
+        status: 'WRITTEN',
+      },
+    ]);
+
+    const failPlan = await engine.prepareResume('run_hash_corrupt', 'users', 'users');
+    expect(failPlan.reconciledBatches[0].resolvedStatus).toBe('RETRY_WAIT');
+    expect(failPlan.reconciledBatches[0].actionTaken).toContain('Content hash mismatch');
+  });
 });

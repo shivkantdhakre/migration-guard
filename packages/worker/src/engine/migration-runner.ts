@@ -37,6 +37,7 @@ export interface StartMigrationConfig {
   transformFn?: TransformFunction;
   conflictColumns?: string[];
   updateColumns?: string[];
+  destinationKey?: string;
 }
 
 export class MigrationRunner {
@@ -139,7 +140,7 @@ export class MigrationRunner {
     }
 
     // Reconcile crash states & prepare resume
-    const destKey = config.conflictColumns?.[0] || 'id';
+    const destKey = config.destinationKey || config.conflictColumns?.[0] || 'id';
     const resumePlan = await this.recoveryEngine.prepareResume(
       migrationRunId,
       config.sourceObject,

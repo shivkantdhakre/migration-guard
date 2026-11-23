@@ -16,6 +16,7 @@ import {
   MigrationCheckpoint,
   SourceCursor,
 } from '../types.js';
+import { calculateCanonicalHash } from '@migrationguard/core';
 import { BatchManifestTracker } from './batch-manifest.js';
 import { CheckpointManager } from './checkpoint.js';
 import { IdTracker } from './id-tracker.js';
@@ -196,18 +197,17 @@ export class RecoveryEngine {
             }
           }
 
-          // Issue 2: Verify content integrity via hash comparison when canonicalHash is available
+          // Issue 2: Verify content integrity via canonical hash comparison when contentHash is available
           let hashMismatchCount = 0;
-          const { createHash } = await import('node:crypto');
           for (const manifest of manifests) {
             const foundRecord = foundKeyMap.get(manifest.destinationKey);
             if (!foundRecord) continue;
             if (manifest.contentHash) {
-              // compute hash of foundRecord data and compare against stored manifest hash
-              const foundHash = createHash('sha256')
-                .update(JSON.stringify(foundRecord))
-                .digest('hex');
-              if (foundHash !== manifest.contentHash) {
+              // compute canonical hash of foundRecord data and compare against stored manifest hash
+              const computedHash = calculateCanonicalHash(foundRecord);
+              const normComputed = computedHash.replace(/^sha256:/, '');
+              const normManifest = manifest.contentHash.replace(/^sha256:/, '');
+              if (normComputed !== normManifest) {
                 // content mismatch - cannot confirm write was correct
                 hashMismatchCount++;
               }

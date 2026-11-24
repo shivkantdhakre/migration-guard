@@ -58,7 +58,9 @@ Inputs: sanitized error codes, connector details, batch metadata, transformation
 
 Inputs: persisted discrepancy IDs and evidence. Output: clusters, common patterns and suggested checks. Example: group records with the same timestamp parse error. Any causal explanation not directly proven must be labeled a hypothesis.
 
-### 3.5 Repair planner
+### 3.5 Repair planner (Human-Reviewed Remediation Proposal Generation)
+
+The Repair Planner is strictly a **proposal generation agent**, not an automated repair execution or database mutation engine. It generates structured, bounded recommendations for human operator review and sign-off. Automated execution, background patching, and autonomous rollback pipelines are out-of-scope and deferred; any remediation action must be executed by an authorized human operator.
 
 May propose only allowlisted operations:
 
@@ -68,7 +70,10 @@ May propose only allowlisted operations:
 - `REBUILD_ID_MAPPING`
 - `MARK_EXCEPTION_FOR_REVIEW`
 
-It must not emit arbitrary SQL, shell commands or free-form executable scripts.
+It must not emit arbitrary SQL, shell commands or free-form executable scripts. All generated proposals:
+1. Are saved in unapproved draft status (`PENDING_REVIEW`).
+2. Require explicit human operator approval and dry-run validation before any operational change is applied.
+3. Explicitly state preconditions, affected keys, and operational risks.
 
 ## 4. Tool catalog
 

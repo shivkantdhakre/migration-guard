@@ -80,7 +80,7 @@
 | `FR-VAL-007` | Discrepancy persistence (category, severity, identifiers, evidence) | P0 | `packages/backend/src/validation/validation.service.ts` | `packages/backend/test/validation-report.spec.ts` | Completed |
 | `FR-VAL-008` | Export CSV and HTML reports | P0 | `packages/core/src/reports/csv-report.ts`, `packages/core/src/reports/html-report.ts`, `packages/backend/src/report/report.service.ts` | `packages/core/test/fault-injection.spec.ts`, `packages/backend/test/validation-report.spec.ts` | Completed |
 | `FR-VAL-009` | AI groups discrepancies & suggests root causes (linked to IDs) | P1 | `packages/backend/src/ai/agents/discrepancy-agent.ts` | `packages/backend/test/ai/ai-agents.spec.ts` | Completed |
-| `FR-VAL-010` | AI proposes remediation steps (allowlisted, requires approval) | P1 | `packages/backend/src/ai/agents/repair-agent.ts` | `packages/backend/test/ai/ai-agents.spec.ts` | Completed |
+| `FR-VAL-010` | Human-reviewed remediation proposal generation (allowlisted proposals, operator approval required; automated execution deferred) | P1 | `packages/backend/src/ai/agents/repair-planner.agent.ts` | `packages/backend/test/ai/ai-agents.spec.ts` | Completed (Proposal Only) |
 
 ### 1.8 AI Copilot & Agent Workflows (FR-AI)
 | Req ID | Requirement Summary | Priority | Target Location | Test Coverage | Status |

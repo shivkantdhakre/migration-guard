@@ -86,7 +86,7 @@ MVP may simplify the role set, but authorization must be enforced server-side an
 - **FR-VAL-007 (P0):** Persist discrepancy category, severity, affected identifiers, check ID, evidence reference, status and timestamp.
 - **FR-VAL-008 (P0):** Generate CSV and HTML reports with scope, checks, totals, exceptions and methodology/version.
 - **FR-VAL-009 (P1):** AI groups discrepancies and suggests root causes; every cluster links to the original discrepancy IDs and is labeled as a hypothesis.
-- **FR-VAL-010 (P1):** AI proposes remediation steps. Dry run, allowlist validation and approval are required before production action.
+- **FR-VAL-010 (P1):** Human-reviewed remediation proposal generation. The AI agent generates structured, allowlisted repair proposals (draft proposals specifying operations, preconditions, and risks). Automated repair execution and autonomous rollback pipelines are out-of-scope/deferred; all remediation requires operator review and approval before execution.
 
 ### 3.8 AI copilot and agent workflows
 

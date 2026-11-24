@@ -12,7 +12,7 @@
 
 ### Core Engineering Principle
 > **AI assists; deterministic systems execute and verify.**  
-> LLMs assist with schema profiling, mapping discovery, natural language planning, and root-cause failure investigation. Deterministic algorithms, canonical hashing (RFC 8785), and stream validators move the records, manage recovery checkpoints, and decide whether data passed validation.
+> LLMs assist with schema profiling, mapping discovery, natural language planning, root-cause failure investigation, and **human-reviewed remediation proposal generation**. AI agents never autonomously mutate destination data or execute automated repairs—all repair proposals are strictly constrained to an allowlist, saved in unapproved draft status, and require human operator approval. Deterministic algorithms, canonical hashing (RFC 8785), and stream validators move the records, manage recovery checkpoints, and decide whether data passed validation.
 
 ---
 

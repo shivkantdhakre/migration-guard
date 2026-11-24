@@ -210,24 +210,49 @@ export class ValidationService {
         const uri = sourceCredentials.uri || sourceCredentials.connectionString;
         if (uri) {
           try {
-            const { MongoClient, ObjectId } = require('mongodb');
+            const { MongoClient, ObjectId, Long, Decimal128 } = require('mongodb');
             const client = new MongoClient(uri, { serverSelectionTimeoutMS: 10000 });
             await client.connect();
             const dbName = srcConn.config_json?.database;
             const coll = client.db(dbName).collection(sourceObjectName);
 
-            const objectIds: any[] = [];
+            const mongoIdValues: any[] = [];
             const stringIds: string[] = [];
-            for (const k of sourceKeys) {
-              if (/^[0-9a-fA-F]{24}$/.test(k)) {
-                try { objectIds.push(new ObjectId(k)); } catch {}
+            for (const rawKey of sourceKeys) {
+              const k = String(rawKey);
+              const colonIdx = k.indexOf(':');
+              const prefix = colonIdx > 0 ? k.slice(0, colonIdx) : '';
+              const unprefixed = colonIdx > 0 ? k.slice(colonIdx + 1) : k;
+
+              if (prefix === 'ObjectId') {
+                if (/^[0-9a-fA-F]{24}$/.test(unprefixed)) {
+                  try { mongoIdValues.push(new ObjectId(unprefixed)); } catch {}
+                }
+                stringIds.push(unprefixed);
+              } else if (prefix === 'Long') {
+                try { mongoIdValues.push(Long.fromString(unprefixed)); } catch {}
+                stringIds.push(unprefixed);
+              } else if (prefix === 'Decimal128') {
+                try { mongoIdValues.push(Decimal128.fromString(unprefixed)); } catch {}
+                stringIds.push(unprefixed);
+              } else if (prefix === 'number') {
+                const n = Number(unprefixed);
+                if (!Number.isNaN(n)) mongoIdValues.push(n);
+                stringIds.push(unprefixed);
+              } else if (prefix === 'string' || prefix === 'other') {
+                stringIds.push(unprefixed);
+              } else {
+                if (/^[0-9a-fA-F]{24}$/.test(k)) {
+                  try { mongoIdValues.push(new ObjectId(k)); } catch {}
+                }
+                stringIds.push(k);
               }
-              stringIds.push(k);
             }
 
+            const allCandidateValues = [...mongoIdValues, ...stringIds];
             const filter = (sourceKeyField === '_id' || sourceKeyField === 'id')
-              ? { $or: [{ _id: { $in: objectIds } }, { _id: { $in: stringIds } }, { id: { $in: stringIds } }] }
-              : { [sourceKeyField]: { $in: sourceKeys } };
+              ? { $or: [{ _id: { $in: allCandidateValues } }, { id: { $in: stringIds } }] }
+              : { [sourceKeyField]: { $in: allCandidateValues } };
 
             const docs = await coll.find(filter).toArray();
             await client.close().catch(() => {});

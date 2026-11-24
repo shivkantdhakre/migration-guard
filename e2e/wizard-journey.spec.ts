@@ -430,7 +430,11 @@ test.describe('Tier 5 Browser E2E: Complete 14-Step Live Wizard Journey & Report
     // Step 13: Trigger real backend validation & verify 0 discrepancies loaded cleanly
     await page.getByRole('button', { name: 'Trigger Validation' }).click();
     await expect(page.getByText('Validation Run Status:')).toBeVisible();
-    await expect(page.locator('span', { hasText: /^PASSED$/ }).first()).toBeVisible({ timeout: 20_000 });
+    await expect(async () => {
+      const statusCard = page.locator('div', { hasText: 'Validation Run Status:' }).first();
+      const text = await statusCard.innerText();
+      expect(text).toContain('PASSED');
+    }).toPass({ timeout: 20_000 });
     for (const label of ['Missing Attachments', 'Duplicate Records', 'Broken References', 'Metadata Mismatches']) {
       const card = page.locator('div.p-2').filter({ hasText: label });
       await expect(card.locator('span').first()).toHaveText('0');

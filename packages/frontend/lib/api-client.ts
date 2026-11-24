@@ -269,9 +269,9 @@ export const apiClient = {
   },
 
   async createConnection(workspaceId = 'default', payload: any): Promise<DatabaseConnection> {
-    return request<DatabaseConnection>('/connections', {
+    return request<DatabaseConnection>(`/workspaces/${workspaceId}/connections`, {
       method: 'POST',
-      body: JSON.stringify({ workspaceId, ...payload }),
+      body: JSON.stringify(payload),
     });
   },
 

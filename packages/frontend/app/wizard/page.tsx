@@ -110,6 +110,15 @@ export default function MigrationWizardPage() {
   const [isSavingMapping, setIsSavingMapping] = useState(false);
   const [mappingActionError, setMappingActionError] = useState<string | null>(null);
 
+  // Step 3: Dual Connection Verification State
+  const [sourceHandshake, setSourceHandshake] = useState<{ loading: boolean; tested: boolean; success: boolean; latencyMs?: number; message?: string } | null>(
+    isDemo ? { loading: false, tested: true, success: true, latencyMs: 12, message: 'Verified MongoDB TLS ping' } : null
+  );
+  const [targetHandshake, setTargetHandshake] = useState<{ loading: boolean; tested: boolean; success: boolean; latencyMs?: number; message?: string } | null>(
+    isDemo ? { loading: false, tested: true, success: true, latencyMs: 14, message: 'Verified PostgreSQL ping' } : null
+  );
+  const [isTestingHandshake, setIsTestingHandshake] = useState(false);
+
   // Step 6: AI Suggestions State
   const [aiSuggestions, setAiSuggestions] = useState<any | null>(null);
   const [aiLoading, setAiLoading] = useState(false);
@@ -188,6 +197,60 @@ export default function MigrationWizardPage() {
       };
     });
   }, []);
+
+  // Step 3: Trigger real dual handshake verification probes
+  const handleTestHandshake = async () => {
+    if (!sourceConnId || !targetConnId) return;
+    setIsTestingHandshake(true);
+    setSourceHandshake({ loading: true, tested: false, success: false });
+    setTargetHandshake({ loading: true, tested: false, success: false });
+    try {
+      const [sRes, tRes] = await Promise.allSettled([
+        apiClient.testConnection(sourceConnId),
+        apiClient.testConnection(targetConnId),
+      ]);
+      if (sRes.status === 'fulfilled') {
+        setSourceHandshake({
+          loading: false,
+          tested: true,
+          success: sRes.value.success,
+          latencyMs: sRes.value.latencyMs,
+          message: sRes.value.message,
+        });
+      } else {
+        setSourceHandshake({
+          loading: false,
+          tested: true,
+          success: false,
+          message: sRes.reason?.message || 'Source connection probe failed',
+        });
+      }
+      if (tRes.status === 'fulfilled') {
+        setTargetHandshake({
+          loading: false,
+          tested: true,
+          success: tRes.value.success,
+          latencyMs: tRes.value.latencyMs,
+          message: tRes.value.message,
+        });
+      } else {
+        setTargetHandshake({
+          loading: false,
+          tested: true,
+          success: false,
+          message: tRes.reason?.message || 'Target connection probe failed',
+        });
+      }
+    } finally {
+      setIsTestingHandshake(false);
+    }
+  };
+
+  useEffect(() => {
+    if (currentStep === 3 && sourceConnId && targetConnId && (!sourceHandshake || !targetHandshake)) {
+      handleTestHandshake();
+    }
+  }, [currentStep, sourceConnId, targetConnId]);
 
   // Sync mapping DSL text whenever selectedMappingVersion changes
   useEffect(() => {
@@ -556,7 +619,7 @@ export default function MigrationWizardPage() {
   };
 
   /**
-   * Step 8: Call transformation preview endpoint
+   * Step 8: Call transformation preview endpoint with dynamic sample record & steps derivation
    */
   const handleFetchPreview = async () => {
     if (!selectedMappingVersion?.id) {
@@ -566,24 +629,56 @@ export default function MigrationWizardPage() {
     setPreviewLoading(true);
     setPreviewError(null);
     try {
-      const sampleDoc = {
+      // 1. Prefer sample record from snapshot, fallback to discovered attributes
+      const snap: any = sourceSnapshots[0];
+      const snapshotSample =
+        snap?.samples?.customers?.[0] ||
+        snap?.snapshot_json?.samples?.customers?.[0] ||
+        snap?.collections?.[0]?.sampleDocuments?.[0];
+
+      const sampleDoc = snapshotSample || {
         _id: '507f1f77bcf86cd799439011',
-        name: '  Acme Enterprise LLC  ',
+        name: '   Acme Enterprise LLC   ',
         email: 'CONTACT@ACME.COM',
         createdAt: '2026-11-19T20:00:00.000Z',
-        address: { street: '100 Market St', city: 'San Francisco', state: 'CA' },
+        metadata: { street: '100 Market St', city: 'San Francisco', state: 'CA' },
       };
 
       const res: any = await apiClient.previewTransform(selectedMappingVersion.id, sampleDoc);
       const previewItem = Array.isArray(res?.preview) ? res.preview[0] : (res?.preview || res);
+      const transformedRecord = previewItem?.transformedRecord || previewItem?.transformed || {};
+
+      // 2. Derive applied transform steps dynamically from mapping DSL
+      let parsedDsl: any = null;
+      try {
+        parsedDsl = JSON.parse(mappingDslText);
+      } catch {
+        parsedDsl = (selectedMappingVersion as any)?.mapping_json || selectedMappingVersion;
+      }
+
+      const objects = Array.isArray(parsedDsl?.objects)
+        ? parsedDsl.objects
+        : (parsedDsl?.source ? [parsedDsl] : []);
+
+      const dynamicSteps: Array<{ field: string; op: string; before: any; after: any }> = [];
+      for (const obj of objects) {
+        for (const f of (obj.fields || [])) {
+          const srcVal = sampleDoc[f.sourcePath];
+          const destVal = transformedRecord[f.destinationPath];
+          dynamicSteps.push({
+            field: `${f.sourcePath} → ${f.destinationPath}`,
+            op: f.transform?.op || 'DIRECT_COPY',
+            before: srcVal !== undefined ? (typeof srcVal === 'object' ? JSON.stringify(srcVal) : String(srcVal)) : 'null',
+            after: destVal !== undefined ? (typeof destVal === 'object' ? JSON.stringify(destVal) : String(destVal)) : 'null',
+          });
+        }
+      }
 
       const formattedPreview = {
         source: previewItem?.sourceRecord || sampleDoc,
-        transformed: previewItem?.transformedRecord || previewItem?.transformed || {},
-        transformStepsApplied: [
-          { field: 'name', op: 'TRIM_STRING', before: '  Acme Enterprise LLC  ', after: 'Acme Enterprise LLC' },
-          { field: 'email', op: 'LOWERCASE', before: 'CONTACT@ACME.COM', after: 'contact@acme.com' },
-          { field: 'address', op: 'TO_JSONB', before: '[Object]', after: 'JSON stringified' },
+        transformed: transformedRecord,
+        transformStepsApplied: dynamicSteps.length > 0 ? dynamicSteps : [
+          { field: 'record', op: 'MAPPING_DSL', before: 'Input document', after: 'Transformed record' },
         ],
       };
 
@@ -990,24 +1085,101 @@ export default function MigrationWizardPage() {
         {/* Step 3: Handshake */}
         {currentStep === 3 && (
           <div className="space-y-4">
-            <h3 className="text-sm font-bold text-infra-heading font-mono flex items-center gap-2">
-              <ShieldCheck size={16} className="text-emerald-400" />
-              <span>Step 3: Dual Connection Verification & Latency Handshake</span>
-            </h3>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="p-4 rounded-xl bg-infra-surface border border-emerald-500/30 text-xs font-mono space-y-2">
-                <span className="text-emerald-400 font-bold block">
-                  Source: {selectedSource?.name || sourceConnId || 'MongoDB Source'}
-                </span>
-                <p className="text-infra-text">Status: 200 OK • Read/Extract Authorized</p>
-                <p className="text-infra-muted">Engine: MONGODB • TLS Handshake Verified</p>
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-bold text-infra-heading font-mono flex items-center gap-2">
+                  <ShieldCheck size={16} className="text-emerald-400" />
+                  <span>Step 3: Dual Connection Verification & Latency Handshake</span>
+                </h3>
+                <p className="text-xs text-infra-muted mt-0.5">
+                  Execute live bidirectional ping and protocol handshake to verify network access and TLS credentials.
+                </p>
               </div>
-              <div className="p-4 rounded-xl bg-infra-surface border border-sky-500/30 text-xs font-mono space-y-2">
-                <span className="text-sky-400 font-bold block">
-                  Destination: {selectedTarget?.name || targetConnId || 'PostgreSQL Destination'}
-                </span>
-                <p className="text-infra-text">Status: 200 OK • Upsert/DDL Permissions Active</p>
-                <p className="text-infra-muted">Engine: POSTGRESQL • Relational Schema Verified</p>
+              <button
+                onClick={handleTestHandshake}
+                disabled={isTestingHandshake}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono font-semibold bg-infra-surface border border-infra-border hover:bg-infra-cardHover text-infra-text transition-colors"
+              >
+                <RefreshCw size={12} className={isTestingHandshake ? 'animate-spin' : ''} />
+                <span>{isTestingHandshake ? 'Testing Handshake...' : 'Retest Handshake'}</span>
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              {/* Source Handshake */}
+              <div
+                className={`p-4 rounded-xl bg-infra-surface border text-xs font-mono space-y-2 transition-all ${
+                  isTestingHandshake
+                    ? 'border-infra-border opacity-70'
+                    : sourceHandshake?.success
+                    ? 'border-emerald-500/40 bg-emerald-500/5'
+                    : sourceHandshake?.tested
+                    ? 'border-red-500/40 bg-red-500/5'
+                    : 'border-infra-border'
+                }`}
+              >
+                <div className="flex justify-between items-center">
+                  <span className="text-emerald-400 font-bold block truncate">
+                    Source: {selectedSource?.name || sourceConnId || 'MongoDB Source'}
+                  </span>
+                  {sourceHandshake?.tested && (
+                    <Badge variant={sourceHandshake.success ? 'emerald' : 'rose'} size="sm">
+                      {sourceHandshake.success ? 'Verified' : 'Failed'}
+                    </Badge>
+                  )}
+                </div>
+                {isTestingHandshake ? (
+                  <p className="text-infra-muted animate-pulse">Pinging MongoDB cluster and validating TLS...</p>
+                ) : sourceHandshake?.tested ? (
+                  <>
+                    <p className={sourceHandshake.success ? 'text-emerald-300' : 'text-red-400 font-semibold'}>
+                      Status: {sourceHandshake.success ? '200 OK • Read/Extract Authorized' : 'Connection Failed'}
+                    </p>
+                    <p className="text-infra-muted">
+                      Latency: <span className="text-infra-text font-bold">{sourceHandshake.latencyMs ?? 0}ms</span> • {sourceHandshake.message || 'TLS Handshake Verified'}
+                    </p>
+                  </>
+                ) : (
+                  <p className="text-infra-muted">Awaiting handshake probe...</p>
+                )}
+              </div>
+
+              {/* Destination Handshake */}
+              <div
+                className={`p-4 rounded-xl bg-infra-surface border text-xs font-mono space-y-2 transition-all ${
+                  isTestingHandshake
+                    ? 'border-infra-border opacity-70'
+                    : targetHandshake?.success
+                    ? 'border-sky-500/40 bg-sky-500/5'
+                    : targetHandshake?.tested
+                    ? 'border-red-500/40 bg-red-500/5'
+                    : 'border-infra-border'
+                }`}
+              >
+                <div className="flex justify-between items-center">
+                  <span className="text-sky-400 font-bold block truncate">
+                    Destination: {selectedTarget?.name || targetConnId || 'PostgreSQL Destination'}
+                  </span>
+                  {targetHandshake?.tested && (
+                    <Badge variant={targetHandshake.success ? 'sky' : 'rose'} size="sm">
+                      {targetHandshake.success ? 'Verified' : 'Failed'}
+                    </Badge>
+                  )}
+                </div>
+                {isTestingHandshake ? (
+                  <p className="text-infra-muted animate-pulse">Testing TCP socket and relational schema permissions...</p>
+                ) : targetHandshake?.tested ? (
+                  <>
+                    <p className={targetHandshake.success ? 'text-sky-300' : 'text-red-400 font-semibold'}>
+                      Status: {targetHandshake.success ? '200 OK • Upsert/DDL Permissions Active' : 'Connection Failed'}
+                    </p>
+                    <p className="text-infra-muted">
+                      Latency: <span className="text-infra-text font-bold">{targetHandshake.latencyMs ?? 0}ms</span> • {targetHandshake.message || 'Relational Schema Verified'}
+                    </p>
+                  </>
+                ) : (
+                  <p className="text-infra-muted">Awaiting handshake probe...</p>
+                )}
               </div>
             </div>
           </div>
@@ -1015,55 +1187,102 @@ export default function MigrationWizardPage() {
 
         {/* Step 4: Source Schema */}
         {currentStep === 4 && (() => {
-          const collections = sourceSnapshots[0]?.collections || (sourceSnapshots[0] as any)?.snapshot_json?.collections || [];
-          const firstCol = collections[0];
+          const snapshot = sourceSnapshots[0];
+          const collections = snapshot?.collections || (snapshot as any)?.snapshot_json?.collections || [];
           return (
             <div className="space-y-4">
               <h3 className="text-sm font-bold text-infra-heading font-mono flex items-center gap-2">
                 <Layers size={16} className="text-emerald-400" />
                 <span>
-                  Step 4: Source MongoDB Schema Discovery ({sourceSnapshots[0]?.id || 'snap-mongo-001'})
+                  Step 4: Source MongoDB Schema Discovery {snapshot ? `(${snapshot.id})` : ''}
                 </span>
               </h3>
-              <p className="text-xs text-infra-muted">
-                Discovered {collections.length || 2} collections and observed embedded BSON structures.
-              </p>
-              <div className="p-3 rounded-lg bg-infra-surface border border-infra-border text-xs font-mono space-y-1">
-                <div className="flex justify-between">
-                  <span>Collection: {firstCol?.name || 'customers'}</span>
-                  <span className="text-emerald-400">
-                    {formatNumber(firstCol?.documentCount || 10000)} documents
-                  </span>
+              {collections.length > 0 ? (
+                <>
+                  <p className="text-xs text-infra-muted">
+                    Discovered {collections.length} collection{collections.length > 1 ? 's' : ''} in snapshot captured on {snapshot.capturedAt ? new Date(snapshot.capturedAt).toLocaleDateString() : 'recent run'}.
+                  </p>
+                  <div className="space-y-3 pt-1">
+                    {collections.map((col: any, idx: number) => (
+                      <div key={idx} className="p-3.5 rounded-lg bg-infra-surface border border-infra-border text-xs font-mono space-y-1.5">
+                        <div className="flex justify-between items-center">
+                          <span className="font-bold text-emerald-400">Collection: {col.name}</span>
+                          <span className="text-infra-muted">
+                            {formatNumber(col.documentCount || col.count || 0)} documents
+                          </span>
+                        </div>
+                        {Array.isArray(col.fields) && col.fields.length > 0 ? (
+                          <div className="text-[11px] text-infra-muted">
+                            <span className="text-infra-text">Fields: </span>
+                            {col.fields.map((f: any) => typeof f === 'string' ? f : f.name).join(', ')}
+                          </div>
+                        ) : (
+                          <div className="text-[11px] text-infra-muted">
+                            Embedded BSON structures and dynamic attributes identified.
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <div className="p-6 rounded-xl bg-infra-surface border border-dashed border-infra-border space-y-2 text-center">
+                  <Database size={24} className="mx-auto text-amber-400" />
+                  <p className="text-xs font-mono text-infra-text font-bold">No Persisted Source Snapshot Available</p>
+                  <p className="text-[11px] text-infra-muted max-w-md mx-auto">
+                    No schema snapshot was found for source connection {selectedSource?.name || sourceConnId}. Live collection discovery will run during Dry Run (Step 10).
+                  </p>
                 </div>
-                <div className="flex justify-between text-infra-muted">
-                  <span>Key fields: _id, name, email, createdAt, address, metadata, attachments, orders</span>
-                  <span>Zero nulls on PK/email</span>
-                </div>
-              </div>
+              )}
             </div>
           );
         })()}
 
         {/* Step 5: Target Schema */}
-        {currentStep === 5 && (
-          <div className="space-y-4">
-            <h3 className="text-sm font-bold text-infra-heading font-mono flex items-center gap-2">
-              <Layers size={16} className="text-sky-400" />
-              <span>
-                Step 5: Target PostgreSQL Schema Inspection ({destSnapshots[0]?.id || 'snap-pg-001'})
-              </span>
-            </h3>
-            <p className="text-xs text-infra-muted">
-              Target tables ready in <code>public</code> schema: customers, orders, customer_metadata, customer_attachments.
-            </p>
-            <div className="p-3 rounded-lg bg-infra-surface border border-infra-border text-xs font-mono">
-              <span className="text-sky-400 font-bold block mb-1">Normalized Relational Target Model:</span>
-              <p className="text-infra-muted">
-                FK relationships configured between <code>orders.customer_id</code> and <code>customers.id</code>. Unique constraints set on <code>source_id</code> and <code>email</code>.
-              </p>
+        {currentStep === 5 && (() => {
+          const snapshot = destSnapshots[0];
+          const tables = snapshot?.tables || (snapshot as any)?.snapshot_json?.tables || [];
+          return (
+            <div className="space-y-4">
+              <h3 className="text-sm font-bold text-infra-heading font-mono flex items-center gap-2">
+                <Layers size={16} className="text-sky-400" />
+                <span>
+                  Step 5: Target PostgreSQL Schema Inspection {snapshot ? `(${snapshot.id})` : ''}
+                </span>
+              </h3>
+              {tables.length > 0 ? (
+                <>
+                  <p className="text-xs text-infra-muted">
+                    Found {tables.length} relational table{tables.length > 1 ? 's' : ''} in target schema.
+                  </p>
+                  <div className="space-y-3 pt-1">
+                    {tables.map((tbl: any, idx: number) => (
+                      <div key={idx} className="p-3.5 rounded-lg bg-infra-surface border border-infra-border text-xs font-mono space-y-1.5">
+                        <div className="flex justify-between items-center">
+                          <span className="font-bold text-sky-400">Table: {tbl.name}</span>
+                          <span className="text-infra-muted">{tbl.columns?.length || 0} columns</span>
+                        </div>
+                        {Array.isArray(tbl.columns) && tbl.columns.length > 0 && (
+                          <p className="text-[11px] text-infra-muted">
+                            Columns: {tbl.columns.map((c: any) => `${typeof c === 'string' ? c : c.name} (${c.type || 'text'})`).join(', ')}
+                          </p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <div className="p-6 rounded-xl bg-infra-surface border border-dashed border-infra-border space-y-2 text-center">
+                  <Database size={24} className="mx-auto text-sky-400" />
+                  <p className="text-xs font-mono text-infra-text font-bold">Live Catalog Inspection Scheduled</p>
+                  <p className="text-[11px] text-infra-muted max-w-md mx-auto">
+                    Destination PostgreSQL schema for {selectedTarget?.name || targetConnId} will be queried live via <code>information_schema</code> during preflight dry run (Step 10) to validate relational tables, foreign keys, and unique constraints.
+                  </p>
+                </div>
+              )}
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         {/* Step 6: AI Mapping Recommendations */}
         {currentStep === 6 && (
@@ -1690,6 +1909,12 @@ export default function MigrationWizardPage() {
           </button>
 
           <div className="flex items-center gap-3">
+            {currentStep === 3 && (!sourceHandshake?.success || !targetHandshake?.success) && (
+              <span className="text-[11px] font-mono text-amber-400 flex items-center gap-1.5 bg-amber-500/10 px-2.5 py-1 rounded border border-amber-500/20">
+                <AlertTriangle size={13} />
+                <span>Live connection handshake required before advancing</span>
+              </span>
+            )}
             {currentStep === 10 && !dryRunSuccess && (
               <span className="text-[11px] font-mono text-amber-400 flex items-center gap-1.5 bg-amber-500/10 px-2.5 py-1 rounded border border-amber-500/20">
                 <AlertTriangle size={13} />
@@ -1699,9 +1924,19 @@ export default function MigrationWizardPage() {
 
             <button
               onClick={nextStep}
-              disabled={currentStep === 14 || (currentStep === 10 && !dryRunSuccess)}
+              disabled={
+                currentStep === 14 ||
+                (currentStep === 3 && (!sourceHandshake?.success || !targetHandshake?.success)) ||
+                (currentStep === 10 && !dryRunSuccess)
+              }
               className="flex items-center gap-1.5 px-5 py-2 rounded-lg text-xs font-mono font-semibold bg-emerald-500 hover:bg-emerald-400 disabled:opacity-30 disabled:cursor-not-allowed text-infra-base transition-colors shadow-lg shadow-emerald-500/20"
-              title={currentStep === 10 && !dryRunSuccess ? 'Execute and pass dry run to advance' : undefined}
+              title={
+                currentStep === 3 && (!sourceHandshake?.success || !targetHandshake?.success)
+                  ? 'Verify connections in Step 3 before advancing'
+                  : currentStep === 10 && !dryRunSuccess
+                  ? 'Execute and pass dry run to advance'
+                  : undefined
+              }
             >
               <span>{currentStep === 14 ? 'Completed' : 'Next Step'}</span>
               <ArrowRight size={14} />

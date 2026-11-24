@@ -9,6 +9,7 @@ import {
   UseGuards,
   HttpCode,
   HttpStatus,
+  BadRequestException,
 } from '@nestjs/common';
 import { ConnectionService, CreateConnectionDto } from './connection.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -34,6 +35,19 @@ export class ConnectionController {
     @Body() body: CreateConnectionDto,
   ) {
     return this.connectionService.createConnection(workspaceId, body, user.id);
+  }
+
+  @Post('connections')
+  async createConnectionRoot(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: any,
+  ) {
+    const wsId = body.workspaceId || (body as any).workspace_id;
+    if (!wsId) {
+      throw new BadRequestException('workspaceId is required in connection payload.');
+    }
+    const { workspaceId: _, workspace_id: __, ...dto } = body;
+    return this.connectionService.createConnection(wsId, dto as CreateConnectionDto, user.id);
   }
 
   @Get('connections/:connectionId')

@@ -13,7 +13,7 @@ export interface QueryResult<T = any> {
 @Injectable()
 export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   private pool: pg.Pool | null = null;
-  public isConnected = false;
+  private isConnected = false;
   private customDatabaseUrl?: string;
   private customSearchPath?: string;
 
@@ -519,6 +519,20 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Only idempotent read queries (SELECT, SHOW, SET, EXPLAIN) are safe to retry on transient connection resets.
+   * Mutating queries (INSERT, UPDATE, DELETE) are never blindly retried to prevent duplicate side effects.
+   */
+  private isIdempotentQuery(sql: string): boolean {
+    const trimmed = sql.trim().toUpperCase();
+    return (
+      trimmed.startsWith('SELECT') ||
+      trimmed.startsWith('SHOW') ||
+      trimmed.startsWith('SET') ||
+      trimmed.startsWith('EXPLAIN')
+    );
+  }
+
+  /**
    * Executes a parameterized SQL query.
    * If PostgreSQL is connected, executes directly on PostgreSQL.
    * SQL errors from PostgreSQL are NEVER swallowed or silently redirected to memory.
@@ -527,6 +541,8 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     if (this.isConnected && this.pool) {
       let attempts = 0;
       const maxAttempts = 3;
+      const canRetry = this.isIdempotentQuery(text);
+
       while (attempts < maxAttempts) {
         attempts++;
         try {
@@ -545,11 +561,13 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
             err.message?.includes('ENOTFOUND') ||
             err.message?.includes('Connection terminated') ||
             err.message?.includes('closed unexpectedly');
-          if (isTransient && attempts < maxAttempts) {
+
+          if (isTransient && canRetry && attempts < maxAttempts) {
+            const backoffMs = Math.min(200 * Math.pow(2, attempts - 1) + Math.floor(Math.random() * 100), 2000);
             console.warn(
-              `[DatabaseService] Transient database socket error (${err.message}), retrying query (attempt ${attempts}/${maxAttempts}) in ${attempts * 500}ms...`,
+              `[DatabaseService] Transient database socket error on idempotent query (${err.message}), retrying (attempt ${attempts}/${maxAttempts}) in ${backoffMs}ms...`,
             );
-            await new Promise((r) => setTimeout(r, attempts * 500));
+            await new Promise((r) => setTimeout(r, backoffMs));
             continue;
           }
           throw err;

@@ -24,12 +24,14 @@ import { resolvePlanVersionId, evaluateDryRunResponse } from '../../frontend/lib
 
 vi.setConfig({ testTimeout: 120000, hookTimeout: 120000 });
 
-const REAL_MONGO_URI =
-  process.env.MONGODB_URI ||
-  process.env.MONGO_URL ||
-  'mongodb+srv://dhakreshivkant_db_user:u7RAqQ4zEdhf3XCJ@migrationguard.jnsclwx.mongodb.net/?retryWrites=true&w=majority';
+const REAL_MONGO_URI = process.env.MONGODB_URI || process.env.MONGO_URL;
+if (!REAL_MONGO_URI) {
+  throw new Error(
+    '[Security Guard] MONGODB_URI or MONGO_URL environment variable must be explicitly configured. Hardcoded database credentials are strictly forbidden.',
+  );
+}
 
-describe('Wizard Routes & Live Backend Integration Acceptance E2E Suite', () => {
+describe('Wizard Routes & Service-Level Backend Integration Acceptance Suite', () => {
   let db: DatabaseService;
   let workspaceService: WorkspaceService;
   let projectService: ProjectService;
@@ -135,7 +137,15 @@ describe('Wizard Routes & Live Backend Integration Acceptance E2E Suite', () => 
   });
 
   afterEach(async () => {
-    await db?.onModuleDestroy();
+    try {
+      if (db?.isDbConnected) {
+        await db.query(`DROP TABLE IF EXISTS customers CASCADE;`);
+      }
+    } catch {
+      // Ignore teardown table errors
+    } finally {
+      await db?.onModuleDestroy();
+    }
   });
 
   describe('1. Scoped Mapping Endpoints (Contract Gap Resolution)', () => {

@@ -1,43 +1,42 @@
 # MigrationGuard Complete Requirement-to-Code Audit
-**Audit Date:** November 25, 2026 (Updated with PostgreSQL 18 AST + semantic catalog retry safety, Step 13 discrepancy-fetch tracking, and Playwright E2E suite)
-**Methodology:** Direct AST & Code-level Source Inspection (`packages/core`, `packages/backend`, `packages/worker`, `packages/frontend`)
+**Audit Date:** November 25, 2026 (Updated with full 5-Tier CI verification: PostgreSQL 18 AST + semantic catalog retry safety, Step 13 discrepancy-fetch tracking, and passing Chromium 14-step Playwright E2E)
+**Methodology:** Direct AST, Code-level & Multi-Tier Live E2E Source Inspection (`packages/core`, `packages/backend`, `packages/worker`, `packages/frontend`, `e2e`)
 **Audit Scope:** All 59 Functional Requirements (`02_FRD.md`)
-**Implementation Readiness Score:** **64.4% (38 / 59 Requirements Implemented & Verified across Unit/Service/Worker/UI Safety Tiers)**
+**Implementation Readiness Score:** **64.4% (38 / 59 Requirements Implemented & Verified across Core, Service, Worker, and Live Browser Tiers)**
 
 > [!IMPORTANT]
-> **Semantic SQL Retry Safety, Step 13 Error Fidelity & Browser E2E Wiring.**
+> **Full 5-Tier Verification Complete — Mandatory Atlas Password Rotation Reminder Preserved.**
 > - **Credential Scrubbing & History Notice:** Hardcoded MongoDB Atlas credentials were removed from tests (`wizard-routes-e2e.spec.ts`) and audit documents (`git grep` clean on HEAD). Because ancestor commit `67c4df6` remains in public Git history, deleting the string from HEAD does not invalidate the exposed credential — **rotating or revoking the database user password in MongoDB Atlas is mandatory and cannot be verified from GitHub.**
-> - **PostgreSQL AST + Semantic Catalog Retry Verification (`sql-retry-safety.ts`, `database.service.ts`):** Upgraded retry-safety from lexical tokenization to genuine PostgreSQL 18 parsing (`libpg-query` WASM) paired with live `pg_catalog` semantic verification (`verifyQuerySemanticRetrySafety()`). Before retrying any transient socket error inside `DatabaseService.query()`, PostgreSQL system catalogs (`current_schemas`, `pg_class`, `pg_attribute`, `pg_type`, `pg_rewrite`, `pg_proc`, `pg_operator`, `pg_cast`) are checked to enforce `pg_catalog` first on `search_path`, ordinary/partitioned tables without rules or RLS, built-in `pg_catalog` scalar column types only, and zero custom/overloaded casts, functions, or operators — closing custom source casts (`custom_value::text`), overloaded functions (`LOWER(custom_value)`), and custom operators (`left_value + right_value`). Verified via `15/15` tests in `database-retry-safety.spec.ts` and real PostgreSQL `CREATE TYPE`/`CREATE CAST`/`CREATE FUNCTION`/`CREATE OPERATOR`/`search_path` tests in `database-postgres-live-integration.spec.ts`.
+> - **PostgreSQL AST + Semantic Catalog Retry Verification (`sql-retry-safety.ts`, `database.service.ts`):** Upgraded retry-safety from lexical tokenization to genuine PostgreSQL 18 parsing (`libpg-query` WASM) paired with live `pg_catalog` semantic verification (`verifyQuerySemanticRetrySafety()`). Cast `current_schemas(true/false)::text[]` (since `pg` returns unparsed strings for `name[]`) with explicit catalog casts, enforcing `pg_catalog` first on `search_path`, ordinary/partitioned tables without rules or RLS, built-in `pg_catalog` scalar column types only, and zero custom/overloaded casts, functions, or operators — closing custom source casts (`custom_value::text`), overloaded functions (`LOWER(custom_value)`), and custom operators (`left_value + right_value`). Verified via `15/15` tests in `database-retry-safety.spec.ts` and real PostgreSQL `CREATE TYPE`/`CREATE CAST`/`CREATE FUNCTION`/`CREATE OPERATOR`/`search_path` tests in `database-postgres-live-integration.spec.ts` in CI.
 > - **Step 13 Discrepancy-Fetch State (`wizard-utils.ts`, `wizard/page.tsx`):** Replaced unconditional empty/stale discrepancy count rendering with explicit `discrepancyFetchStatus` (`idle | loading | loaded | error`). When `getDiscrepancies()` fails after `triggerValidation()` completes, category tiles render `—` instead of `0`, surface a retryable error banner (`Retry Fetching Discrepancies`), and `canTransitionWizardStep()` blocks advancing to Step 14 until discrepancies load cleanly.
-> - **Live Wizard UI Metrics & Centralized Stepper Gating (`wizard-utils.ts`, `wizard/page.tsx`):** Eliminated fabricated defaults in live mode; aligned Step 12 metrics with `ProgressService` fields (`recordsPerSecond`, `percentageComplete`); and replaced ad-hoc navigation checks with `canTransitionWizardStep()` enforcing prerequisites uniformly on both the top `WIZARD_STEPS` indicator bar and the bottom `Next Step` button.
-> - **Validation Lifecycle & Worker E2E Isolation:** `ValidationService.triggerValidation()` rejects runs not in `'COMPLETED'`; `worker-main-pipeline-e2e.spec.ts` isolates PostgreSQL (`"${testSchema}".uuid_generate_v4()`), ephemeral MongoDB, and prefixed BullMQ queues with zero fallback to `DATABASE_URL` or global `uuid-ossp` installation.
-> - **Multi-Tier Verification Delineation:**
->   - **Tier 1 (Core Unit & PostgreSQL Semantic Integration):** `97/97` core tests + `15/15` in `database-retry-safety.spec.ts` + real PostgreSQL custom-type/cast/overload/operator tests in `database-postgres-live-integration.spec.ts`.
+> - **Full-Stack Live Contract Fixes Caught by Tier 5 Browser E2E:** Running the real Next.js + NestJS + BullMQ + MongoDB + PostgreSQL 14-step click-through (`e2e/wizard-journey.spec.ts`) exposed and resolved real runtime defects: NestJS `@Optional() @Inject(...)` DI annotations in `DatabaseService`/`QueueService`, removing undeclared `express` import via `NestExpressApplication.useBodyParser`, returning `snapshot_json` in `SchemaService.listSnapshots()`, normalizing `config`/`credentialVersion` & `reachable`/`success` connection shapes, computing real completed batch progress in `ProgressService`, decoding typed BSON `record_manifests.source_key` prefixes in `ValidationService.fetchSourceRecords()`, unwinding DAG ancestors cleanly in `CryptoUtil.redactSecrets()`, skipping `TransformInterceptor` on sent `@Res()` downloads, and ignoring missing legacy `discrepancy_records` table in `ReportService` on clean zero-discrepancy runs.
+> - **Multi-Tier Verification Delineation (CI Run `45511419545` — Green):**
+>   - **Tier 1 (Core Unit & PostgreSQL Semantic Integration):** `97/97` core tests + `15/15` in `database-retry-safety.spec.ts` + live PostgreSQL custom-type/cast/overload/operator/search_path tests in `database-postgres-live-integration.spec.ts`.
 >   - **Tier 2 (Dry-Run, Stepper & Step 13 Regression Suite):** `27/27` passed (`wizard-dry-run-regression.spec.ts`).
 >   - **Tier 3 (Service & Controller Integration Suite):** `5/5` passed in CI (`wizard-routes-e2e.spec.ts`).
 >   - **Tier 4 (Worker Execution & Crash Recovery):** `worker-main-pipeline-e2e.spec.ts`, `config-fail-closed-worker.spec.ts`, `real-postgres-write.spec.ts`, `checkpoint-concurrency-postgres.spec.ts`.
->   - **Tier 5 (Browser UI E2E - Playwright):** `e2e/wizard-ui-safety.spec.ts` verified in Chromium (stepper gates + Step 13 HTTP 500 `—` count withholding & recovery); full 14-step live stack + HTML/CSV download journey added in `e2e/wizard-journey.spec.ts` and wired into `.github/workflows/ci.yml`.
+>   - **Tier 5 (Browser UI & Full-Stack Live E2E - Playwright):** `2/2` passed in headless Chromium (`e2e/wizard-ui-safety.spec.ts` stepper gating & Step 13 error withholding + `e2e/wizard-journey.spec.ts` full live 14-step click-through, BullMQ execution, validation reconciliation, and real HTML/CSV downloads).
 
 ---
 
 ## 1. Wizard Implementation & Multi-Tier Verification Matrix
 
-The 14-step Wizard frontend UI and backend routes are wired without non-demo fabricated defaults. The matrix below separates **Code/UI Wiring**, **Service-Level Integration**, **Worker Execution**, and **Browser E2E Testing** so Steps 12–14 are not overstated as browser-verified:
+The 14-step Wizard frontend UI and backend routes are wired without non-demo fabricated defaults. The matrix below documents **Code/UI Wiring**, **Service-Level Integration**, **Worker Execution**, and **Browser E2E Testing** across all 14 steps while keeping non-Wizard standalone dashboard gaps clearly scoped in Section 3:
 
 | Step | Wizard Capability | Code & API Wired | Service Integration | Worker Execution | Browser E2E | Notes & Evidence |
 |---|---|---|---|---|---|---|
-| **1–2** | MongoDB & PostgreSQL Connection Select | ✅ Yes | ✅ Verified | — N/A | ⏳ Staged | `apiClient.getConnections()` / `createConnection` aligned to `/workspaces/:id/connections`. |
-| **3** | Dual TCP/TLS Handshake & Gating | ✅ Yes | ✅ Verified | — N/A | ⏳ Staged | `apiClient.testConnection()` probes live connectivity; `canTransitionWizardStep()` gates both Next Step and the top stepper indicator until 200 OK. |
-| **4–5** | Source & Target Schema Snapshots | ✅ Yes | ✅ Verified | — N/A | ⏳ Staged | Renders actual snapshot collections/tables; explicit missing-snapshot instructions in live mode. |
-| **6** | Schema Mapping AI Agent Suggestions | ✅ Yes | ✅ Verified | — N/A | ⏳ Staged | Calls `POST /mapping-versions/:id/ai-suggestions`; demo bullet recommendations gated to demo mode. |
-| **7** | Canonical Mapping DSL & Persistence | ✅ Yes | ✅ Verified | — N/A | ⏳ Staged | Validates allowlist & saves immutable `mapping_versions` via `POST /plans/:id/mapping-versions`. |
-| **8** | Transformation Preview Drawer | ✅ Yes | ✅ Verified | — N/A | ⏳ Staged | Calls `POST /mapping-versions/:id/preview` requiring snapshot sample in live mode. |
-| **9** | Plan Execution Configuration | ✅ Yes | ✅ Verified | — N/A | ⏳ Staged | Persists `migration_plan_versions`; tracks config hash for modification invalidation. |
-| **10** | Fail-Closed Dry Run Preflight | ✅ Yes | ✅ Verified | — N/A | ⏳ Staged | `POST /plan-versions/:versionId/dry-runs`; strict metrics & stepper gating verified in `wizard-dry-run-regression.spec.ts`. |
-| **11** | RFC 8785 Cryptographic Approval | ✅ Yes | ✅ Verified | — N/A | ⏳ Staged | `PlanApprovalModal` enforces matching hash & invalidates if config drifted post-dry-run; Stepper blocks Step 12 until `APPROVED`. |
-| **12** | Live Run Dispatch & Progress Monitor | ✅ Yes | 🟡 Service Only | ✅ Worker Suite | ⏳ Staged | Service suite verifies `QUEUED` state & polling; real BullMQ batch writes verified separately in `worker-main-pipeline-e2e.spec.ts`. UI reads `recordsPerSecond`/`percentageComplete` and displays `NOT STARTED` / `0%` / `—` until active. |
-| **13** | Validation & Discrepancy Reconciliation | ✅ Yes | ✅ Verified | ✅ Worker Suite | 🧪 UI Safety Verified | `ValidationService.triggerValidation()` & Step 13 UI enforce `run.status === 'COMPLETED'`; `discrepancyFetchStatus` withholds `—` instead of `0` on fetch errors (`wizard-ui-safety.spec.ts`). |
-| **14** | Assurance Package HTML/CSV Export | ✅ Yes | ✅ Verified | — N/A | ⏳ Pending CI | Backend HTML/CSV report generation verified in service tests; requires completed & loaded Step 13 validation in live mode; browser download tested in `e2e/wizard-journey.spec.ts` via CI. |
+| **1–2** | MongoDB & PostgreSQL Connection Select | ✅ Yes | ✅ Verified | — N/A | ✅ Playwright CI | `apiClient.getConnections()` / `createConnection` normalize `config_json`/`config` & `credential_version`; verified in `wizard-journey.spec.ts`. |
+| **3** | Dual TCP/TLS Handshake & Gating | ✅ Yes | ✅ Verified | — N/A | ✅ Playwright CI | `apiClient.testConnection()` normalizes `reachable`/`success`; `canTransitionWizardStep()` gates top stepper and Next Step (`wizard-ui-safety.spec.ts`, `wizard-journey.spec.ts`). |
+| **4–5** | Source & Target Schema Snapshots | ✅ Yes | ✅ Verified | — N/A | ✅ Playwright CI | `SchemaService.listSnapshots()` includes `snapshot_json` collections/tables; live snapshot rendering verified in `wizard-journey.spec.ts`. |
+| **6** | Schema Mapping AI Agent Suggestions | ✅ Yes | ✅ Verified | — N/A | ✅ Playwright CI | Calls `POST /mapping-versions/:id/ai-suggestions` (`AI_ENABLED=false` offline deterministic provider verified in `wizard-journey.spec.ts`). |
+| **7** | Canonical Mapping DSL & Persistence | ✅ Yes | ✅ Verified | — N/A | ✅ Playwright CI | Validates allowlist & saves immutable `mapping_versions` in Step 7 (`wizard-journey.spec.ts`). |
+| **8** | Transformation Preview Drawer | ✅ Yes | ✅ Verified | — N/A | ✅ Playwright CI | Calls `POST /mapping-versions/:id/preview` using live `snapshot_json` sample document (`wizard-journey.spec.ts`). |
+| **9** | Plan Execution Configuration | ✅ Yes | ✅ Verified | — N/A | ✅ Playwright CI | Persists `migration_plan_versions`; tracks config hash for modification invalidation (`wizard-journey.spec.ts`). |
+| **10** | Fail-Closed Dry Run Preflight | ✅ Yes | ✅ Verified | — N/A | ✅ Playwright CI | `POST /plan-versions/:versionId/dry-runs`; strict metrics verified (`wizard-dry-run-regression.spec.ts`, `wizard-journey.spec.ts`). |
+| **11** | RFC 8785 Cryptographic Approval | ✅ Yes | ✅ Verified | — N/A | ✅ Playwright CI | `PlanApprovalModal` enforces matching hash & invalidates if config drifted post-dry-run (`wizard-journey.spec.ts`). |
+| **12** | Live Run Dispatch & Progress Monitor | ✅ Yes | ✅ Verified | ✅ Worker Suite | ✅ Playwright CI | Real BullMQ dispatch -> worker Mongo-to-Postgres ETL -> `COMPLETED` + `100% Complete` verified live in `wizard-journey.spec.ts` and `worker-main-pipeline-e2e.spec.ts`. |
+| **13** | Validation & Discrepancy Reconciliation | ✅ Yes | ✅ Verified | ✅ Worker Suite | ✅ Playwright CI | `ValidationService.triggerValidation()` (with typed BSON `source_key` decoding) -> `PASSED`, `0` discrepancies (`wizard-journey.spec.ts`), plus HTTP 500 `—` withholding & recovery (`wizard-ui-safety.spec.ts`). |
+| **14** | Assurance Package HTML/CSV Export | ✅ Yes | ✅ Verified | — N/A | ✅ Playwright CI | Backend HTML/CSV generation (`discrepancies` zero-row path) & Chromium file download verified end-to-end in `wizard-journey.spec.ts`. |
 
 ---
 
@@ -81,7 +80,7 @@ The 14-step Wizard frontend UI and backend routes are wired without non-demo fab
 
 | Classification | Count | Percentage | Scope & Tier Boundaries |
 |---|---|---|---|
-| **Implemented & Verified (Unit / Service / Worker Tiers)** | **38** | **64.4%** | Complete code & automated test coverage across Tiers 1–4; Browser UI E2E (Tier 5) staged. |
+| **Implemented & Verified (Core / Service / Worker / Wizard E2E)** | **38** | **64.4%** | Verified across Tiers 1–5 (14-step Wizard Playwright CI run `45511419545` green; non-Wizard dashboard/connector gaps keep overall FRD score bounded). |
 | **Implemented but Insufficiently Tested / Frontend Disconnected** | **12** | **20.3%** | Backend logic exists, but frontend is disconnected or lacks integration tests. |
 | **Partially Implemented** | **5** | **8.5%** | Core logic started or proposal-only (e.g. attachment adapter). |
 | **Mocked or Simulated** | **2** | **3.4%** | Purely mocked in UI (e.g. Snapshot diff UI). |
@@ -90,7 +89,7 @@ The 14-step Wizard frontend UI and backend routes are wired without non-demo fab
 
 ```mermaid
 pie title Requirement Implementation Breakdown (59 Total)
-    "Implemented & Verified (Tiers 1-4)" : 38
+    "Implemented & Verified (Tiers 1-5)" : 38
     "Insufficiently Tested / Disconnected" : 12
     "Partially Implemented" : 5
     "Mocked / Simulated" : 2
@@ -387,9 +386,9 @@ pie title Requirement Implementation Breakdown (59 Total)
 
 #### FR-VAL-007 (P0): Persist discrepancy category, severity, affected identifiers, check ID
 - **Classification:** **Fully implemented and verified**
-- **Code & Routes:** `discrepancy_records` table, `ValidationService.saveDiscrepancies`.
-- **Test Coverage:** Verified in live E2E runs.
-- **Frontend Status:** Fetches discrepancies; displays in Step 13 table.
+- **Code & Routes:** `discrepancies` table (`schema.sql`), `ValidationService.triggerValidation()`, `DiscrepancyService.listDiscrepancies()`.
+- **Test Coverage:** Verified in live E2E runs (`wizard-journey.spec.ts`, `validation-durable-reports.spec.ts`).
+- **Frontend Status:** Fetches discrepancies via `discrepancyFetchStatus` state; displays `—` with retry button on fetch errors and in Step 13 table when loaded.
 
 #### FR-VAL-008 (P0): Generate CSV and HTML reports with scope, checks, totals, exceptions
 - **Classification:** **Fully implemented and verified**

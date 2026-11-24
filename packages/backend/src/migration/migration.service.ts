@@ -130,15 +130,22 @@ export class MigrationService implements OnModuleInit, OnModuleDestroy {
           )
         : mappingObjects.length > 0
         ? mappingObjects.map((m: any) => ({
-            source: m.source?.collection || m.source?.object || (typeof m.source === 'string' ? m.source : 'customers'),
-            destination: m.destination?.table || m.destination?.object || (typeof m.destination === 'string' ? m.destination : 'customers'),
-          }))
-        : [
+            source: m.source?.collection || m.source?.object || m.source,
+            destination: m.destination?.table || m.destination?.object || m.destination,
+          })).filter((t: any) => Boolean(t.source && t.destination))
+        : scope.sourceObject && scope.destinationObject
+        ? [
             {
-              source: scope.sourceObject || 'customers',
-              destination: scope.destinationObject || 'customers',
+              source: scope.sourceObject,
+              destination: scope.destinationObject,
             },
-          ];
+          ]
+        : [];
+
+    if (tables.length === 0 && (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false')) {
+      throw new BadRequestException('No migration source and destination objects configured.');
+    }
+
     const rawMode = String(version.execution_config_json?.writeMode || 'upsert').toLowerCase();
     const writeMode: 'insert_only' | 'upsert' | 'skip_existing' =
       rawMode === 'insert_only' || rawMode === 'skip_existing' ? (rawMode as any) : 'upsert';
@@ -156,12 +163,38 @@ export class MigrationService implements OnModuleInit, OnModuleDestroy {
       const destinationObject = table.destination;
       const numBatches = explicitBatchesPerTable || 1;
 
-      const matched = mappingObjects.find(
+      // Exact source AND destination matching; fail closed on ambiguous or missing mapping
+      const exactMatches = mappingObjects.filter(
         (o: any) =>
-          (o.source?.collection || o.source?.object || o.source) === sourceObject ||
-          (o.destination?.table || o.destination?.object || o.destination) === destinationObject,
+          ((o.source?.collection || o.source?.object || o.source) === sourceObject) &&
+          ((o.destination?.table || o.destination?.object || o.destination) === destinationObject),
       );
-      const destKey = matched?.identity?.destinationKey || matched?.destination?.key || 'id';
+
+      if (exactMatches.length > 1) {
+        throw new BadRequestException(
+          `Ambiguous mapping: multiple mappings match source '${sourceObject}' and destination '${destinationObject}'. Startup migration failed closed.`,
+        );
+      }
+
+      if (exactMatches.length === 0 && (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false' || mappingObjects.length > 0)) {
+        throw new BadRequestException(
+          `No approved mapping found matching source '${sourceObject}' and destination '${destinationObject}'. Startup migration failed closed.`,
+        );
+      }
+
+      const matched = exactMatches.length === 1 ? exactMatches[0] : null;
+      const destKey = matched?.identity?.destinationKey || matched?.destination?.key || matched?.destination?.identityKey;
+
+      if (!destKey && (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false')) {
+        throw new BadRequestException(
+          `Missing destination identity key for mapped object '${sourceObject}' -> '${destinationObject}'. Prohibiting implicit 'id' default in production.`,
+        );
+      }
+
+      const resolvedDestKey = destKey || 'id';
+      // Resolve per-object connection overrides
+      const resolvedSourceConnId = matched?.sourceConnectionId || matched?.source?.connectionId || version.source_connection_id;
+      const resolvedDestConnId = matched?.destinationConnectionId || matched?.destination?.connectionId || version.destination_connection_id;
 
       for (let i = 1; i <= numBatches; i++) {
         overallSeq++;
@@ -207,10 +240,10 @@ export class MigrationService implements OnModuleInit, OnModuleDestroy {
           planVersionId,
           mappingVersionId: version.mapping_version_id || 'default-mapping',
           writeMode,
-          conflictColumns: [destKey],
-          destinationKey: destKey,
-          sourceConnectionId: version.source_connection_id,
-          destinationConnectionId: version.destination_connection_id,
+          conflictColumns: [resolvedDestKey],
+          destinationKey: resolvedDestKey,
+          sourceConnectionId: resolvedSourceConnId,
+          destinationConnectionId: resolvedDestConnId,
         });
       }
     }
@@ -338,6 +371,8 @@ export class MigrationService implements OnModuleInit, OnModuleDestroy {
             const writeMode = version?.execution_config_json?.writeMode || 'upsert';
 
             let destKey = 'id';
+            let objSourceConnId = version?.source_connection_id;
+            let objDestConnId = version?.destination_connection_id;
             const mapVersionId = b.mapping_version_id || version?.mapping_version_id;
             if (mapVersionId) {
               let mappingJson = planCache.get(`map_${mapVersionId}`);
@@ -356,13 +391,30 @@ export class MigrationService implements OnModuleInit, OnModuleDestroy {
               const objects: any[] = Array.isArray(mappingJson?.objects)
                 ? mappingJson.objects
                 : (mappingJson ? [mappingJson] : []);
-              const matched = objects.find(
+              const exactMatches = objects.filter(
                 (o: any) =>
-                  (o.source?.collection || o.source?.object || o.source) === b.source_object ||
-                  (o.destination?.table || o.destination?.object || o.destination) === b.destination_object,
-              ) || (objects.length === 1 ? objects[0] : null);
+                  ((o.source?.collection || o.source?.object || o.source) === b.source_object) &&
+                  ((o.destination?.table || o.destination?.object || o.destination) === b.destination_object),
+              );
+
+              if (exactMatches.length > 1) {
+                throw new Error(`Ambiguous mapping: multiple mappings match '${b.source_object}' -> '${b.destination_object}'`);
+              }
+
+              const matched = exactMatches.length === 1 ? exactMatches[0] : null;
               if (matched?.identity?.destinationKey || matched?.destination?.key || matched?.destination?.identityKey) {
                 destKey = matched.identity?.destinationKey || matched?.destination?.key || matched?.destination?.identityKey;
+              } else if (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false') {
+                if (matched) {
+                  throw new Error(`Missing destination identity key for '${b.destination_object}'. Prohibiting implicit default 'id' in production.`);
+                }
+              }
+
+              if (matched?.sourceConnectionId || matched?.source?.connectionId) {
+                objSourceConnId = matched.sourceConnectionId || matched.source?.connectionId;
+              }
+              if (matched?.destinationConnectionId || matched?.destination?.connectionId) {
+                objDestConnId = matched.destinationConnectionId || matched.destination?.connectionId;
               }
             }
 
@@ -371,8 +423,8 @@ export class MigrationService implements OnModuleInit, OnModuleDestroy {
               migrationRunId: bRunId,
               batchKey: b.batch_key,
               sequenceNo: Number(b.sequence_no),
-              sourceObject: b.source_object || 'customers',
-              destinationObject: b.destination_object || b.source_object || 'customers',
+              sourceObject: b.source_object,
+              destinationObject: b.destination_object || b.source_object,
               cursorStart: parseJsonField(b.source_cursor_start),
               cursorEnd: parseJsonField(b.source_cursor_end),
               batchSize,
@@ -382,8 +434,8 @@ export class MigrationService implements OnModuleInit, OnModuleDestroy {
               writeMode,
               conflictColumns: [destKey],
               destinationKey: destKey,
-              sourceConnectionId: version?.source_connection_id,
-              destinationConnectionId: version?.destination_connection_id,
+              sourceConnectionId: objSourceConnId,
+              destinationConnectionId: objDestConnId,
             });
           }
 

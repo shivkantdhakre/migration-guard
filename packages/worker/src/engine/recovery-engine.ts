@@ -59,6 +59,19 @@ export class RecoveryEngine {
     this.idTracker = config.idTracker;
   }
 
+  private async transitionToCommitted(batch: MigrationBatch): Promise<void> {
+    if (batch.status === 'RETRY_WAIT') {
+      // Valid, explicitly verified reconciliation path: RETRY_WAIT -> RUNNING -> COMMITTED
+      await this.manifestTracker.transitionState(batch.migrationRunId, batch.batchKey, 'RUNNING');
+    }
+    await this.manifestTracker.transitionState(
+      batch.migrationRunId,
+      batch.batchKey,
+      'COMMITTED',
+      'CHECKPOINT_COMMITTED',
+    );
+  }
+
   /**
    * Inspects all batches for a migration run, reconciles any in-flight/ambiguous states,
    * advances checkpoint if necessary, and determines the exact cursor to resume from.
@@ -158,12 +171,7 @@ export class RecoveryEngine {
       if (manifests.length === 0) {
         if (batch.recordsRead === 0 && (batch.recordsWritten === 0 || !batch.recordsWritten)) {
           // Empty batch with 0 records read: safe to commit
-          await this.manifestTracker.transitionState(
-            batch.migrationRunId,
-            batch.batchKey,
-            'COMMITTED',
-            'CHECKPOINT_COMMITTED',
-          );
+          await this.transitionToCommitted(batch);
           await this.checkpointManager.advanceCheckpoint({
             migrationRunId: batch.migrationRunId,
             sourceObject: batch.sourceObject,
@@ -253,12 +261,7 @@ export class RecoveryEngine {
       if (destinationKeys.length === 0) {
         if (skippedManifests.length > 0) {
           // All manifests were SKIPPED and verified present in destination
-          await this.manifestTracker.transitionState(
-            batch.migrationRunId,
-            batch.batchKey,
-            'COMMITTED',
-            'CHECKPOINT_COMMITTED',
-          );
+          await this.transitionToCommitted(batch);
           await this.checkpointManager.advanceCheckpoint({
             migrationRunId: batch.migrationRunId,
             sourceObject: batch.sourceObject,
@@ -384,12 +387,7 @@ export class RecoveryEngine {
         }
 
         // All keys found, all RFC 8785 hashes verified, durable record manifests confirmed!
-        await this.manifestTracker.transitionState(
-          batch.migrationRunId,
-          batch.batchKey,
-          'COMMITTED',
-          'CHECKPOINT_COMMITTED',
-        );
+        await this.transitionToCommitted(batch);
 
         await this.checkpointManager.advanceCheckpoint({
           migrationRunId: batch.migrationRunId,

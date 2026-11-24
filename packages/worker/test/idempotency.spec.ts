@@ -171,17 +171,19 @@ describe('Destination Writer & Idempotency (FR-EXEC-006)', () => {
       records: [
         {
           destinationKey: 'ord_1',
-          sourceKey: 'ord_1_v1',
+          sourceKey: 'ord_1',
+          contentHash: 'hash_1',
           sourceObject: 'orders',
           destinationObject: 'orders',
           data: { id: 'ord_1', status: 'pending' },
         },
         {
-          destinationKey: 'ord_1', // Duplicate key in same batch
-          sourceKey: 'ord_1_v2',
+          destinationKey: 'ord_1', // Duplicate key in same batch with identical sourceKey & contentHash
+          sourceKey: 'ord_1',
+          contentHash: 'hash_1',
           sourceObject: 'orders',
           destinationObject: 'orders',
-          data: { id: 'ord_1', status: 'completed' },
+          data: { id: 'ord_1', status: 'pending' },
         },
       ],
     };
@@ -194,6 +196,42 @@ describe('Destination Writer & Idempotency (FR-EXEC-006)', () => {
 
     expect(result.recordsWritten).toBe(1);
     expect(connector.store.size).toBe(1);
-    expect(connector.store.get('ord_1')?.status).toBe('completed');
+    expect(connector.store.get('ord_1')?.status).toBe('pending');
+  });
+
+  it('detects collisions when different source records map to the same destinationKey', async () => {
+    const connector = new MockDestinationConnector();
+    const writer = new DestinationWriter({ connector });
+
+    const batch: TransformedBatch = {
+      destinationObject: 'orders',
+      batchKey: 'batch_collision_01',
+      records: [
+        {
+          destinationKey: 'ord_1',
+          sourceKey: 'ord_1_v1',
+          contentHash: 'hash_v1',
+          sourceObject: 'orders',
+          destinationObject: 'orders',
+          data: { id: 'ord_1', status: 'pending' },
+        },
+        {
+          destinationKey: 'ord_1',
+          sourceKey: 'ord_1_v2',
+          contentHash: 'hash_v2',
+          sourceObject: 'orders',
+          destinationObject: 'orders',
+          data: { id: 'ord_1', status: 'completed' },
+        },
+      ],
+    };
+
+    await expect(
+      writer.write(batch, {
+        migrationRunId: 'run_collision',
+        sourceObject: 'orders',
+        writeMode: 'insert_only',
+      }),
+    ).rejects.toThrow(/Collision detected: distinct source records map to the same destinationKey/);
   });
 });

@@ -286,15 +286,23 @@ export class MongoSourceConnector implements SourceConnector {
     const filter: Record<string, unknown> = {};
 
     if (cursor?.lastId !== undefined && cursor?.lastId !== null) {
-      const lastIdStr = String(cursor.lastId);
-      if (/^[0-9a-fA-F]{24}$/.test(lastIdStr)) {
-        try {
-          filter._id = { $gt: new ObjectId(lastIdStr) };
-        } catch {
+      if (cursor.lastIdType === 'ObjectId') {
+        filter._id = { $gt: new ObjectId(String(cursor.lastId)) };
+      } else if (cursor.lastIdType === 'number') {
+        filter._id = { $gt: Number(cursor.lastId) };
+      } else if (cursor.lastIdType === 'string') {
+        filter._id = { $gt: String(cursor.lastId) };
+      } else {
+        const lastIdStr = String(cursor.lastId);
+        if (/^[0-9a-fA-F]{24}$/.test(lastIdStr)) {
+          try {
+            filter._id = { $gt: new ObjectId(lastIdStr) };
+          } catch {
+            filter._id = { $gt: cursor.lastId };
+          }
+        } else {
           filter._id = { $gt: cursor.lastId };
         }
-      } else {
-        filter._id = { $gt: cursor.lastId };
       }
     }
 
@@ -309,20 +317,40 @@ export class MongoSourceConnector implements SourceConnector {
     const batchDocs = hasMore ? docs.slice(0, limit) : docs;
 
     const records = batchDocs.map((doc) => {
-      const id = String(doc._id);
+      const rawId = doc._id;
+      let idType: 'ObjectId' | 'string' | 'number' | 'other' = 'other';
+      if (rawId instanceof ObjectId || (rawId && typeof rawId === 'object' && (rawId as any)._bsontype === 'ObjectID')) {
+        idType = 'ObjectId';
+      } else if (typeof rawId === 'string') {
+        idType = 'string';
+      } else if (typeof rawId === 'number') {
+        idType = 'number';
+      }
+
+      const id = String(rawId);
       return {
         sourceObject: options.sourceObject,
         sourceKey: id,
-        sourceCursor: { lastId: id },
+        sourceCursor: { lastId: id, lastIdType: idType },
         payload: doc,
         extractedAt: new Date().toISOString(),
       };
     });
 
-    const lastRecord = records[records.length - 1];
-    const nextCursor: SourceCursor | null = hasMore && lastRecord
-      ? { lastId: lastRecord.sourceKey }
-      : null;
+    const lastDoc = batchDocs[batchDocs.length - 1];
+    let nextCursor: SourceCursor | null = null;
+    if (hasMore && lastDoc) {
+      const rawId = lastDoc._id;
+      let idType: 'ObjectId' | 'string' | 'number' | 'other' = 'other';
+      if (rawId instanceof ObjectId || (rawId && typeof rawId === 'object' && (rawId as any)._bsontype === 'ObjectID')) {
+        idType = 'ObjectId';
+      } else if (typeof rawId === 'string') {
+        idType = 'string';
+      } else if (typeof rawId === 'number') {
+        idType = 'number';
+      }
+      nextCursor = { lastId: String(rawId), lastIdType: idType };
+    }
 
     return {
       records,

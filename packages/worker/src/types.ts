@@ -26,6 +26,7 @@ export interface SourceRecordEnvelope {
 
 export interface SourceCursor {
   lastId?: string | number | null;
+  lastIdType?: 'ObjectId' | 'string' | 'number' | 'other';
   sortField?: string;
   sortValue?: unknown;
   offset?: number;

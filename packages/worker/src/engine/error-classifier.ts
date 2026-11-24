@@ -70,16 +70,49 @@ export class ErrorClassifier {
    */
   public static classify(error: unknown, subStage?: BatchSubStage): ClassifiedError {
     const errorObj = (typeof error === 'object' && error !== null) ? (error as Record<string, unknown>) : {};
-    const message = (typeof errorObj.message === 'string') ? errorObj.message : String(error);
-    const code = (typeof errorObj.code === 'string') ? errorObj.code : (typeof errorObj.sqlState === 'string' ? errorObj.sqlState : 'UNKNOWN_ERROR');
+
+    // If already pre-classified, preserve or refine classification
+    if (errorObj.classified && typeof errorObj.classified === 'object') {
+      const pre = errorObj.classified as ClassifiedError;
+      if (pre.classification && pre.code) {
+        return {
+          ...pre,
+          subStage: subStage || pre.subStage,
+          originalError: errorObj.originalError || pre.originalError || error,
+        };
+      }
+    }
+
+    const underlying = (typeof errorObj.originalError === 'object' && errorObj.originalError !== null)
+      ? (errorObj.originalError as Record<string, unknown>)
+      : errorObj;
+
+    const message = (typeof errorObj.message === 'string' && errorObj.message)
+      ? errorObj.message
+      : (typeof underlying.message === 'string' && underlying.message)
+        ? underlying.message
+        : String(error);
+
+    const code = (typeof errorObj.code === 'string' && errorObj.code !== 'UNKNOWN_ERROR')
+      ? errorObj.code
+      : (typeof underlying.code === 'string' && underlying.code !== 'UNKNOWN_ERROR')
+        ? underlying.code
+        : (typeof errorObj.sqlState === 'string'
+          ? errorObj.sqlState
+          : (typeof underlying.sqlState === 'string' ? underlying.sqlState : 'UNKNOWN_ERROR'));
 
     // 1. Check for OUTCOME_UNKNOWN conditions:
     // If failure happened during destination write (subStage === 'WRITE_STARTED' or 'DESTINATION_WRITTEN')
     // and network disconnected or timed out, the destination commit status is ambiguous.
     const isWriteInFlight = subStage === 'WRITE_STARTED';
     const isNetworkError = NETWORK_RETRYABLE_CODES.has(code) ||
+      code === '08006' ||
+      code === '08000' ||
+      code === '08001' ||
+      code === '08004' ||
       message.includes('socket hang up') ||
       message.includes('connection reset') ||
+      message.includes('connection failure') ||
       message.includes('timeout') ||
       message.includes('EPIPE') ||
       code === 'EPIPE' ||
@@ -98,7 +131,7 @@ export class ErrorClassifier {
     }
 
     // 2. Check for explicit permanent database/data errors
-    if (PG_PERMANENT_CODES.has(code)) {
+    if (PG_PERMANENT_CODES.has(code) || code === 'COLLISION_DETECTED' || code === 'EMPTY_DESTINATION_PAYLOAD') {
       return {
         classification: 'PERMANENT',
         code,
@@ -116,6 +149,8 @@ export class ErrorClassifier {
       lowerMessage.includes('violates not-null constraint') ||
       lowerMessage.includes('violates foreign key constraint') ||
       lowerMessage.includes('violates unique constraint') ||
+      lowerMessage.includes('collision detected') ||
+      lowerMessage.includes('empty destination payload') ||
       lowerMessage.includes('syntax error') ||
       lowerMessage.includes('relation does not exist') ||
       lowerMessage.includes('column does not exist') ||

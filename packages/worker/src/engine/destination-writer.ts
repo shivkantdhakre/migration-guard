@@ -54,7 +54,18 @@ export class DestinationWriter {
   ): Promise<WriteResult> {
     const startTime = Date.now();
 
+    // 0. Validate destination payloads: reject empty destination payloads
+    for (const r of batch.records) {
+      if (!r.data || typeof r.data !== 'object' || Object.keys(r.data).length === 0) {
+        throw Object.assign(
+          new Error(`Record with destinationKey '${r.destinationKey}' produced an empty destination payload`),
+          { code: 'EMPTY_DESTINATION_PAYLOAD' },
+        );
+      }
+    }
+
     // 1. Deduplicate records within batch by destinationKey (in-batch idempotency guard)
+    // Detect collisions where different source records map to the same destination key
     const dedupedRecords = this.deduplicateRecords(batch.records);
     const sanitizedBatch: TransformedBatch = {
       destinationObject: batch.destinationObject,
@@ -83,13 +94,16 @@ export class DestinationWriter {
         conflictColumns: options.conflictColumns || ['id'],
         updateColumns: options.updateColumns,
       });
-    } catch (err) {
+    } catch (err: any) {
       // Classify error with WRITE_STARTED subStage so network timeouts are marked OUTCOME_UNKNOWN
       const classified = ErrorClassifier.classify(err, 'WRITE_STARTED');
-      throw Object.assign(
-        new Error(`Failed to write batch ${batch.batchKey} to destination: ${classified.message}`),
-        { classified, originalError: err },
-      );
+      const wrapped = new Error(`Failed to write batch ${batch.batchKey} to destination: ${classified.message}`);
+      throw Object.assign(wrapped, {
+        code: classified.code || err?.code,
+        sqlState: err?.sqlState || err?.code || classified.code,
+        classified,
+        originalError: err?.originalError || err,
+      });
     }
 
     // 4. Mark intermediate sub-stage: DESTINATION_WRITTEN
@@ -129,14 +143,19 @@ export class DestinationWriter {
     // 6. Persist record manifests (FR-EXEC-003)
     if (this.manifestTracker) {
       const manifests = sanitizedBatch.records.map((r) => {
-        let status: 'WRITTEN' | 'SKIPPED' | 'FAILED' = 'WRITTEN';
+        let status: 'WRITTEN' | 'SKIPPED' | 'FAILED' = 'FAILED';
         let error: string | undefined;
 
-        if (writeResult.skippedKeys.includes(r.destinationKey)) {
+        if (writeResult.writtenKeys.includes(r.destinationKey)) {
+          status = 'WRITTEN';
+        } else if (writeResult.skippedKeys.includes(r.destinationKey)) {
           status = 'SKIPPED';
         } else if (writeResult.failedKeys.some((f) => f.key === r.destinationKey)) {
           status = 'FAILED';
           error = writeResult.failedKeys.find((f) => f.key === r.destinationKey)?.error;
+        } else {
+          status = 'FAILED';
+          error = `Destination connector did not confirm write for key '${r.destinationKey}'`;
         }
 
         return {
@@ -177,18 +196,31 @@ export class DestinationWriter {
   }
 
   /**
-   * Deduplicate records in memory by destinationKey to avoid intra-batch primary key collisions
+   * Deduplicate records in memory by destinationKey to avoid intra-batch primary key collisions.
+   * Only deduplicate genuine duplicates (same sourceKey and contentHash).
+   * Detect and throw on collisions where different source records map to the same destination key.
    */
   private deduplicateRecords(records: TransformedRecord[]): TransformedRecord[] {
-    const seen = new Set<string>();
+    const seen = new Map<string, TransformedRecord>();
     const result: TransformedRecord[] = [];
 
-    // Keep the latest record for each key if duplicate appears within the batch
-    for (let i = records.length - 1; i >= 0; i--) {
-      const record = records[i];
-      if (!seen.has(record.destinationKey)) {
-        seen.add(record.destinationKey);
-        result.unshift(record);
+    for (const record of records) {
+      const existing = seen.get(record.destinationKey);
+      if (existing) {
+        // If different sourceKey or different contentHash, this is a collision, NOT a duplicate
+        if (existing.sourceKey !== record.sourceKey || existing.contentHash !== record.contentHash) {
+          throw Object.assign(
+            new Error(
+              `Collision detected: distinct source records map to the same destinationKey '${record.destinationKey}' ` +
+                `(sourceKey: '${existing.sourceKey}' vs '${record.sourceKey}', hashes: '${existing.contentHash}' vs '${record.contentHash}')`,
+            ),
+            { code: 'COLLISION_DETECTED' },
+          );
+        }
+        // Genuine duplicate: safely ignore subsequent occurrences
+      } else {
+        seen.set(record.destinationKey, record);
+        result.push(record);
       }
     }
 

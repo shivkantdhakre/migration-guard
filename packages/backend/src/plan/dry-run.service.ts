@@ -78,6 +78,7 @@ export class DryRunService {
 
     // Load destination schema snapshot if configured (or latest snapshot for destination connection)
     let destJson: any = null;
+    let isDestSnapStale = false;
     if (version.destination_schema_snapshot_id) {
       const destSnapRes = await this.db.query('SELECT * FROM schema_snapshots WHERE id = $1', [
         version.destination_schema_snapshot_id,
@@ -92,10 +93,8 @@ export class DryRunService {
              LIMIT 1`,
             [version.destination_connection_id, dSnap.schema_version, dSnap.created_at],
           );
-          if (newerRes.rows.length > 0 && (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false')) {
-            throw new BadRequestException(
-              `Cannot perform dry run: destination schema snapshot ${version.destination_schema_snapshot_id} is stale. An updated destination schema snapshot is required in production.`,
-            );
+          if (newerRes.rows.length > 0) {
+            isDestSnapStale = true;
           }
         }
         destJson = dSnap.snapshot_json || {};
@@ -112,66 +111,98 @@ export class DryRunService {
 
     // In addition to snapshots, inspect live destination database schema if destination connection is configured
     let liveDestEntities: any[] | null = null;
-    if (version.destination_connection_id && this.credentialsService) {
-      try {
-        const dstConnRes = await this.db.query('SELECT * FROM connections WHERE id = $1', [version.destination_connection_id]);
-        if (dstConnRes.rows.length > 0) {
-          const dstConn = dstConnRes.rows[0];
-          if (dstConn.engine === 'POSTGRESQL') {
-            const creds = await this.credentialsService.getDecryptedCredentials(dstConn.id, dstConn.credential_version);
-            const connStr = creds?.connectionString || creds?.uri || creds?.url;
-            if (connStr && connStr !== appConfig.databaseUrl) {
-              const pg = require('pg');
-              const pool = new pg.Pool({ connectionString: connStr, connectionTimeoutMillis: 2000 });
-              try {
-                const tRes = await pool.query(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'`);
-                const cRes = await pool.query(`
-                  SELECT table_name, column_name, data_type, udt_name, is_nullable, character_maximum_length
-                  FROM information_schema.columns
-                  WHERE table_schema = 'public'
-                `);
-                const kRes = await pool.query(`
-                  SELECT tc.table_name, kcu.column_name, tc.constraint_type
-                  FROM information_schema.table_constraints tc
-                  JOIN information_schema.key_column_usage kcu
-                    ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
-                  WHERE tc.table_schema = 'public' AND tc.constraint_type IN ('PRIMARY KEY', 'UNIQUE')
-                `);
+    const isStrict = process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false';
+    const liveSchemaRequired = !destJson || isDestSnapStale;
 
-                const tableMap = new Map<string, any>();
-                for (const t of tRes.rows) {
-                  tableMap.set(t.table_name, { name: t.table_name, columns: [] });
-                }
-                for (const c of cRes.rows) {
-                  let tbl = tableMap.get(c.table_name);
-                  if (!tbl) {
-                    tbl = { name: c.table_name, columns: [] };
-                    tableMap.set(c.table_name, tbl);
+    if (version.destination_connection_id) {
+      if (!this.credentialsService && isStrict && liveSchemaRequired) {
+        throw new BadRequestException('Cannot perform dry run: credentialsService is unavailable for live destination catalog inspection.');
+      }
+      if (this.credentialsService) {
+        try {
+          const dstConnRes = await this.db.query('SELECT * FROM connections WHERE id = $1', [version.destination_connection_id]);
+          if (dstConnRes.rows.length === 0) {
+            if (isStrict && liveSchemaRequired) {
+              throw new BadRequestException(`Cannot perform dry run: destination connection '${version.destination_connection_id}' not found in workspace.`);
+            }
+          } else {
+            const dstConn = dstConnRes.rows[0];
+            if (dstConn.engine !== 'POSTGRESQL') {
+              if (isStrict && liveSchemaRequired) {
+                throw new BadRequestException(`Cannot perform dry run: destination engine '${dstConn.engine}' is unsupported for live catalog inspection.`);
+              }
+            } else {
+              const creds = await this.credentialsService.getDecryptedCredentials(dstConn.id, dstConn.credential_version);
+              const connStr = creds?.connectionString || creds?.uri || creds?.url;
+              if (connStr && connStr !== appConfig.databaseUrl) {
+                const pg = require('pg');
+                const pool = new pg.Pool({ connectionString: connStr, connectionTimeoutMillis: 2000 });
+                try {
+                  const tRes = await pool.query(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'`);
+                  const cRes = await pool.query(`
+                    SELECT table_name, column_name, data_type, udt_name, is_nullable, character_maximum_length
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                  `);
+                  const kRes = await pool.query(`
+                    SELECT tc.table_name, kcu.column_name, tc.constraint_type
+                    FROM information_schema.table_constraints tc
+                    JOIN information_schema.key_column_usage kcu
+                      ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
+                    WHERE tc.table_schema = 'public' AND tc.constraint_type IN ('PRIMARY KEY', 'UNIQUE')
+                  `);
+
+                  const tableMap = new Map<string, any>();
+                  for (const t of tRes.rows) {
+                    tableMap.set(t.table_name, { name: t.table_name, columns: [] });
                   }
-                  const isPk = kRes.rows.some((k: any) => k.table_name === c.table_name && k.column_name === c.column_name && k.constraint_type === 'PRIMARY KEY');
-                  const isUnq = isPk || kRes.rows.some((k: any) => k.table_name === c.table_name && k.column_name === c.column_name && k.constraint_type === 'UNIQUE');
-                  tbl.columns.push({
-                    name: c.column_name,
-                    type: c.udt_name || c.data_type,
-                    data_type: c.data_type,
-                    udt_name: c.udt_name,
-                    nullable: c.is_nullable !== 'NO',
-                    is_nullable: c.is_nullable,
-                    isPrimaryKey: isPk,
-                    isUnique: isUnq,
-                    maxLength: c.character_maximum_length,
-                  });
+                  for (const c of cRes.rows) {
+                    let tbl = tableMap.get(c.table_name);
+                    if (!tbl) {
+                      tbl = { name: c.table_name, columns: [] };
+                      tableMap.set(c.table_name, tbl);
+                    }
+                    const isPk = kRes.rows.some((k: any) => k.table_name === c.table_name && k.column_name === c.column_name && k.constraint_type === 'PRIMARY KEY');
+                    const isUnq = isPk || kRes.rows.some((k: any) => k.table_name === c.table_name && k.column_name === c.column_name && k.constraint_type === 'UNIQUE');
+                    tbl.columns.push({
+                      name: c.column_name,
+                      type: c.udt_name || c.data_type,
+                      data_type: c.data_type,
+                      udt_name: c.udt_name,
+                      nullable: c.is_nullable !== 'NO',
+                      is_nullable: c.is_nullable,
+                      isPrimaryKey: isPk,
+                      isUnique: isUnq,
+                      maxLength: c.character_maximum_length,
+                    });
+                  }
+                  liveDestEntities = Array.from(tableMap.values());
+                } finally {
+                  await pool.end().catch(() => {});
                 }
-                liveDestEntities = Array.from(tableMap.values());
-              } finally {
-                await pool.end().catch(() => {});
+              } else if (!connStr && isStrict && liveSchemaRequired) {
+                throw new BadRequestException('Cannot perform dry run: destination connection credentials missing or unavailable in vault.');
               }
             }
           }
+        } catch (err: any) {
+          console.warn(`[DryRunService] Live destination catalog inspection notice: ${err.message}`);
+          if (isStrict && liveSchemaRequired) {
+            if (err instanceof BadRequestException) {
+              throw err;
+            }
+            throw new BadRequestException(
+              `Cannot perform dry run: live destination catalog inspection failed (${err.message}). In production, live inspection failures cannot be bypassed by falling back to schema snapshots.`,
+            );
+          }
         }
-      } catch (err: any) {
-        console.warn(`[DryRunService] Live destination catalog inspection notice: ${err.message}`);
       }
+    }
+
+    if (isStrict && isDestSnapStale && (!liveDestEntities || liveDestEntities.length === 0)) {
+      throw new BadRequestException(
+        `Cannot perform dry run: destination schema snapshot ${version.destination_schema_snapshot_id} is stale and live inspection failed. Refusing to continue with stale snapshot in production.`,
+      );
     }
 
     // In production, destination schema (live catalog or snapshot) is strictly required for dry-run validation

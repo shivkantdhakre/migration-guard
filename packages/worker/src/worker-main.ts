@@ -329,7 +329,7 @@ if (MONGO_URL && process.env.IGNORE_ENV_SOURCE_CONNECTOR !== 'true') {
 }
 
 // Vault Credentials Resolution Cache
-const sourceConnectorCache = new Map<string, SourceConnector>();
+const sourceConnectorCache = new Map<string, { connector: SourceConnector; connectionId: string; credVer: string | number }>();
 // destPoolCache is declared above near defaultDestinationConnector
 
 /**
@@ -431,10 +431,6 @@ async function getSourceConnector(payload: MigrationJobPayload): Promise<SourceC
     );
   }
 
-  if (sourceConnectorCache.has(connectionId)) {
-    return sourceConnectorCache.get(connectionId)!;
-  }
-
   const vault = await resolveConnectionFromVault(connectionId);
   if (!vault || !vault.credentials) {
     throw new Error(
@@ -442,8 +438,46 @@ async function getSourceConnector(payload: MigrationJobPayload): Promise<SourceC
     );
   }
 
+  const credVer = vault.credentialVersion ?? 'unpinned';
+  const cacheKey = `${connectionId}:v${credVer}`;
+
+  if (sourceConnectorCache.has(cacheKey)) {
+    return sourceConnectorCache.get(cacheKey)!.connector;
+  }
+
+  // Recreate and close stale connectors after credential rotation
+  for (const [key, entry] of sourceConnectorCache.entries()) {
+    if (entry.connectionId === connectionId && key !== cacheKey) {
+      console.log(`[Worker] Credential rotation detected for source connection ${connectionId}. Closing stale connector ${key}`);
+      try {
+        if ('close' in entry.connector && typeof (entry.connector as any).close === 'function') {
+          await (entry.connector as any).close();
+        }
+      } catch (err: any) {
+        console.warn(`[Worker] Failed closing stale source connector ${key}: ${err.message}`);
+      }
+      sourceConnectorCache.delete(key);
+    }
+  }
+
   const uri = vault.credentials.uri || vault.credentials.connectionString || vault.credentials.url;
-  const dbName = vault.config?.database || process.env.MONGO_DB_NAME || 'migrationguard_e2e_source';
+  let dbName = vault.config?.database || vault.credentials?.database;
+  if (!dbName && uri) {
+    try {
+      const parsed = new URL(uri.replace(/^mongodb(\+srv)?:\/\//, 'http://'));
+      const pathname = parsed.pathname.replace(/^\//, '');
+      if (pathname) {
+        dbName = pathname;
+      }
+    } catch {}
+  }
+
+  if (!dbName) {
+    if (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false') {
+      throw new Error(`[Worker] Source connection ${connectionId} missing explicit database name in vault config or URI.`);
+    }
+    dbName = process.env.MONGO_DB_NAME || 'migrationguard_e2e_source';
+  }
 
   if (!uri || (vault.engine !== 'MONGODB' && !uri.startsWith('mongodb'))) {
     throw new Error(
@@ -451,9 +485,9 @@ async function getSourceConnector(payload: MigrationJobPayload): Promise<SourceC
     );
   }
 
-  console.log(`[Worker] ✔ Dynamically resolved MongoDB source connector from Vault for connection ${connectionId} (database: ${dbName})`);
+  console.log(`[Worker] ✔ Dynamically resolved MongoDB source connector from Vault for connection ${connectionId} v${credVer} (database: ${dbName})`);
   const connector = ConnectorFactory.createMongoSource(uri, dbName);
-  sourceConnectorCache.set(connectionId, connector);
+  sourceConnectorCache.set(cacheKey, { connector, connectionId, credVer });
   return connector;
 }
 
@@ -500,6 +534,19 @@ async function getDestinationConnector(payload: MigrationJobPayload): Promise<De
     return destPoolCache.get(cacheKey)!.connector;
   }
 
+  // Recreate and close stale destination pools after credential rotation
+  for (const [key, entry] of destPoolCache.entries()) {
+    if (key.startsWith(`${connectionId}:`) && key !== cacheKey) {
+      console.log(`[Worker] Credential rotation detected for destination connection ${connectionId}. Closing stale pool ${key}`);
+      try {
+        await entry.pool.end();
+      } catch (err: any) {
+        console.warn(`[Worker] Failed closing stale destination pool ${key}: ${err.message}`);
+      }
+      destPoolCache.delete(key);
+    }
+  }
+
   console.log(`[Worker] ✔ Creating dedicated PostgreSQL destination pool for connection ${connectionId} v${credVer}`);
   const pool = new pg.Pool({
     connectionString: connStr,
@@ -519,6 +566,109 @@ async function getDestinationConnector(payload: MigrationJobPayload): Promise<De
  * Calls RecoveryEngine.prepareResume() to verify destination records and advance checkpoints.
  * Never silently swallows recovery failures: if recovery cannot complete safely, throws error to halt worker startup.
  */
+/**
+ * Recomputes migration run progress and status from all batches in a concurrency-safe manner.
+ * Guarantees that a migration is NEVER marked COMPLETED while any batch is in RETRY_WAIT or non-terminal.
+ * Allows retry success to update a previously failed run to COMPLETED.
+ */
+async function recomputeMigrationRunProgress(runId: string): Promise<void> {
+  if (!dbPool) return;
+  try {
+    const totalsRes = await dbPool.query(
+      `SELECT COALESCE(SUM(records_written), 0) AS total_written,
+              COALESCE(SUM(records_read), 0) AS total_read
+       FROM migration_batches
+       WHERE migration_run_id = $1`,
+      [runId],
+    );
+    const totalWritten = Number(totalsRes.rows[0]?.total_written || 0);
+    const totalRead = Number(totalsRes.rows[0]?.total_read || 0);
+
+    // Concurrency-safe progress update
+    await dbPool.query(
+      `UPDATE migration_runs 
+       SET progress_json = jsonb_set(
+             jsonb_set(
+               COALESCE(progress_json, '{}'::jsonb),
+               '{recordsWritten}',
+               $1::text::jsonb
+             ),
+             '{recordsRead}',
+             $2::text::jsonb
+           ),
+           updated_at = NOW()
+       WHERE id = $3 AND status NOT IN ('PAUSED', 'CANCELLED')`,
+      [totalWritten, totalRead, runId],
+    );
+
+    // Recompute migration status from all batches before finalizing
+    const statusCountsRes = await dbPool.query(
+      `SELECT status, COUNT(*)::int AS count
+       FROM migration_batches
+       WHERE migration_run_id = $1
+       GROUP BY status`,
+      [runId],
+    );
+
+    const counts = new Map<string, number>();
+    let totalBatches = 0;
+    for (const r of statusCountsRes.rows) {
+      counts.set(r.status, Number(r.count));
+      totalBatches += Number(r.count);
+    }
+
+    if (totalBatches === 0) return;
+
+    const nonTerminalCount =
+      (counts.get('PENDING') || 0) +
+      (counts.get('QUEUED') || 0) +
+      (counts.get('RUNNING') || 0) +
+      (counts.get('RETRY_WAIT') || 0);
+
+    if (nonTerminalCount > 0) {
+      // Never mark a migration COMPLETED while any batch is in RETRY_WAIT or another non-terminal state.
+      // If a migration was previously marked terminal (e.g. FAILED) but now has a retry in flight, update back to RUNNING.
+      await dbPool.query(
+        `UPDATE migration_runs
+         SET status = 'RUNNING', completed_at = NULL, updated_at = NOW()
+         WHERE id = $1 AND status NOT IN ('PAUSED', 'CANCELLED', 'RUNNING')`,
+        [runId],
+      );
+      return;
+    }
+
+    // All batches are in terminal states: COMMITTED, FAILED_PERMANENT, FAILED_RETRYABLE, OUTCOME_UNKNOWN
+    const failedCount =
+      (counts.get('FAILED_PERMANENT') || 0) +
+      (counts.get('FAILED_RETRYABLE') || 0) +
+      (counts.get('OUTCOME_UNKNOWN') || 0);
+
+    const committedCount = counts.get('COMMITTED') || 0;
+
+    if (failedCount === 0 && committedCount === totalBatches) {
+      // All batches COMMITTED! Mark run COMPLETED (even if it was previously marked terminal FAILED)
+      await dbPool.query(
+        `UPDATE migration_runs
+         SET status = 'COMPLETED', completed_at = NOW(), updated_at = NOW()
+         WHERE id = $1 AND status NOT IN ('PAUSED', 'CANCELLED', 'COMPLETED')`,
+        [runId],
+      );
+      console.log(`[Worker] Migration run ${runId} finalized with status: COMPLETED`);
+    } else if (failedCount > 0) {
+      // Terminal failure
+      await dbPool.query(
+        `UPDATE migration_runs
+         SET status = 'FAILED', completed_at = NOW(), updated_at = NOW()
+         WHERE id = $1 AND status NOT IN ('PAUSED', 'CANCELLED', 'FAILED')`,
+        [runId],
+      );
+      console.log(`[Worker] Migration run ${runId} finalized with status: FAILED (${failedCount} failed batch(es))`);
+    }
+  } catch (err: any) {
+    console.warn(`[Worker] Notice during recomputeMigrationRunProgress: ${err.message}`);
+  }
+}
+
 async function reconcileStrandedRunsOnStartup(): Promise<void> {
   if (!dbPool) return;
   try {
@@ -807,7 +957,8 @@ async function startWorker() {
         const existingBatch = await manifestTracker.getBatch(job.data.migrationRunId, job.data.batchKey);
         if (existingBatch) {
           if (existingBatch.status === 'COMMITTED') {
-            console.log(`[Worker] ✔ Batch ${job.data.batchKey} was already committed.`);
+            console.log(`[Worker] ✔ Batch ${job.data.batchKey} was already committed. Recomputing parent run progress idempotently.`);
+            await recomputeMigrationRunProgress(job.data.migrationRunId);
             return {
               migrationRunId: job.data.migrationRunId,
               batchKey: job.data.batchKey,
@@ -834,6 +985,7 @@ async function startWorker() {
             const reconciled = await recoveryEngine.reconcileBatch(existingBatch, job.data.destinationObject, destKey);
             if (reconciled && reconciled.resolvedStatus === 'COMMITTED') {
               console.log(`[Worker] ✔ Reconciled and committed batch ${job.data.batchKey} via RecoveryEngine.`);
+              await recomputeMigrationRunProgress(job.data.migrationRunId);
               const updatedBatch = await manifestTracker.getBatch(job.data.migrationRunId, job.data.batchKey);
               return {
                 migrationRunId: job.data.migrationRunId,
@@ -1077,8 +1229,8 @@ async function startWorker() {
                       nextPayload.migrationRunId,
                       nextPayload.batchKey,
                       nextPayload.sequenceNo,
-                      nextPayload.sourceObject || 'customers',
-                      nextPayload.destinationObject || nextPayload.sourceObject || 'customers',
+                      nextPayload.sourceObject,
+                      nextPayload.destinationObject,
                       nextPayload.mappingVersionId || null,
                       JSON.stringify(nextPayload.cursorStart || {}),
                       JSON.stringify(nextPayload.cursorEnd || {}),
@@ -1138,64 +1290,7 @@ async function startWorker() {
         const result = await queueHandler.processJob(job.data);
 
         // Update run progress in PostgreSQL idempotently from migration_batches
-        if (dbPool) {
-          try {
-            const totalsRes = await dbPool.query(
-              `SELECT COALESCE(SUM(records_written), 0) AS total_written,
-                      COALESCE(SUM(records_read), 0) AS total_read
-               FROM migration_batches
-               WHERE migration_run_id = $1`,
-              [job.data.migrationRunId],
-            );
-            const totalWritten = Number(totalsRes.rows[0]?.total_written || 0);
-            const totalRead = Number(totalsRes.rows[0]?.total_read || 0);
-
-            await dbPool.query(
-              `UPDATE migration_runs 
-               SET status = 'RUNNING',
-                   progress_json = jsonb_set(
-                     jsonb_set(
-                       COALESCE(progress_json, '{}'::jsonb),
-                       '{recordsWritten}',
-                       $1::text::jsonb
-                     ),
-                     '{recordsRead}',
-                     $2::text::jsonb
-                   ),
-                   updated_at = NOW()
-               WHERE id = $3 AND status NOT IN ('PAUSED', 'CANCELLED', 'COMPLETED', 'FAILED')`,
-              [totalWritten, totalRead, job.data.migrationRunId],
-            );
-
-            // Check if entire run is finished (source exhausted and no batches active)
-            if (!result.hasMore) {
-              const activeRes = await dbPool.query(
-                `SELECT COUNT(*) AS active_count
-                 FROM migration_batches
-                 WHERE migration_run_id = $1 AND status IN ('PENDING', 'QUEUED', 'RUNNING')`,
-                [job.data.migrationRunId],
-              );
-              const activeCount = Number(activeRes.rows[0]?.active_count || 0);
-              if (activeCount === 0) {
-                const failRes = await dbPool.query(
-                  `SELECT COUNT(*) AS fail_count
-                   FROM migration_batches
-                   WHERE migration_run_id = $1 AND status IN ('FAILED_PERMANENT', 'FAILED_RETRYABLE', 'OUTCOME_UNKNOWN')`,
-                  [job.data.migrationRunId],
-                );
-                const failCount = Number(failRes.rows[0]?.fail_count || 0);
-                const finalStatus = failCount > 0 ? 'FAILED' : 'COMPLETED';
-                await dbPool.query(
-                  `UPDATE migration_runs SET status = $1, completed_at = NOW(), updated_at = NOW() WHERE id = $2 AND status = 'RUNNING'`,
-                  [finalStatus, job.data.migrationRunId],
-                );
-                console.log(`[Worker] Migration run ${job.data.migrationRunId} reached terminal state: ${finalStatus}`);
-              }
-            }
-          } catch (err: any) {
-            console.warn(`[Worker] Notice updating progress: ${err.message}`);
-          }
-        }
+        await recomputeMigrationRunProgress(job.data.migrationRunId);
 
         // BullMQ Acknowledgement Semantics Constraint (P0 Issue #1):
         // Prevent BullMQ from acknowledging a job as COMPLETED when its manifest is uncommitted/failed.
@@ -1291,6 +1386,19 @@ async function shutdown() {
     }
   }
   destPoolCache.clear();
+
+  // Close all per-connection source connectors
+  for (const [cacheKey, entry] of sourceConnectorCache.entries()) {
+    try {
+      if ('close' in entry.connector && typeof (entry.connector as any).close === 'function') {
+        await (entry.connector as any).close();
+      }
+      console.log(`[Worker] Source connector closed: ${cacheKey}`);
+    } catch (err: any) {
+      console.warn(`[Worker] Error closing source connector ${cacheKey}: ${err.message}`);
+    }
+  }
+  sourceConnectorCache.clear();
 
   if (dbPool) {
     await dbPool.end();

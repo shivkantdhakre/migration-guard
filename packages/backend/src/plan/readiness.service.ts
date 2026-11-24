@@ -342,7 +342,8 @@ export class ReadinessService {
         const cols = rawCols.map((c: any) => ({
           name: c.name || c.path,
           nullable: c.nullable !== false && c.is_nullable !== 'NO',
-          isPrimaryKey: !!(c.isPrimaryKey || c.name === 'id' || c.path === 'id' || c.is_primary_key),
+          isPrimaryKey: !!(c.isPrimaryKey || c.is_primary_key),
+          isUnique: !!(c.isUnique || c.is_unique || c.isPrimaryKey || c.is_primary_key),
           type: (c.type || c.dataType || c.data_type || '').toLowerCase(),
         }));
 
@@ -374,15 +375,43 @@ export class ReadinessService {
           }
         }
 
-        // Verify identity constraints (Requirement 8)
-        const rawDestKey = obj.identity?.destinationKey || obj.destination?.key;
-        const destKey = rawDestKey || 'id';
+        // Verify identity constraints (Requirement 8 & 13)
+        const rawDestKey = obj.identity?.destinationKey || obj.destination?.key || obj.destination?.identityKey;
+        const destKey = rawDestKey || (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false' ? undefined : 'id');
         if (!rawDestKey && (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false')) {
           blockers.push(`Identity key is not explicitly configured for mapped object '${sName}' -> '${dName}'.`);
-        }
-        const keyCol = cols.find((c: any) => c.name === destKey);
-        if (!keyCol) {
-          blockers.push(`Identity key '${destKey}' for '${dName}' does not exist in destination table schema.`);
+        } else if (destKey) {
+          const keyColumns = Array.isArray(destKey)
+            ? destKey
+            : (typeof destKey === 'string' && destKey.includes(','))
+              ? destKey.split(',').map((k: string) => k.trim())
+              : [destKey];
+
+          if (keyColumns.length === 1) {
+            const singleKey = keyColumns[0];
+            const keyCol = cols.find((c: any) => c.name === singleKey);
+            if (!keyCol) {
+              blockers.push(`Identity key '${singleKey}' for '${dName}' does not exist in destination table schema.`);
+            } else if (!keyCol.isPrimaryKey && !keyCol.isUnique) {
+              blockers.push(`Identity column '${singleKey}' for destination table '${dName}' is not backed by a primary key or unique constraint.`);
+            }
+          } else {
+            // Validate composite identity keys against the exact configured key and uniqueness constraint
+            const missingCols = keyColumns.filter((k: string) => !cols.some((c: any) => c.name === k));
+            if (missingCols.length > 0) {
+              blockers.push(`Composite identity key column(s) '${missingCols.join(', ')}' for '${dName}' do not exist in destination table schema.`);
+            } else {
+              const hasMatchingConstraint = constraints.some((con: any) => {
+                if (!Array.isArray(con.columns) || con.columns.length !== keyColumns.length) return false;
+                const sortedConstraint = [...con.columns].sort();
+                const sortedKey = [...keyColumns].sort();
+                return sortedConstraint.every((col, i) => col === sortedKey[i]);
+              });
+              if (!hasMatchingConstraint) {
+                blockers.push(`Composite identity key (${keyColumns.join(', ')}) for destination table '${dName}' is not backed by a matching composite primary key or unique constraint.`);
+              }
+            }
+          }
         }
       }
 

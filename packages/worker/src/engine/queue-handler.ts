@@ -221,8 +221,19 @@ export class QueueHandler {
         'READ_COMPLETED',
       );
 
-      // Handle empty batch
+      // Handle empty batch: advance checkpoint before committing to ensure terminal progress is persisted
       if (recordsRead === 0) {
+        batch = (await this.manifestTracker.getBatch(payload.migrationRunId, payload.batchKey))!;
+        await this.checkpointManager.advanceCheckpoint({
+          migrationRunId: payload.migrationRunId,
+          sourceObject: payload.sourceObject,
+          batch,
+          planVersionId: payload.planVersionId,
+          mappingVersionId: payload.mappingVersionId,
+          recordsCommittedCount: 0,
+          cursorEnd,
+        });
+
         await this.manifestTracker.transitionState(
           payload.migrationRunId,
           payload.batchKey,
@@ -374,8 +385,9 @@ export class QueueHandler {
       }
 
       // 9. Schedule next batch if more records exist
+      // Mutual exclusion: bounded/seeded batches (with explicit payload.cursorEnd) must not trigger automatic streaming
       let nextPayload: MigrationJobPayload | undefined;
-      const hasMore = sourceBatch.hasMore && cursorEnd !== null;
+      const hasMore = sourceBatch.hasMore && cursorEnd !== null && !payload.cursorEnd;
 
       if (hasMore) {
         // Enforce batch drain policy: halt downstream scheduling if run was paused or cancelled
@@ -405,6 +417,7 @@ export class QueueHandler {
             writeMode: payload.writeMode,
             conflictColumns: payload.conflictColumns,
             updateColumns: payload.updateColumns,
+            destinationKey: payload.destinationKey,
             sourceConnectionId: payload.sourceConnectionId,
             destinationConnectionId: payload.destinationConnectionId,
           };

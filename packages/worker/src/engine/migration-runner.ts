@@ -305,13 +305,13 @@ export class MigrationRunner {
         break;
       }
 
-      if (result.status === 'FAILED_RETRYABLE') {
-        // Paused/halted due to exhausted retries
+      if (result.status === 'FAILED_RETRYABLE' || result.status === 'RETRY_WAIT') {
+        // Paused/halted due to batch failure or retry waiting
         this.runStatuses.set(config.migrationRunId, 'FAILED');
         break;
       }
 
-      if (!result.hasMore || result.recordsRead === 0) {
+      if (result.status === 'COMMITTED' && (!result.hasMore || result.recordsRead === 0)) {
         // Completed all batches!
         this.runStatuses.set(config.migrationRunId, 'COMPLETED');
         break;

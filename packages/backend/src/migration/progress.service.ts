@@ -29,6 +29,8 @@ export class ProgressService {
     // Aggregate from migration_batches
     const batchAggRes = await this.db.query(
       `SELECT
+         COUNT(*) as total_batches,
+         COUNT(*) FILTER (WHERE status = 'COMMITTED') as committed_batches,
          COALESCE(SUM(records_read), 0) as total_read,
          COALESCE(SUM(records_written), 0) as total_written,
          COALESCE(SUM(records_skipped), 0) as total_skipped,
@@ -38,18 +40,23 @@ export class ProgressService {
       [runId],
     );
 
-    const agg = batchAggRes.rows[0];
-    const recordsRead = parseInt(agg.total_read, 10);
-    const recordsWritten = parseInt(agg.total_written, 10);
-    const recordsSkipped = parseInt(agg.total_skipped, 10);
-    const recordsFailed = parseInt(agg.total_failed, 10);
+    const agg = batchAggRes.rows[0] || {};
+    const totalBatches = parseInt(agg.total_batches || '0', 10);
+    const committedBatches = parseInt(agg.committed_batches || '0', 10);
+    const recordsRead = parseInt(agg.total_read || '0', 10);
+    const recordsWritten = parseInt(agg.total_written || '0', 10);
+    const recordsSkipped = parseInt(agg.total_skipped || '0', 10);
+    const recordsFailed = parseInt(agg.total_failed || '0', 10);
 
-    const estimatedTotal = 10000; // Baseline estimated records
     const processed = recordsWritten + recordsSkipped + recordsFailed;
-    const percentageComplete = Math.min(
-      100,
-      parseFloat(((processed / (estimatedTotal || 1)) * 100).toFixed(2)),
-    );
+    const isTerminalCompleted =
+      run.status === 'COMPLETED' || run.status === 'MIGRATED' || run.status === 'VALIDATED';
+    const estimatedTotal = Math.max(processed, recordsRead, 0);
+    const percentageComplete = isTerminalCompleted
+      ? 100
+      : totalBatches > 0
+      ? Math.min(99, parseFloat(((committedBatches / totalBatches) * 100).toFixed(2)))
+      : 0;
 
     // Calculate throughput
     let recordsPerSecond = 0;

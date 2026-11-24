@@ -899,8 +899,12 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.15)', { t
       for (const mapRow of idMapResult.rows) {
         expect(mapRow.source_object).toBe(sourceCollection);
         expect(mapRow.destination_object).toBe(destTable);
-        expect(mapRow.destination_key).toBe(mapRow.source_key);
-        expect(mapRow.source_key.startsWith('cust_mongo_')).toBe(true);
+        const unencodedSourceKey = mapRow.source_key.includes(':')
+          ? mapRow.source_key.substring(mapRow.source_key.indexOf(':') + 1)
+          : mapRow.source_key;
+        expect(mapRow.destination_key).toBe(unencodedSourceKey);
+        expect(unencodedSourceKey.startsWith('cust_mongo_')).toBe(true);
+        expect(mapRow.source_key).toBe(`string:${unencodedSourceKey}`);
       }
 
       // 3. Verify record_manifests table: all 20 manifests are WRITTEN, have SHA256 content hashes,
@@ -920,7 +924,11 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.15)', { t
         expect(mRow.status).toBe('WRITTEN');
         expect(mRow.source_object).toBe(sourceCollection);
         expect(mRow.destination_object).toBe(destTable);
-        expect(mRow.destination_key).toBe(mRow.source_key);
+        const unencodedSourceKey = mRow.source_key.includes(':')
+          ? mRow.source_key.substring(mRow.source_key.indexOf(':') + 1)
+          : mRow.source_key;
+        expect(mRow.destination_key).toBe(unencodedSourceKey);
+        expect(mRow.source_key).toBe(`string:${unencodedSourceKey}`);
         expect(mRow.migration_batch_id).toBeDefined();
         expect(typeof mRow.migration_batch_id).toBe('string');
         expect(mRow.batch_key).toMatch(/^batch_customers_000[123]$/);
@@ -928,7 +936,7 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.15)', { t
 
         // Independent RFC 8785 canonical SHA-256 verification (Requirement 2 & 4)
         // Uses independent test-only oracle completely decoupled from @migrationguard/core
-        const originalSeed = seedCustomers.find((s) => s._id === mRow.source_key);
+        const originalSeed = seedCustomers.find((s) => s._id === unencodedSourceKey);
         expect(originalSeed).toBeDefined();
         const expectedCanonicalJson = independentCanonicalize(originalSeed);
         const expectedDigest = crypto.createHash('sha256').update(expectedCanonicalJson).digest('hex');

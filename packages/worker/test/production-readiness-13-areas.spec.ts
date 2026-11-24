@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import { calculateCanonicalHash } from '@migrationguard/core';
 import { ObjectId, Long, Decimal128 } from 'mongodb';
 import { DestinationWriter } from '../src/engine/destination-writer.js';
 import { ErrorClassifier } from '../src/engine/error-classifier.js';
@@ -556,7 +557,7 @@ describe('Production Readiness Regression - Worker Areas (6, 7, 8, 9, 10, 11)', 
       expect(detectedObj.idType).toBe('ObjectId');
       expect(detectedStr.idType).toBe('string');
       expect(detectedObj.typedKey).toBe(`ObjectId:${hex}`);
-      expect(detectedStr.typedKey).toBe(hex);
+      expect(detectedStr.typedKey).toBe(`string:${hex}`);
       expect(detectedObj.typedKey).not.toBe(detectedStr.typedKey);
     });
 
@@ -570,8 +571,272 @@ describe('Production Readiness Regression - Worker Areas (6, 7, 8, 9, 10, 11)', 
       expect(detectedLong.idType).toBe('Long');
       expect(detectedNum.idType).toBe('number');
       expect(detectedLong.typedKey).toBe('Long:42');
-      expect(detectedNum.typedKey).toBe('42');
+      expect(detectedNum.typedKey).toBe('number:42');
       expect(detectedLong.typedKey).not.toBe(detectedNum.typedKey);
+    });
+
+    it('ensures numeric 42 and string "42" produce different internal typed identities', () => {
+      const numVal = 42;
+      const strVal = '42';
+
+      const detectedNum = detectBsonId(numVal);
+      const detectedStr = detectBsonId(strVal);
+
+      expect(detectedNum.idType).toBe('number');
+      expect(detectedStr.idType).toBe('string');
+      expect(detectedNum.typedKey).toBe('number:42');
+      expect(detectedStr.typedKey).toBe('string:42');
+      expect(detectedNum.typedKey).not.toBe(detectedStr.typedKey);
+    });
+
+    it('allows both numeric 42 and string "42" identities to survive mapping and manifest persistence in the same migration run when destination keys are distinct', async () => {
+      const { IdTracker, InMemoryIdMappingStorage } = await import('../src/engine/id-tracker.js');
+      const { BatchManifestTracker, InMemoryBatchManifestStorage } = await import('../src/engine/batch-manifest.js');
+
+      const runId = 'run_mixed_ids_persistence';
+      const idTracker = new IdTracker(new InMemoryIdMappingStorage());
+      const manifestStorage = new InMemoryBatchManifestStorage();
+      const manifestTracker = new BatchManifestTracker(manifestStorage);
+
+      const numId = detectBsonId(42);
+      const strId = detectBsonId('42');
+
+      // 1. Claim and persist mappings with distinct destination keys
+      await idTracker.claimBatchMappings([
+        {
+          migrationRunId: runId,
+          sourceObject: 'products',
+          sourceKey: numId.typedKey, // 'number:42'
+          destinationObject: 'products',
+          destinationKey: 'prod_num_42',
+        },
+        {
+          migrationRunId: runId,
+          sourceObject: 'products',
+          sourceKey: strId.typedKey, // 'string:42'
+          destinationObject: 'products',
+          destinationKey: 'prod_str_42',
+        },
+      ]);
+
+      await idTracker.recordMapping(runId, 'products', numId.typedKey, 'products', 'prod_num_42');
+      await idTracker.recordMapping(runId, 'products', strId.typedKey, 'products', 'prod_str_42');
+
+      expect(await idTracker.getSourceKey(runId, 'products', 'prod_num_42')).toBe('number:42');
+      expect(await idTracker.getSourceKey(runId, 'products', 'prod_str_42')).toBe('string:42');
+      expect(await idTracker.getDestinationKey(runId, 'products', 'number:42')).toBe('prod_num_42');
+      expect(await idTracker.getDestinationKey(runId, 'products', 'string:42')).toBe('prod_str_42');
+
+      // 2. Persist record manifests in the same migration run
+      await manifestStorage.saveBatch({
+        id: 'batch_mixed_1',
+        migrationRunId: runId,
+        batchKey: 'batch_mixed_1',
+        sequenceNo: 1,
+        status: 'RUNNING',
+        recordsRead: 2,
+        recordsWritten: 2,
+        recordsSkipped: 0,
+        recordsFailed: 0,
+        attemptCount: 1,
+        sourceObject: 'products',
+        destinationObject: 'products',
+      });
+
+      await manifestTracker.recordManifests([
+        {
+          migrationRunId: runId,
+          migrationBatchId: 'batch_mixed_1',
+          batchKey: 'batch_mixed_1',
+          sourceObject: 'products',
+          sourceKey: numId.typedKey,
+          destinationObject: 'products',
+          destinationKey: 'prod_num_42',
+          status: 'WRITTEN',
+          contentHash: 'sha256:num42',
+        },
+        {
+          migrationRunId: runId,
+          migrationBatchId: 'batch_mixed_1',
+          batchKey: 'batch_mixed_1',
+          sourceObject: 'products',
+          sourceKey: strId.typedKey,
+          destinationObject: 'products',
+          destinationKey: 'prod_str_42',
+          status: 'WRITTEN',
+          contentHash: 'sha256:str42',
+        },
+      ]);
+
+      const manifests = await manifestTracker.listRecordManifests(runId, 'batch_mixed_1');
+      expect(manifests).toHaveLength(2);
+      const numManifest = manifests.find((m) => m.sourceKey === 'number:42');
+      const strManifest = manifests.find((m) => m.sourceKey === 'string:42');
+      expect(numManifest).toBeDefined();
+      expect(strManifest).toBeDefined();
+      expect(numManifest!.destinationKey).toBe('prod_num_42');
+      expect(strManifest!.destinationKey).toBe('prod_str_42');
+    });
+
+    it('explicitly rejects destination collisions when the destination key cannot distinguish number 42 and string "42"', async () => {
+      const { IdTracker, InMemoryIdMappingStorage } = await import('../src/engine/id-tracker.js');
+
+      const runId = 'run_collision_test';
+      const idTracker = new IdTracker(new InMemoryIdMappingStorage());
+
+      const numId = detectBsonId(42);
+      const strId = detectBsonId('42');
+
+      // Number 42 claims destination key '42'
+      await idTracker.claimBatchMappings([
+        {
+          migrationRunId: runId,
+          sourceObject: 'products',
+          sourceKey: numId.typedKey, // 'number:42'
+          destinationObject: 'products',
+          destinationKey: '42',
+        },
+      ]);
+      await idTracker.recordMapping(runId, 'products', numId.typedKey, 'products', '42');
+
+      // String '42' attempting to map to the same destination key '42' must be rejected as collision
+      await expect(
+        idTracker.claimBatchMappings([
+          {
+            migrationRunId: runId,
+            sourceObject: 'products',
+            sourceKey: strId.typedKey, // 'string:42'
+            destinationObject: 'products',
+            destinationKey: '42',
+          },
+        ]),
+      ).rejects.toThrow(/Collision detected: distinct source record 'string:42' maps to destinationKey '42'/);
+    });
+
+    it('preserves both number and string identities across batch boundaries during recovery', async () => {
+      const { RecoveryEngine } = await import('../src/engine/recovery-engine.js');
+      const { BatchManifestTracker, InMemoryBatchManifestStorage } = await import('../src/engine/batch-manifest.js');
+
+      const runId = 'run_recovery_boundary_test';
+      const manifestStorage = new InMemoryBatchManifestStorage();
+      const manifestTracker = new BatchManifestTracker(manifestStorage);
+
+      const numId = detectBsonId(42);
+      const strId = detectBsonId('42');
+
+      const dataNum = { id: 'item_42_num' };
+      const hashNum = calculateCanonicalHash(dataNum);
+
+      const dataStr = { id: 'item_42_str' };
+      const hashStr = calculateCanonicalHash(dataStr);
+
+      // Batch 1: processed number 42
+      const batch1: any = {
+        id: 'batch_num_id',
+        migrationRunId: runId,
+        batchKey: 'batch_1',
+        sequenceNo: 1,
+        status: 'RUNNING',
+        subStage: 'MANIFEST_COMMITTED',
+        recordsRead: 1,
+        recordsWritten: 1,
+        recordsSkipped: 0,
+        recordsFailed: 0,
+        attemptCount: 1,
+        sourceObject: 'items',
+        destinationObject: 'items',
+        planVersionId: '00000000-0000-0000-0000-000000000001',
+        mappingVersionId: '00000000-0000-0000-0000-000000000002',
+      };
+      await manifestStorage.saveBatch(batch1);
+      await manifestTracker.recordManifests([
+        {
+          migrationRunId: runId,
+          migrationBatchId: 'batch_num_id',
+          batchKey: 'batch_1',
+          sourceObject: 'items',
+          sourceKey: numId.typedKey, // 'number:42'
+          destinationObject: 'items',
+          destinationKey: 'item_42_num',
+          status: 'WRITTEN',
+          contentHash: hashNum,
+        },
+      ]);
+
+      // Batch 2: processed string '42'
+      const batch2: any = {
+        id: 'batch_str_id',
+        migrationRunId: runId,
+        batchKey: 'batch_2',
+        sequenceNo: 2,
+        status: 'RUNNING',
+        subStage: 'MANIFEST_COMMITTED',
+        recordsRead: 1,
+        recordsWritten: 1,
+        recordsSkipped: 0,
+        recordsFailed: 0,
+        attemptCount: 1,
+        sourceObject: 'items',
+        destinationObject: 'items',
+        planVersionId: '00000000-0000-0000-0000-000000000001',
+        mappingVersionId: '00000000-0000-0000-0000-000000000002',
+      };
+      await manifestStorage.saveBatch(batch2);
+      await manifestTracker.recordManifests([
+        {
+          migrationRunId: runId,
+          migrationBatchId: 'batch_str_id',
+          batchKey: 'batch_2',
+          sourceObject: 'items',
+          sourceKey: strId.typedKey, // 'string:42'
+          destinationObject: 'items',
+          destinationKey: 'item_42_str',
+          status: 'WRITTEN',
+          contentHash: hashStr,
+        },
+      ]);
+
+      const mockDestConnector = {
+        readByKeys: vi.fn().mockImplementation(async (table, keys) => {
+          return keys.map((k: string) => ({
+            destinationKey: k,
+            data: k === 'item_42_num' ? dataNum : dataStr,
+          }));
+        }),
+      };
+
+      const advancedCheckpoints: any[] = [];
+      const mockCheckpointManager = {
+        getCheckpoint: vi.fn().mockResolvedValue(null),
+        advanceCheckpoint: vi.fn().mockImplementation(async (params) => {
+          advancedCheckpoints.push(params);
+        }),
+      };
+
+      const recovery = new RecoveryEngine({
+        destinationConnector: mockDestConnector as any,
+        manifestTracker,
+        checkpointManager: mockCheckpointManager as any,
+      });
+
+      // Reconcile Batch 1
+      const res1 = await recovery.reconcileBatch(batch1, 'items', 'item_id');
+      expect(res1?.resolvedStatus).toBe('COMMITTED');
+
+      // Reconcile Batch 2
+      const res2 = await recovery.reconcileBatch(batch2, 'items', 'item_id');
+      expect(res2?.resolvedStatus).toBe('COMMITTED');
+
+      // Verify manifests for each batch preserved distinct typed keys
+      const m1 = await manifestTracker.listRecordManifests(runId, 'batch_1');
+      expect(m1).toHaveLength(1);
+      expect(m1[0].sourceKey).toBe('number:42');
+      expect(m1[0].destinationKey).toBe('item_42_num');
+
+      const m2 = await manifestTracker.listRecordManifests(runId, 'batch_2');
+      expect(m2).toHaveLength(1);
+      expect(m2[0].sourceKey).toBe('string:42');
+      expect(m2[0].destinationKey).toBe('item_42_str');
     });
 
     it('reconstructBsonId decodes typedKey prefixes when lastIdType is omitted', () => {

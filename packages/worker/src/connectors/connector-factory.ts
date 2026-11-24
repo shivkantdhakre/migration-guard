@@ -39,10 +39,8 @@ export function detectBsonId(rawId: any): { idStr: string; idType: MongoIdType; 
     idStr = String(rawId);
     idType = 'other';
   }
-  // Tag special BSON types (ObjectId, Long, Decimal128) to prevent collisions with plain textual/numeric representations
-  const typedKey = (idType === 'ObjectId' || idType === 'Long' || idType === 'Decimal128')
-    ? `${idType}:${idStr}`
-    : idStr;
+  // Tag every supported BSON type (ObjectId, Long, Decimal128, number, string, other) to prevent identity collisions across mixed-type identifiers
+  const typedKey = `${idType}:${idStr}`;
   return { idStr, idType, typedKey };
 }
 

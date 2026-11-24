@@ -271,6 +271,7 @@ export const MOCK_MAPPING_VERSIONS: MappingVersion[] = [
 export const MOCK_PLANS: MigrationPlan[] = [
   {
     id: 'plan-001',
+    versionId: 'plan-ver-001',
     name: '10k Synthetic Production Migration Plan',
     sourceConnectionId: 'conn-mongo-prod-01',
     destinationConnectionId: 'conn-pg-prod-01',
@@ -284,6 +285,17 @@ export const MOCK_PLANS: MigrationPlan[] = [
     approvedBy: 'infra-lead@acme.corp',
     approvedAt: '2026-11-19T23:18:00Z',
     createdAt: '2026-11-19T23:12:00Z',
+    versions: [
+      {
+        id: 'plan-ver-001',
+        version: 1,
+        planHash: 'sha256:8f4c2e6b9a1d3f57e0c4b2a8d6e9f1a3b5c7d9e1f3a5b7c9d1e3f5a7b9c1d3e5',
+        sourceConnectionId: 'conn-mongo-prod-01',
+        destinationConnectionId: 'conn-pg-prod-01',
+        status: 'APPROVED',
+        createdAt: '2026-11-19T23:12:00Z',
+      },
+    ],
   },
 ];
 

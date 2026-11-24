@@ -35,9 +35,10 @@ import {
   MOCK_MIGRATION_RUNS,
   MOCK_VALIDATION_RUN,
 } from '../../lib/mock-data';
-import { MigrationPlan, MigrationRun } from '../../lib/types';
+import { MigrationPlan, MigrationRun, DryRunResult } from '../../lib/types';
 import { formatNumber, truncateHash } from '../../lib/utils';
 import { apiClient, isDemoModeEnabled } from '../../lib/api-client';
+import { resolvePlanVersionId, evaluateDryRunResponse } from '../../lib/wizard-utils';
 
 const WIZARD_STEPS = [
   { id: 1, name: 'Source Select', desc: 'Select MongoDB database' },
@@ -65,7 +66,8 @@ export default function MigrationWizardPage() {
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
   const [dryRunRunning, setDryRunRunning] = useState(false);
   const [dryRunSuccess, setDryRunSuccess] = useState(false);
-  const [dryRunDetails, setDryRunDetails] = useState<any>(null);
+  const [dryRunError, setDryRunError] = useState<string | null>(null);
+  const [dryRunDetails, setDryRunDetails] = useState<DryRunResult | null>(null);
   const isDemo = isDemoModeEnabled();
 
   const nextStep = () => setCurrentStep((prev) => Math.min(prev + 1, 14));
@@ -74,22 +76,34 @@ export default function MigrationWizardPage() {
   const handleTriggerDryRun = async () => {
     setDryRunRunning(true);
     setDryRunSuccess(false);
-    try {
-      // Connect to real backend API dry-run endpoint
-      const res = await fetch(`http://localhost:4000/api/v1/plans/${plan.id}/dry-run`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-      }).then((r) => r.json()).catch(() => null);
+    setDryRunError(null);
+    setDryRunDetails(null);
 
-      if (res && res.readyForApproval !== undefined) {
-        setDryRunDetails(res);
-        setDryRunSuccess(Boolean(res.readyForApproval));
-      } else {
-        // Fallback demo state if backend offline
+    const versionId = resolvePlanVersionId(plan);
+    if (!versionId) {
+      setDryRunError('Dry run execution aborted: No valid plan version ID found for migration plan. Please configure plan version before executing dry run.');
+      setDryRunRunning(false);
+      setDryRunSuccess(false);
+      return;
+    }
+
+    try {
+      // Connect to real backend API dry-run endpoint: POST /plan-versions/:versionId/dry-runs
+      const res = await apiClient.startDryRun(versionId);
+      const evalResult = evaluateDryRunResponse(res);
+      setDryRunDetails(res);
+
+      if (evalResult.success) {
         setDryRunSuccess(true);
+        setDryRunError(null);
+      } else {
+        setDryRunSuccess(false);
+        setDryRunError(evalResult.error);
       }
-    } catch {
-      setDryRunSuccess(true);
+    } catch (err: any) {
+      setDryRunSuccess(false);
+      setDryRunDetails(null);
+      setDryRunError(err?.message || 'Dry run execution failed: backend service unavailable or returned an unhandled error.');
     } finally {
       setDryRunRunning(false);
     }
@@ -382,27 +396,113 @@ export default function MigrationWizardPage() {
         {/* Step 10: Dry Run */}
         {currentStep === 10 && (
           <div className="space-y-4">
-            <h3 className="text-sm font-bold text-infra-heading font-mono flex items-center gap-2">
-              <Play size={16} className="text-emerald-400" />
-              <span>Step 10: Deterministic Readiness & Dry-Run Execution</span>
-            </h3>
-            <p className="text-xs text-infra-muted">
-              Run dry-run against bounded sample data to verify constraint adherence without committing data.
-            </p>
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-bold text-infra-heading font-mono flex items-center gap-2">
+                  <Play size={16} className="text-emerald-400" />
+                  <span>Step 10: Deterministic Readiness & Dry-Run Execution</span>
+                </h3>
+                <p className="text-xs text-infra-muted mt-0.5">
+                  Execute bounded sample extraction and transformation against live destination schema. Progression requires a verified zero-violation outcome.
+                </p>
+              </div>
+              <div className="text-right">
+                <span className="text-[10px] font-mono text-infra-muted block">Resolved Version ID</span>
+                <span className="text-xs font-mono font-semibold text-emerald-400">
+                  {resolvePlanVersionId(plan) || 'NO_VERSION_FOUND'}
+                </span>
+              </div>
+            </div>
 
             <div className="p-4 rounded-xl bg-infra-surface border border-infra-border space-y-3">
-              <button
-                onClick={handleTriggerDryRun}
-                disabled={dryRunRunning || dryRunSuccess}
-                className="flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-mono font-semibold bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-infra-base transition-colors"
-              >
-                {dryRunRunning ? <RefreshCw size={14} className="animate-spin" /> : <Play size={14} />}
-                <span>{dryRunRunning ? 'Executing Dry Run...' : dryRunSuccess ? 'Dry Run Passed (100%)' : 'Trigger Dry Run'}</span>
-              </button>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={handleTriggerDryRun}
+                  disabled={dryRunRunning || dryRunSuccess}
+                  className="flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-mono font-semibold bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-infra-base transition-colors"
+                >
+                  {dryRunRunning ? <RefreshCw size={14} className="animate-spin" /> : <Play size={14} />}
+                  <span>
+                    {dryRunRunning
+                      ? 'Executing Backend Dry Run...'
+                      : dryRunSuccess
+                      ? 'Dry Run Passed (Verified Live)'
+                      : dryRunError
+                      ? 'Re-trigger Dry Run'
+                      : 'Trigger Live Dry Run'}
+                  </span>
+                </button>
 
-              {dryRunSuccess && (
-                <div className="p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-xs font-mono text-emerald-300">
-                  Dry run finished: 500 sample documents evaluated. Zero constraint violations. Plan hash ready for cryptographic signing.
+                {dryRunRunning && (
+                  <span className="text-xs font-mono text-infra-muted animate-pulse">
+                    Probing destination schema and validating transformations...
+                  </span>
+                )}
+              </div>
+
+              {/* Error & Retry State */}
+              {dryRunError && (
+                <div className="p-3.5 rounded-lg bg-red-500/10 border border-red-500/30 text-xs font-mono text-red-400 space-y-2">
+                  <div className="flex items-center gap-2 font-bold text-red-300">
+                    <AlertTriangle size={15} />
+                    <span>Dry Run Execution Failed</span>
+                  </div>
+                  <p className="text-[11px] leading-relaxed text-red-300/90">{dryRunError}</p>
+                  <div className="flex items-center justify-between pt-1 text-[10px] text-infra-muted border-t border-red-500/20">
+                    <span>Progression to Step 11 (Approval) is strictly blocked until a dry run succeeds.</span>
+                    <button
+                      onClick={handleTriggerDryRun}
+                      disabled={dryRunRunning}
+                      className="flex items-center gap-1 text-red-300 hover:text-red-200 underline font-semibold"
+                    >
+                      <RefreshCw size={11} className={dryRunRunning ? 'animate-spin' : ''} />
+                      Retry Now
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Verified Success State with Real Measured Metrics */}
+              {dryRunSuccess && dryRunDetails && (
+                <div className="p-3.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-xs font-mono text-emerald-300 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2 font-bold text-emerald-400">
+                      <CheckCircle2 size={16} />
+                      <span>Dry Run Passed (100% Verified)</span>
+                    </div>
+                    <span className="text-[10px] text-emerald-400/80">
+                      Executed: {dryRunDetails.executedAt ? new Date(dryRunDetails.executedAt).toLocaleTimeString() : 'Just now'}
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1 text-[11px]">
+                    <div className="bg-black/30 p-2 rounded border border-emerald-500/20">
+                      <span className="text-infra-muted block text-[10px]">Sample Tested</span>
+                      <span className="font-bold text-emerald-300">
+                        {dryRunDetails.sampleRecordsTested ?? dryRunDetails.measuredFacts?.sampleRecordsTested ?? 0} docs
+                      </span>
+                    </div>
+                    <div className="bg-black/30 p-2 rounded border border-emerald-500/20">
+                      <span className="text-infra-muted block text-[10px]">Transformed</span>
+                      <span className="font-bold text-emerald-300">
+                        {dryRunDetails.recordsTransformed ?? dryRunDetails.measuredFacts?.recordsTransformed ?? 0} docs
+                      </span>
+                    </div>
+                    <div className="bg-black/30 p-2 rounded border border-emerald-500/20">
+                      <span className="text-infra-muted block text-[10px]">Errors / Conflicts</span>
+                      <span className="font-bold text-emerald-400">0 / 0</span>
+                    </div>
+                    <div className="bg-black/30 p-2 rounded border border-emerald-500/20">
+                      <span className="text-infra-muted block text-[10px]">Duration</span>
+                      <span className="font-bold text-emerald-300">
+                        {dryRunDetails.measuredFacts?.measuredDurationMs ?? 0} ms
+                      </span>
+                    </div>
+                  </div>
+
+                  <p className="text-[11px] text-emerald-400/90">
+                    Zero constraint violations detected. Canonical plan hash <code className="px-1 py-0.5 rounded bg-black/40 text-emerald-300">{dryRunDetails.planHash ? truncateHash(dryRunDetails.planHash) : truncateHash(plan.planHash)}</code> is certified ready for cryptographic signing.
+                  </p>
                 </div>
               )}
             </div>
@@ -544,14 +644,24 @@ export default function MigrationWizardPage() {
             <span>Previous Step</span>
           </button>
 
-          <button
-            onClick={nextStep}
-            disabled={currentStep === 14}
-            className="flex items-center gap-1.5 px-5 py-2 rounded-lg text-xs font-mono font-semibold bg-emerald-500 hover:bg-emerald-400 disabled:opacity-30 text-infra-base transition-colors shadow-lg shadow-emerald-500/20"
-          >
-            <span>{currentStep === 14 ? 'Completed' : 'Next Step'}</span>
-            <ArrowRight size={14} />
-          </button>
+          <div className="flex items-center gap-3">
+            {currentStep === 10 && !dryRunSuccess && (
+              <span className="text-[11px] font-mono text-amber-400 flex items-center gap-1.5 bg-amber-500/10 px-2.5 py-1 rounded border border-amber-500/20">
+                <AlertTriangle size={13} />
+                <span>Dry run required before advancing</span>
+              </span>
+            )}
+
+            <button
+              onClick={nextStep}
+              disabled={currentStep === 14 || (currentStep === 10 && !dryRunSuccess)}
+              className="flex items-center gap-1.5 px-5 py-2 rounded-lg text-xs font-mono font-semibold bg-emerald-500 hover:bg-emerald-400 disabled:opacity-30 disabled:cursor-not-allowed text-infra-base transition-colors shadow-lg shadow-emerald-500/20"
+              title={currentStep === 10 && !dryRunSuccess ? 'Execute and pass dry run to advance' : undefined}
+            >
+              <span>{currentStep === 14 ? 'Completed' : 'Next Step'}</span>
+              <ArrowRight size={14} />
+            </button>
+          </div>
         </div>
       </div>
 

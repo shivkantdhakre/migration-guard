@@ -39,7 +39,8 @@ export function PlanApprovalModal({
 
     setApproving(true);
     try {
-      await apiClient.approvePlan(plan.id, plan.planHash, comment);
+      const versionId = plan.versionId || (Array.isArray(plan.versions) && plan.versions[0]?.id) || plan.id;
+      await apiClient.approvePlan(versionId, plan.planHash, comment);
       const updated: MigrationPlan = {
         ...plan,
         status: 'APPROVED',

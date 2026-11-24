@@ -9,6 +9,7 @@ import {
   DiscrepancyRecord,
   AuditEvent,
   CopilotMessage,
+  DryRunResult,
 } from './types';
 import {
   MOCK_CONNECTIONS,
@@ -347,9 +348,27 @@ export const apiClient = {
     });
   },
 
-  // Plans & Approvals
+  // Plans, Dry-Runs & Approvals
   async getPlans(projectId = 'default'): Promise<MigrationPlan[]> {
     return request<MigrationPlan[]>(`/projects/${projectId}/plans`, {}, MOCK_PLANS);
+  },
+
+  async startDryRun(versionId: string): Promise<DryRunResult> {
+    if (!versionId || typeof versionId !== 'string' || versionId.trim() === '') {
+      throw new Error('Cannot execute dry run: plan versionId is required and must not be empty.');
+    }
+    // Strict dry-run: never supply fallbackData. This guarantees that 404, 500, network errors,
+    // or unauthenticated requests always throw rather than returning fake success data.
+    return request<DryRunResult>(`/plan-versions/${versionId.trim()}/dry-runs`, {
+      method: 'POST',
+    });
+  },
+
+  async getDryRun(dryRunId: string): Promise<DryRunResult> {
+    if (!dryRunId || typeof dryRunId !== 'string' || dryRunId.trim() === '') {
+      throw new Error('Cannot fetch dry run details: dryRunId is required.');
+    }
+    return request<DryRunResult>(`/dry-runs/${dryRunId.trim()}`);
   },
 
   async approvePlan(planVersionId: string, planHash: string, comment: string): Promise<{ approved: boolean; hash: string }> {

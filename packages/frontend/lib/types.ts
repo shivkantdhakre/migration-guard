@@ -113,8 +113,65 @@ export interface MappingVersion {
 
 export type PlanStatus = 'DRAFT' | 'READY' | 'APPROVED' | 'REJECTED' | 'ARCHIVED';
 
+export interface PlanVersionSummary {
+  id: string;
+  version: number;
+  planHash: string;
+  sourceConnectionId?: string;
+  destinationConnectionId?: string;
+  status?: string;
+  createdAt?: string;
+}
+
+export interface DryRunFactMetrics {
+  sampleRecordsTested: number;
+  recordsTransformed: number;
+  transformationErrors: number;
+  measuredDurationMs: number;
+  measuredRatePerSec: number;
+}
+
+export interface DryRunProjectedEstimates {
+  projectedBatchDurationMs: number;
+  projectedThroughputPerSec: number;
+}
+
+export interface DryRunTestedObject {
+  sourceObject: string;
+  destinationObject: string;
+  sampleCount: number;
+  transformedCount: number;
+  errors: number;
+  conflicts: any[];
+}
+
+export interface DryRunResult {
+  id: string;
+  planVersionId: string;
+  workspaceId?: string;
+  planHash: string;
+  status: 'COMPLETED' | 'FAILED';
+  measuredFacts: DryRunFactMetrics;
+  projectedEstimates?: DryRunProjectedEstimates;
+  sampleRecordsTested: number;
+  recordsTransformed: number;
+  transformationErrors: number;
+  potentialTypeConflicts: Array<{
+    sourceObject?: string;
+    destinationObject?: string;
+    sourcePath?: string;
+    destinationColumn?: string;
+    reason?: string;
+    severity?: string;
+  }>;
+  objectsTested: DryRunTestedObject[];
+  readyForApproval: boolean;
+  executedAt: string;
+}
+
 export interface MigrationPlan {
   id: string;
+  versionId?: string;
   name: string;
   sourceConnectionId: string;
   destinationConnectionId: string;
@@ -128,6 +185,7 @@ export interface MigrationPlan {
   approvedBy?: string;
   approvedAt?: string;
   createdAt: string;
+  versions?: PlanVersionSummary[];
 }
 
 export type RunStatus =

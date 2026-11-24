@@ -205,7 +205,7 @@ export class ValidationService {
         if (uri) {
           try {
             const { MongoClient, ObjectId } = require('mongodb');
-            const client = new MongoClient(uri, { serverSelectionTimeoutMS: 2000 });
+            const client = new MongoClient(uri, { serverSelectionTimeoutMS: 10000 });
             await client.connect();
             const dbName = srcConn.config_json?.database;
             const coll = client.db(dbName).collection(sourceObjectName);
@@ -390,7 +390,7 @@ export class ValidationService {
         if (uri) {
           try {
             const { MongoClient } = require('mongodb');
-            const client = new MongoClient(uri, { serverSelectionTimeoutMS: 2000 });
+            const client = new MongoClient(uri, { serverSelectionTimeoutMS: 10000 });
             await client.connect();
             const dbName = srcConn.config_json?.database;
             const coll = client.db(dbName).collection(sourceObjectName);
@@ -435,17 +435,20 @@ export class ValidationService {
       // 3. Destination record count from PostgreSQL
       if (destConn?.engine === 'POSTGRESQL' && destCredentials) {
         const connStr = destCredentials.connectionString || destCredentials.uri;
-        if (connStr && connStr !== appConfig.databaseUrl) {
+        if (connStr) {
           try {
-            const pg = require('pg');
-            const pool = new pg.Pool({ connectionString: connStr, connectionTimeoutMillis: 2000 });
+            const queryRunner = connStr === appConfig.databaseUrl
+              ? this.db
+              : new (require('pg').Pool)({ connectionString: connStr, connectionTimeoutMillis: 5000 });
             try {
               assertSafeIdentifier(destObjectName, 'COUNT_MISMATCH dest count');
-              const cRes = await pool.query(`SELECT COUNT(*) AS cnt FROM "${destObjectName}"`);
+              const cRes = await queryRunner.query(`SELECT COUNT(*) AS cnt FROM "${destObjectName}"`);
               destCount = parseInt(cRes.rows[0]?.cnt ?? '0', 10);
               destCountQueried = true;
             } finally {
-              await pool.end().catch(() => {});
+              if (connStr !== appConfig.databaseUrl && typeof (queryRunner as any)?.end === 'function') {
+                await (queryRunner as any).end().catch(() => {});
+              }
             }
           } catch (cErr: any) {
             console.warn(`[ValidationService] Destination count query failed: ${cErr.message}`);

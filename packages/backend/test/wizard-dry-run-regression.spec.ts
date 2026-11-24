@@ -296,13 +296,17 @@ describe('Priority 1: Wizard Dry-Run Integration & Fail-Closed Regression Suite'
 
   describe('3. Backend Route & Version Contract Verification', () => {
     it('backend startDryRun throws NotFoundException when plan container ID is used instead of planVersionId', async () => {
+      const email = `test-eng1-${Date.now()}-${Math.random().toString(36).slice(2, 6)}@acme.com`;
       const userRes = await db.query(
-        "INSERT INTO users (email, name, password_hash) VALUES ('test-eng@acme.com', 'Test Eng', 'hash') RETURNING id",
+        "INSERT INTO users (email, name, password_hash) VALUES ($1, 'Test Eng', 'hash') RETURNING id",
+        [email],
       );
       const userId = userRes.rows[0].id;
 
+      const slug = `test-ws-dry-1-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       const wsRes = await db.query(
-        "INSERT INTO workspaces (name, slug) VALUES ('Test WS', 'test-ws-dry') RETURNING id",
+        "INSERT INTO workspaces (name, slug) VALUES ('Test WS', $1) RETURNING id",
+        [slug],
       );
       const wsId = wsRes.rows[0].id;
 
@@ -312,7 +316,7 @@ describe('Priority 1: Wizard Dry-Run Integration & Fail-Closed Regression Suite'
       );
 
       const projRes = await db.query(
-        "INSERT INTO projects (workspace_id, name, slug) VALUES ($1, 'Test Project', 'test-proj') RETURNING id",
+        "INSERT INTO projects (workspace_id, name, description) VALUES ($1, 'Test Project', 'test-proj') RETURNING id",
         [wsId],
       );
       const projId = projRes.rows[0].id;
@@ -328,13 +332,17 @@ describe('Priority 1: Wizard Dry-Run Integration & Fail-Closed Regression Suite'
     });
 
     it('backend startDryRun succeeds and returns measured facts & readyForApproval=true when valid planVersionId is used', async () => {
+      const email = `test-eng2-${Date.now()}-${Math.random().toString(36).slice(2, 6)}@acme.com`;
       const userRes = await db.query(
-        "INSERT INTO users (email, name, password_hash) VALUES ('test-eng2@acme.com', 'Test Eng 2', 'hash') RETURNING id",
+        "INSERT INTO users (email, name, password_hash) VALUES ($1, 'Test Eng 2', 'hash') RETURNING id",
+        [email],
       );
       const userId = userRes.rows[0].id;
 
+      const slug = `test-ws-dry-2-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       const wsRes = await db.query(
-        "INSERT INTO workspaces (name, slug) VALUES ('Test WS 2', 'test-ws-dry-2') RETURNING id",
+        "INSERT INTO workspaces (name, slug) VALUES ('Test WS 2', $1) RETURNING id",
+        [slug],
       );
       const wsId = wsRes.rows[0].id;
 
@@ -344,7 +352,7 @@ describe('Priority 1: Wizard Dry-Run Integration & Fail-Closed Regression Suite'
       );
 
       const projRes = await db.query(
-        "INSERT INTO projects (workspace_id, name, slug) VALUES ($1, 'Test Project 2', 'test-proj-2') RETURNING id",
+        "INSERT INTO projects (workspace_id, name, description) VALUES ($1, 'Test Project 2', 'test-proj-2') RETURNING id",
         [wsId],
       );
       const projId = projRes.rows[0].id;
@@ -355,13 +363,41 @@ describe('Priority 1: Wizard Dry-Run Integration & Fail-Closed Regression Suite'
       );
       const planId = planRes.rows[0].id;
 
-      const versionRes = await db.query(
-        `INSERT INTO migration_plan_versions (
-           plan_id, version, plan_hash, status, created_by
-         ) VALUES ($1, 1, 'sha256:durableplanhash456', 'DRAFT', $2) RETURNING id`,
-        [planId, userId],
+      const srcConn = await connectionService.createConnection(
+        wsId,
+        {
+          name: 'Src',
+          engine: 'MONGODB',
+          connectionRole: 'SOURCE',
+          config: { database: 'appdb' },
+          credentials: { uri: 'mongodb://localhost:27017' },
+        },
+        userId,
       );
-      const versionId = versionRes.rows[0].id;
+
+      const dstConn = await connectionService.createConnection(
+        wsId,
+        {
+          name: 'Dst',
+          engine: 'POSTGRESQL',
+          connectionRole: 'DESTINATION',
+          config: { database: 'neondb', schema: 'public' },
+          credentials: { connectionString: 'postgresql://localhost:5432/neondb' },
+        },
+        userId,
+      );
+
+      const planVer = await planService.createPlanVersion(
+        planId,
+        {
+          sourceConnectionId: srcConn.id,
+          destinationConnectionId: dstConn.id,
+          scope: { tables: ['customers'] },
+          executionConfig: { batchSize: 500, concurrency: 4, writeMode: 'UPSERT' },
+        },
+        userId,
+      );
+      const versionId = planVer.id;
 
       const dryRunResult = await dryRunService.startDryRun(versionId, userId);
       expect(dryRunResult).toBeDefined();
@@ -408,7 +444,8 @@ describe('Priority 1: Wizard Dry-Run Integration & Fail-Closed Regression Suite'
   describe('5. Real Database Integration: End-to-End Wizard Lifecycle', () => {
     it('executes full flow: registration -> connection -> plan -> plan-version -> dry-run -> metrics validation -> approval', async () => {
       // 1. Authenticate user
-      const user = await authService.register('wizard-lead@acme.corp', 'Lead Wizard Engineer', 'StrongPassword123!');
+      const leadEmail = `wizard-lead-${Date.now()}-${Math.random().toString(36).slice(2, 6)}@acme.corp`;
+      const user = await authService.register(leadEmail, 'Lead Wizard Engineer', 'StrongPassword123!');
       const userId = user.user.id;
       const workspaceId = user.workspace.id;
 

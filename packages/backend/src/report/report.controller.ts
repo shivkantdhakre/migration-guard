@@ -9,7 +9,7 @@ import {
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
-import { Response } from 'express';
+import type { Response } from 'express';
 import { ReportService } from './report.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser, AuthenticatedUser } from '../auth/decorators/current-user.decorator';

@@ -191,8 +191,13 @@ async function request<T>(url: string, options: RequestInit = {}, fallbackData?:
       throw new Error(errMsg);
     }
 
-    const json = await res.json();
-    return json.data !== undefined ? json.data : json;
+    const contentType = res.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      const json = await res.json();
+      return json.data !== undefined ? json.data : json;
+    }
+    const text = await res.text();
+    return text as unknown as T;
   } catch (err: any) {
     // In production, fallback to mock data is strictly forbidden unless explicitly in demo mode.
     if (fallbackData !== undefined && isDemoModeEnabled()) {
@@ -236,6 +241,22 @@ export const apiClient = {
 
   logout() {
     clearAuthToken();
+  },
+
+  // Workspaces & Projects
+  async getProjects(workspaceId: string): Promise<any[]> {
+    return request<any[]>(`/workspaces/${workspaceId}/projects`);
+  },
+
+  async createProject(workspaceId: string, name: string, description?: string): Promise<any> {
+    return request<any>(`/workspaces/${workspaceId}/projects`, {
+      method: 'POST',
+      body: JSON.stringify({ name, description }),
+    });
+  },
+
+  async getProject(projectId: string): Promise<any> {
+    return request<any>(`/projects/${projectId}`);
   },
 
   // Connections
@@ -307,7 +328,39 @@ export const apiClient = {
 
   // Mapping Studio
   async getMappings(projectId = 'default'): Promise<MappingVersion[]> {
-    return request<MappingVersion[]>(`/mappings/${projectId}`, {}, MOCK_MAPPING_VERSIONS);
+    return request<MappingVersion[]>(`/projects/${projectId}/mappings`, {}, MOCK_MAPPING_VERSIONS);
+  },
+
+  async getWorkspaceMappings(workspaceId = 'default'): Promise<MappingVersion[]> {
+    return request<MappingVersion[]>(`/workspaces/${workspaceId}/mappings`, {}, MOCK_MAPPING_VERSIONS);
+  },
+
+  async getPlanMappings(planId: string): Promise<MappingVersion[]> {
+    return request<MappingVersion[]>(`/plans/${planId}/mappings`, {}, MOCK_MAPPING_VERSIONS);
+  },
+
+  async createMappingProfile(projectId: string, planId: string): Promise<MappingVersion> {
+    return request<MappingVersion>(`/projects/${projectId}/mappings`, {
+      method: 'POST',
+      body: JSON.stringify({ planId }),
+    });
+  },
+
+  async createMappingVersion(planId: string, mappingJson: any): Promise<MappingVersion> {
+    return request<MappingVersion>(`/mappings/${planId}/versions`, {
+      method: 'POST',
+      body: JSON.stringify({ mappingJson }),
+    });
+  },
+
+  async getMappingVersion(versionId: string): Promise<MappingVersion> {
+    return request<MappingVersion>(`/mapping-versions/${versionId}`);
+  },
+
+  async validateMapping(versionId: string): Promise<{ valid: boolean; issues: any[] }> {
+    return request(`/mapping-versions/${versionId}/validate`, {
+      method: 'POST',
+    });
   },
 
   async previewTransform(mappingId: string, sampleRecord: any) {
@@ -538,10 +591,14 @@ export const apiClient = {
   },
 
   // Reports
-  async generateReport(validationRunId: string, tier = 'DETAILED', format: 'HTML' | 'CSV' = 'HTML') {
-    return request(`/validations/${validationRunId}/reports`, {
+  async generateReport(
+    validationRunId: string,
+    reportType: 'EXECUTIVE' | 'DETAILED' | 'AUDIT' = 'DETAILED',
+    format: 'HTML' | 'CSV' = 'HTML'
+  ) {
+    return request(`/validation-runs/${validationRunId}/reports`, {
       method: 'POST',
-      body: JSON.stringify({ tier, format }),
+      body: JSON.stringify({ reportType, format }),
     });
   },
 

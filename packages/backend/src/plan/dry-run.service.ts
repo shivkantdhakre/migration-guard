@@ -148,17 +148,18 @@ export class DryRunService {
             }
             const creds = await this.credentialsService.getDecryptedCredentials(dstConn.id, dstConn.credential_version);
             const connStr = creds?.connectionString || creds?.uri || creds?.url;
-            if (connStr && connStr !== appConfig.databaseUrl) {
-              const pg = require('pg');
-              const pool = new pg.Pool({ connectionString: connStr, connectionTimeoutMillis: 2000 });
+            if (connStr) {
+              const queryRunner = connStr === appConfig.databaseUrl
+                ? this.db
+                : new (require('pg').Pool)({ connectionString: connStr, connectionTimeoutMillis: 2000 });
               try {
-                const tRes = await pool.query(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'`);
-                const cRes = await pool.query(`
+                const tRes = await queryRunner.query(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'`);
+                const cRes = await queryRunner.query(`
                   SELECT table_name, column_name, data_type, udt_name, is_nullable, character_maximum_length
                   FROM information_schema.columns
                   WHERE table_schema = 'public'
                 `);
-                const kRes = await pool.query(`
+                const kRes = await queryRunner.query(`
                   SELECT tc.table_name, tc.constraint_name, tc.constraint_type, kcu.column_name
                   FROM information_schema.table_constraints tc
                   JOIN information_schema.key_column_usage kcu
@@ -219,7 +220,9 @@ export class DryRunService {
                   });
                 }
               } finally {
-                await pool.end().catch(() => {});
+                if (connStr !== appConfig.databaseUrl && typeof (queryRunner as any)?.end === 'function') {
+                  await (queryRunner as any).end().catch(() => {});
+                }
               }
             } else if (!connStr && isStrict && liveSchemaRequired) {
               throw new BadRequestException('Cannot perform dry run: destination connection credentials missing or unavailable in vault.');
@@ -313,7 +316,7 @@ export class DryRunService {
               const uri = creds?.uri || creds?.connectionString;
               if (uri) {
                 const { MongoClient } = require('mongodb');
-                const client = new MongoClient(uri, { serverSelectionTimeoutMS: 2000 });
+                const client = new MongoClient(uri, { serverSelectionTimeoutMS: 10000 });
                 try {
                   await client.connect();
                   const dbName = srcConn.config_json?.database;

@@ -31,12 +31,12 @@ export class MappingService {
         {
           source: { collection: 'customers' },
           destination: { schema: 'public', table: 'customers' },
-          identity: { sourceKey: '_id', destinationKey: 'source_id', strategy: 'PRESERVE_AS_TEXT' },
+          identity: { sourceKey: '_id', destinationKey: 'id', strategy: 'PRESERVE_AS_TEXT' },
           fields: [
             { sourcePath: 'name', destinationPath: 'name', transform: { op: 'TRIM_STRING' } },
             { sourcePath: 'email', destinationPath: 'email', transform: { op: 'LOWERCASE' } },
             { sourcePath: 'createdAt', destinationPath: 'created_at', transform: { op: 'PARSE_TIMESTAMP' } },
-            { sourcePath: 'address', destinationPath: 'address', transform: { op: 'TO_JSONB' } },
+            { sourcePath: 'metadata', destinationPath: 'metadata', transform: { op: 'TO_JSONB' } },
           ],
         },
       ],
@@ -85,6 +85,54 @@ export class MappingService {
     const version = res.rows[0];
     await this.workspaceService.assertWorkspaceAccess(version.workspace_id, userId, 'Viewer');
     return version;
+  }
+
+  async listMappingsForProject(projectId: string, userId: string) {
+    const projRes = await this.db.query('SELECT workspace_id FROM projects WHERE id = $1', [projectId]);
+    if (projRes.rows.length === 0) {
+      throw new NotFoundException('Project not found.');
+    }
+    const workspaceId = projRes.rows[0].workspace_id;
+    await this.workspaceService.assertWorkspaceAccess(workspaceId, userId, 'Viewer');
+
+    const res = await this.db.query(
+      `SELECT mv.*, mp.name as plan_name, mp.project_id
+       FROM mapping_versions mv
+       JOIN migration_plans mp ON mp.id = mv.plan_id
+       WHERE mp.project_id = $1
+       ORDER BY mv.created_at DESC`,
+      [projectId],
+    );
+    return res.rows;
+  }
+
+  async listMappingsForWorkspace(workspaceId: string, userId: string) {
+    await this.workspaceService.assertWorkspaceAccess(workspaceId, userId, 'Viewer');
+
+    const res = await this.db.query(
+      `SELECT mv.*, mp.name as plan_name, mp.project_id
+       FROM mapping_versions mv
+       JOIN migration_plans mp ON mp.id = mv.plan_id
+       WHERE mv.workspace_id = $1
+       ORDER BY mv.created_at DESC`,
+      [workspaceId],
+    );
+    return res.rows;
+  }
+
+  async listMappingsForPlan(planId: string, userId: string) {
+    const planRes = await this.db.query('SELECT workspace_id FROM migration_plans WHERE id = $1', [planId]);
+    if (planRes.rows.length === 0) {
+      throw new NotFoundException('Migration plan not found.');
+    }
+    const workspaceId = planRes.rows[0].workspace_id;
+    await this.workspaceService.assertWorkspaceAccess(workspaceId, userId, 'Viewer');
+
+    const res = await this.db.query(
+      'SELECT * FROM mapping_versions WHERE plan_id = $1 ORDER BY version DESC',
+      [planId],
+    );
+    return res.rows;
   }
 
   async validateVersion(versionId: string, userId: string) {

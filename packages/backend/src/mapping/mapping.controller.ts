@@ -26,6 +26,30 @@ export class MappingController {
     return this.mappingService.createMappingProfile(projectId, body.planId, user.id);
   }
 
+  @Get('projects/:projectId/mappings')
+  async listMappingsForProject(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('projectId') projectId: string,
+  ) {
+    return this.mappingService.listMappingsForProject(projectId, user.id);
+  }
+
+  @Get('workspaces/:workspaceId/mappings')
+  async listMappingsForWorkspace(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('workspaceId') workspaceId: string,
+  ) {
+    return this.mappingService.listMappingsForWorkspace(workspaceId, user.id);
+  }
+
+  @Get('plans/:planId/mappings')
+  async listMappingsForPlan(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('planId') planId: string,
+  ) {
+    return this.mappingService.listMappingsForPlan(planId, user.id);
+  }
+
   @Post('mappings/:planId/versions')
   async createVersion(
     @CurrentUser() user: AuthenticatedUser,

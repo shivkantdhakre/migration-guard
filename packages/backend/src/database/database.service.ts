@@ -117,6 +117,9 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       const poolConfig: pg.PoolConfig = {
         connectionString: effectiveDbUrl,
         connectionTimeoutMillis: 10000,
+        idleTimeoutMillis: 30000,
+        keepAlive: true,
+        keepAliveInitialDelayMillis: 10000,
         max: 10,
         ssl,
       };
@@ -124,6 +127,9 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         poolConfig.options = `-c search_path=${this.customSearchPath}`;
       }
       this.pool = new pg.Pool(poolConfig);
+      this.pool.on('error', (err) => {
+        console.warn(`[DatabaseService] Idle client pool notice: ${err.message}`);
+      });
 
       if (this.customSearchPath) {
         this.pool.on('connect', (c) => {
@@ -519,11 +525,36 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
    */
   async query<T extends pg.QueryResultRow = any>(text: string, params: any[] = []): Promise<QueryResult<T>> {
     if (this.isConnected && this.pool) {
-      const res = await this.pool.query<T>(text, params);
-      return {
-        rows: res.rows,
-        rowCount: res.rowCount ?? res.rows.length,
-      };
+      let attempts = 0;
+      const maxAttempts = 3;
+      while (attempts < maxAttempts) {
+        attempts++;
+        try {
+          const res = await this.pool.query<T>(text, params);
+          return {
+            rows: res.rows,
+            rowCount: res.rowCount ?? res.rows.length,
+          };
+        } catch (err: any) {
+          const isTransient =
+            err.code === 'ECONNRESET' ||
+            err.code === 'ENOTFOUND' ||
+            err.code === 'EAI_AGAIN' ||
+            err.code === 'ETIMEDOUT' ||
+            err.message?.includes('ECONNRESET') ||
+            err.message?.includes('ENOTFOUND') ||
+            err.message?.includes('Connection terminated') ||
+            err.message?.includes('closed unexpectedly');
+          if (isTransient && attempts < maxAttempts) {
+            console.warn(
+              `[DatabaseService] Transient database socket error (${err.message}), retrying query (attempt ${attempts}/${maxAttempts}) in ${attempts * 500}ms...`,
+            );
+            await new Promise((r) => setTimeout(r, attempts * 500));
+            continue;
+          }
+          throw err;
+        }
+      }
     }
 
     if (process.env.NODE_ENV === 'production' && process.env.ALLOW_IN_MEMORY_DB !== 'true') {
@@ -558,7 +589,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       await client.query('COMMIT');
       return result;
     } catch (err) {
-      await client.query('ROLLBACK');
+      await client.query('ROLLBACK').catch(() => {});
       throw err;
     } finally {
       client.release();

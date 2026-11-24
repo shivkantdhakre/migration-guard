@@ -258,6 +258,7 @@ export class MigrationService implements OnModuleInit, OnModuleDestroy {
           destinationKey: resolvedDestKey,
           sourceConnectionId: resolvedSourceConnId,
           destinationConnectionId: resolvedDestConnId,
+          metadata: batchMetadata,
         });
       }
     }
@@ -309,7 +310,7 @@ export class MigrationService implements OnModuleInit, OnModuleDestroy {
     this.isPublishing = true;
 
     try {
-      const isPostgres = Boolean(this.db.getRawPool());
+      const isPostgres = Boolean(this.db.getRawPool?.());
       if (isPostgres) {
         let dispatchedCount = 0;
         await this.db.transaction(async (client) => {
@@ -384,9 +385,9 @@ export class MigrationService implements OnModuleInit, OnModuleDestroy {
             const maxBytes = version?.execution_config_json?.maxBytes;
             const writeMode = version?.execution_config_json?.writeMode || 'upsert';
 
-            let destKey = 'id';
-            let objSourceConnId = version?.source_connection_id;
-            let objDestConnId = version?.destination_connection_id;
+            let destKey = b.destination_key || 'id';
+            let objSourceConnId = b.source_connection_id || version?.source_connection_id;
+            let objDestConnId = b.destination_connection_id || version?.destination_connection_id;
             const mapVersionId = b.mapping_version_id || version?.mapping_version_id;
             if (mapVersionId) {
               let mappingJson = planCache.get(`map_${mapVersionId}`);
@@ -416,19 +417,31 @@ export class MigrationService implements OnModuleInit, OnModuleDestroy {
               }
 
               const matched = exactMatches.length === 1 ? exactMatches[0] : null;
-              if (matched?.identity?.destinationKey || matched?.destination?.key || matched?.destination?.identityKey) {
-                destKey = matched.identity?.destinationKey || matched?.destination?.key || matched?.destination?.identityKey;
-              } else if (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false') {
-                if (matched) {
-                  throw new Error(`Missing destination identity key for '${b.destination_object}'. Prohibiting implicit default 'id' in production.`);
-                }
+              if (!matched && (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false')) {
+                throw new Error(`No approved mapping found matching source '${b.source_object}' and destination '${b.destination_object}'. Fails closed.`);
               }
 
-              if (matched?.sourceConnectionId || matched?.source?.connectionId) {
+              if (!b.destination_key) {
+                if (matched?.identity?.destinationKey || matched?.destination?.key || matched?.destination?.identityKey) {
+                  destKey = matched.identity?.destinationKey || matched?.destination?.key || matched?.destination?.identityKey;
+                } else if (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false') {
+                  throw new Error(`Missing destination identity key for '${b.destination_object}'. Prohibiting implicit default 'id' in production.`);
+                }
+              } else {
+                destKey = b.destination_key;
+              }
+
+              if (!b.source_connection_id && (matched?.sourceConnectionId || matched?.source?.connectionId)) {
                 objSourceConnId = matched.sourceConnectionId || matched.source?.connectionId;
               }
-              if (matched?.destinationConnectionId || matched?.destination?.connectionId) {
+              if (!b.destination_connection_id && (matched?.destinationConnectionId || matched?.destination?.connectionId)) {
                 objDestConnId = matched.destinationConnectionId || matched.destination?.connectionId;
+              }
+            }
+
+            if (!b.source_object || !b.destination_object) {
+              if (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false') {
+                throw new Error(`Missing sourceObject or destinationObject for batch ${b.batch_key}. Implicit defaults are forbidden in production.`);
               }
             }
 
@@ -437,19 +450,20 @@ export class MigrationService implements OnModuleInit, OnModuleDestroy {
               migrationRunId: bRunId,
               batchKey: b.batch_key,
               sequenceNo: Number(b.sequence_no),
-              sourceObject: b.source_object,
-              destinationObject: b.destination_object || b.source_object,
+              sourceObject: b.source_object || 'customers',
+              destinationObject: b.destination_object || b.source_object || 'customers',
               cursorStart: parseJsonField(b.source_cursor_start),
               cursorEnd: parseJsonField(b.source_cursor_end),
               batchSize,
               maxBytes,
-              planVersionId: version?.id || run?.plan_version_id || '',
+              planVersionId: b.plan_version_id || version?.id || run?.plan_version_id || '',
               mappingVersionId: b.mapping_version_id || version?.mapping_version_id || 'default-mapping',
               writeMode,
               conflictColumns: [destKey],
               destinationKey: destKey,
               sourceConnectionId: objSourceConnId,
               destinationConnectionId: objDestConnId,
+              metadata: b.metadata ? (typeof b.metadata === 'string' ? JSON.parse(b.metadata) : b.metadata) : undefined,
             });
           }
 
@@ -536,8 +550,10 @@ export class MigrationService implements OnModuleInit, OnModuleDestroy {
         const maxBytes = version?.execution_config_json?.maxBytes;
         const writeMode = version?.execution_config_json?.writeMode || 'upsert';
 
-        // Resolve destinationKey from mapping version
-        let destKey = 'id';
+        // Resolve destinationKey and connection overrides from batch or mapping version
+        let destKey = b.destination_key || 'id';
+        let objSourceConnId = b.source_connection_id || version?.source_connection_id;
+        let objDestConnId = b.destination_connection_id || version?.destination_connection_id;
         const mapVersionId = b.mapping_version_id || version?.mapping_version_id;
         if (mapVersionId) {
           let mappingJson = planCache.get(`map_${mapVersionId}`);
@@ -556,13 +572,42 @@ export class MigrationService implements OnModuleInit, OnModuleDestroy {
           const objects: any[] = Array.isArray(mappingJson?.objects)
             ? mappingJson.objects
             : (mappingJson ? [mappingJson] : []);
-          const matched = objects.find(
+          const exactMatches = objects.filter(
             (o: any) =>
-              (o.source?.collection || o.source?.object || o.source) === b.source_object ||
-              (o.destination?.table || o.destination?.object || o.destination) === b.destination_object,
-          ) || (objects.length === 1 ? objects[0] : null);
-          if (matched?.identity?.destinationKey || matched?.destination?.key || matched?.destination?.identityKey) {
-            destKey = matched.identity?.destinationKey || matched?.destination?.key || matched?.destination?.identityKey;
+              ((o.source?.collection || o.source?.object || o.source) === b.source_object) &&
+              ((o.destination?.table || o.destination?.object || o.destination) === b.destination_object),
+          );
+
+          if (exactMatches.length > 1) {
+            throw new Error(`Ambiguous mapping: multiple mappings match '${b.source_object}' -> '${b.destination_object}'`);
+          }
+
+          const matched = exactMatches.length === 1 ? exactMatches[0] : null;
+          if (!matched && (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false')) {
+            throw new Error(`No approved mapping found matching source '${b.source_object}' and destination '${b.destination_object}'. Fails closed.`);
+          }
+
+          if (!b.destination_key) {
+            if (matched?.identity?.destinationKey || matched?.destination?.key || matched?.destination?.identityKey) {
+              destKey = matched.identity?.destinationKey || matched?.destination?.key || matched?.destination?.identityKey;
+            } else if (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false') {
+              throw new Error(`Missing destination identity key for '${b.destination_object}'. Prohibiting implicit default 'id' in production.`);
+            }
+          } else {
+            destKey = b.destination_key;
+          }
+
+          if (!b.source_connection_id && (matched?.sourceConnectionId || matched?.source?.connectionId)) {
+            objSourceConnId = matched.sourceConnectionId || matched.source?.connectionId;
+          }
+          if (!b.destination_connection_id && (matched?.destinationConnectionId || matched?.destination?.connectionId)) {
+            objDestConnId = matched.destinationConnectionId || matched.destination?.connectionId;
+          }
+        }
+
+        if (!b.source_object || !b.destination_object) {
+          if (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false') {
+            throw new Error(`Missing sourceObject or destinationObject for batch ${b.batch_key}. Implicit defaults are forbidden in production.`);
           }
         }
 
@@ -577,13 +622,14 @@ export class MigrationService implements OnModuleInit, OnModuleDestroy {
           cursorEnd: parseJsonField(b.source_cursor_end),
           batchSize,
           maxBytes,
-          planVersionId: version?.id || run?.plan_version_id || '',
+          planVersionId: b.plan_version_id || version?.id || run?.plan_version_id || '',
           mappingVersionId: b.mapping_version_id || version?.mapping_version_id || 'default-mapping',
           writeMode,
           conflictColumns: [destKey],
           destinationKey: destKey,
-          sourceConnectionId: version?.source_connection_id,
-          destinationConnectionId: version?.destination_connection_id,
+          sourceConnectionId: objSourceConnId,
+          destinationConnectionId: objDestConnId,
+          metadata: b.metadata ? (typeof b.metadata === 'string' ? JSON.parse(b.metadata) : b.metadata) : undefined,
         });
       }
 
@@ -611,7 +657,7 @@ export class MigrationService implements OnModuleInit, OnModuleDestroy {
    * Atomically transitions an outbox batch from PENDING to QUEUED in a PostgreSQL transaction.
    */
   private async transitionBatchToQueued(migrationRunId: string, batchKey: string): Promise<void> {
-    if (Boolean(this.db.getRawPool())) {
+    if (Boolean(this.db.getRawPool?.())) {
       await this.db.transaction(async (client) => {
         await client.query(
           `UPDATE migration_batches SET status = 'QUEUED', updated_at = NOW() WHERE migration_run_id = $1 AND batch_key = $2 AND status = 'PENDING'`,
@@ -670,9 +716,34 @@ export class MigrationService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
+    if ((!payload.sourceObject || !payload.destinationObject) && (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false')) {
+      throw new BadRequestException('sourceObject and destinationObject are strictly required for streaming batch in production.');
+    }
+
     const sourceObject = payload.sourceObject || 'customers';
     const destinationObject = payload.destinationObject || sourceObject;
+
+    const resolvedSourceConnId = payload.sourceConnectionId || planVersion?.source_connection_id || null;
+    const resolvedDestConnId = payload.destinationConnectionId || planVersion?.destination_connection_id || null;
+    const resolvedDestKey = payload.destinationKey || null;
+    const resolvedPlanVersionId = payload.planVersionId || planVersion?.id || null;
     const mappingVersionId = payload.mappingVersionId || planVersion?.mapping_version_id || null;
+
+    if ((!resolvedDestKey || !resolvedPlanVersionId || !mappingVersionId) && (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false')) {
+      if (!resolvedDestKey) throw new BadRequestException('Missing destinationKey for streaming batch in production.');
+      if (!resolvedPlanVersionId) throw new BadRequestException('Missing planVersionId for streaming batch in production.');
+      if (!mappingVersionId) throw new BadRequestException('Missing mappingVersionId for streaming batch in production.');
+    }
+
+    const batchMetadata = {
+      sourceConnectionId: resolvedSourceConnId,
+      destinationConnectionId: resolvedDestConnId,
+      destinationKey: resolvedDestKey,
+      planVersionId: resolvedPlanVersionId,
+      mappingVersionId,
+      ...((payload as any).metadata || {}),
+    };
+
     const cursorStart = payload.cursorStart !== undefined ? payload.cursorStart : null;
     const cursorEnd = payload.cursorEnd !== undefined ? payload.cursorEnd : null;
 
@@ -681,14 +752,24 @@ export class MigrationService implements OnModuleInit, OnModuleDestroy {
       `INSERT INTO migration_batches (
          migration_run_id, batch_key, sequence_no, status,
          source_object, destination_object, mapping_version_id,
+         source_connection_id, destination_connection_id, destination_key, plan_version_id, metadata,
          source_cursor_start, source_cursor_end,
          records_read, records_written, records_skipped, records_failed, attempt_count
        )
-       VALUES ($1, $2, $3, 'PENDING', $4, $5, $6, $7, $8, 0, 0, 0, 0, 0)
+       VALUES ($1, $2, $3, 'PENDING', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 0, 0, 0, 0, 0)
        ON CONFLICT (migration_run_id, batch_key) DO UPDATE
        SET status = 'PENDING',
+           source_object = EXCLUDED.source_object,
+           destination_object = EXCLUDED.destination_object,
+           mapping_version_id = EXCLUDED.mapping_version_id,
+           source_connection_id = EXCLUDED.source_connection_id,
+           destination_connection_id = EXCLUDED.destination_connection_id,
+           destination_key = EXCLUDED.destination_key,
+           plan_version_id = EXCLUDED.plan_version_id,
+           metadata = EXCLUDED.metadata,
            source_cursor_start = EXCLUDED.source_cursor_start,
-           source_cursor_end = EXCLUDED.source_cursor_end
+           source_cursor_end = EXCLUDED.source_cursor_end,
+           updated_at = NOW()
        WHERE migration_batches.status IN ('FAILED_RETRYABLE', 'RETRY_WAIT', 'PENDING')`,
       [
         migrationRunId,
@@ -697,6 +778,11 @@ export class MigrationService implements OnModuleInit, OnModuleDestroy {
         sourceObject,
         destinationObject,
         mappingVersionId,
+        resolvedSourceConnId,
+        resolvedDestConnId,
+        resolvedDestKey,
+        resolvedPlanVersionId,
+        JSON.stringify(batchMetadata),
         cursorStart ? JSON.stringify(cursorStart) : null,
         cursorEnd ? JSON.stringify(cursorEnd) : null,
       ],

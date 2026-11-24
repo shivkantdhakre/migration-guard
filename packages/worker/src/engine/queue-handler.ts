@@ -420,6 +420,7 @@ export class QueueHandler {
             destinationKey: payload.destinationKey,
             sourceConnectionId: payload.sourceConnectionId,
             destinationConnectionId: payload.destinationConnectionId,
+            metadata: payload.metadata,
           };
 
           if (this.onNextBatchScheduled) {

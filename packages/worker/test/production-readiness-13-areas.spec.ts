@@ -249,6 +249,89 @@ describe('Production Readiness Regression - Worker Areas (6, 7, 8, 9, 10, 11)', 
       expect(m2.status).toBe('FAILED');
       expect(m2.error).toContain('Destination connector did not confirm write');
     });
+
+    it('proves in QueueHandler flow that unconfirmed writes abort execution before checkpoint advancement and commit', async () => {
+      const { QueueHandler } = await import('../src/engine/queue-handler.js');
+
+      const mockSource: any = {
+        readBatch: vi.fn().mockResolvedValue({
+          records: [
+            { sourceObject: 'users', sourceKey: 'src_1', payload: { id: 'dest_1', name: 'Alice' }, extractedAt: new Date().toISOString() },
+            { sourceObject: 'users', sourceKey: 'src_2', payload: { id: 'dest_unconfirmed', name: 'Bob' }, extractedAt: new Date().toISOString() },
+          ],
+          nextCursor: { lastId: 'src_2', lastIdType: 'string' },
+          hasMore: false,
+        }),
+      };
+
+      const mockDest: any = {
+        writeBatch: vi.fn().mockResolvedValue({
+          recordsWritten: 1,
+          recordsSkipped: 0,
+          recordsFailed: 0,
+          writtenKeys: ['dest_1'], // dest_unconfirmed is NOT confirmed!
+          skippedKeys: [],
+          failedKeys: [],
+        }),
+        readByKeys: vi.fn(),
+      };
+
+      const mockManifestTracker: any = {
+        getBatch: vi.fn().mockResolvedValue(null),
+        createBatch: vi.fn().mockResolvedValue({ id: 'batch_q1', status: 'PENDING', sequenceNo: 1 }),
+        transitionState: vi.fn().mockResolvedValue(undefined),
+        updateCounters: vi.fn().mockResolvedValue(undefined),
+        updateSubStage: vi.fn().mockResolvedValue(undefined),
+        recordManifests: vi.fn().mockResolvedValue(undefined),
+      };
+
+      const checkpointAdvanced = vi.fn().mockResolvedValue(undefined);
+      const mockCheckpointManager: any = {
+        advanceCheckpoint: checkpointAdvanced,
+        getCheckpoint: vi.fn().mockResolvedValue(null),
+      };
+
+      const handler = new QueueHandler({
+        sourceConnector: mockSource,
+        destinationConnector: mockDest,
+        manifestTracker: mockManifestTracker,
+        checkpointManager: mockCheckpointManager,
+        transformFn: (env: any) => ({
+          sourceObject: env.sourceObject,
+          sourceKey: env.sourceKey,
+          destinationObject: 'users_target',
+          destinationKey: env.payload.id,
+          data: env.payload,
+          contentHash: 'hash_sample',
+        }),
+      });
+
+      const payload = {
+        jobId: 'job_1',
+        migrationRunId: 'run_test_unconfirmed',
+        batchKey: 'batch_unconfirmed_1',
+        sequenceNo: 1,
+        sourceObject: 'users',
+        destinationObject: 'users_target',
+        cursorStart: null,
+        batchSize: 10,
+        planVersionId: 'plan_1',
+        mappingVersionId: 'map_1',
+        writeMode: 'upsert' as const,
+        destinationKey: 'id',
+      };
+
+      const result = await handler.processJob(payload);
+      expect(result.status).not.toBe('COMMITTED');
+      expect(result.error?.message).toMatch(/Destination write failed for 1 of 2 records/);
+
+      // Prove that checkpoint was NEVER advanced and batch was NEVER committed!
+      expect(checkpointAdvanced).not.toHaveBeenCalled();
+      const committedCalls = mockManifestTracker.transitionState.mock.calls.filter(
+        (call: any[]) => call[2] === 'COMMITTED',
+      );
+      expect(committedCalls).toHaveLength(0);
+    });
   });
 
   describe('Area 9: Error Classification & Preservation', () => {

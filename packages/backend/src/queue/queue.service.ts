@@ -22,6 +22,7 @@ export interface MigrationJobPayload {
   destinationKey?: string;
   sourceConnectionId?: string;
   destinationConnectionId?: string;
+  metadata?: Record<string, unknown>;
 }
 
 @Injectable()

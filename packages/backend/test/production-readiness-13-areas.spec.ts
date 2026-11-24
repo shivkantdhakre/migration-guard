@@ -15,6 +15,7 @@ describe('Production Readiness Regression - Backend Areas (1, 2, 12, 13)', () =>
     };
     mockWorkspaceService = {
       ensureWorkspaceAccess: vi.fn().mockResolvedValue(undefined),
+      assertWorkspaceAccess: vi.fn().mockResolvedValue(undefined),
     };
     mockConnectionService = {
       getConnection: vi.fn(),
@@ -420,6 +421,132 @@ describe('Production Readiness Regression - Backend Areas (1, 2, 12, 13)', () =>
       } finally {
         process.env.NODE_ENV = origEnv;
       }
+    });
+  });
+
+  describe('Area 1 & 2: Mapping Resolution, Connection Overrides & Streaming Metadata', () => {
+    it('persists complete metadata and per-object connection overrides in initial and streaming batches', async () => {
+      const { MigrationService } = await import('../src/migration/migration.service');
+      const mockQueueService: any = {
+        dispatchBatches: vi.fn().mockResolvedValue(undefined),
+      };
+
+      const migrationService = new MigrationService(
+        mockDb,
+        mockWorkspaceService,
+        mockQueueService,
+      );
+
+      // Verify streaming batch persistence with complete metadata
+      const insertedBatches: any[] = [];
+      mockDb.query.mockImplementation(async (sql: string, params: any[]) => {
+        if (sql.includes('SELECT * FROM migration_runs WHERE id = $1')) {
+          return { rows: [{ id: 'run_stream_1', status: 'RUNNING', plan_version_id: 'plan_ver_1' }] };
+        }
+        if (sql.includes('SELECT * FROM migration_plan_versions WHERE id = $1')) {
+          return {
+            rows: [
+              {
+                id: 'plan_ver_1',
+                source_connection_id: 'src_default_conn',
+                destination_connection_id: 'dst_default_conn',
+                mapping_version_id: 'map_ver_1',
+              },
+            ],
+          };
+        }
+        if (sql.includes('INSERT INTO migration_batches')) {
+          insertedBatches.push({ sql, params });
+          return { rows: [] };
+        }
+        if (sql.includes('SELECT * FROM migration_batches WHERE status = $1')) {
+          return { rows: [] };
+        }
+        return { rows: [] };
+      });
+
+      const res = await migrationService.scheduleStreamingBatch({
+        migrationRunId: 'run_stream_1',
+        batchKey: 'batch_orders_002',
+        sequenceNo: 2,
+        sourceObject: 'orders',
+        destinationObject: 'orders_target',
+        destinationKey: 'order_id',
+        sourceConnectionId: 'src_override_conn',
+        destinationConnectionId: 'dst_override_conn',
+        mappingVersionId: 'map_ver_1',
+        planVersionId: 'plan_ver_1',
+        cursorStart: { offset: 100 },
+        cursorEnd: { offset: 200 },
+      });
+
+      expect(res.status).toBe('PENDING');
+      expect(insertedBatches).toHaveLength(1);
+
+      const insertCall = insertedBatches[0];
+      expect(insertCall.sql).toContain('source_connection_id');
+      expect(insertCall.sql).toContain('destination_connection_id');
+      expect(insertCall.sql).toContain('destination_key');
+      expect(insertCall.sql).toContain('plan_version_id');
+      expect(insertCall.sql).toContain('metadata');
+
+      // Verify params passed
+      expect(insertCall.params[6]).toBe('src_override_conn');
+      expect(insertCall.params[7]).toBe('dst_override_conn');
+      expect(insertCall.params[8]).toBe('order_id');
+      expect(insertCall.params[9]).toBe('plan_ver_1');
+      const meta = JSON.parse(insertCall.params[10]);
+      expect(meta.sourceConnectionId).toBe('src_override_conn');
+      expect(meta.destinationConnectionId).toBe('dst_override_conn');
+      expect(meta.destinationKey).toBe('order_id');
+    });
+
+    it('fails closed when mapping is missing or ambiguous across source and destination', async () => {
+      const { MigrationService } = await import('../src/migration/migration.service');
+      const mockQueueService: any = {
+        dispatchBatches: vi.fn(),
+      };
+
+      const migrationService = new MigrationService(
+        mockDb,
+        mockWorkspaceService,
+        mockQueueService,
+      );
+
+      const planVersion = {
+        id: 'pv_ambig',
+        workspace_id: 'ws_1',
+        project_id: 'proj_1',
+        plan_hash: 'hash_ambig',
+        status: 'APPROVED',
+        mapping_version_id: 'mv_ambig',
+        source_connection_id: 'src_1',
+        destination_connection_id: 'dst_1',
+        scope_json: { tables: [{ source: 'customers', destination: 'clients' }] },
+      };
+
+      // Ambiguous: two mappings for the same source and destination
+      const ambiguousMapping = {
+        id: 'mv_ambig',
+        mapping_json: {
+          objects: [
+            { source: 'customers', destination: 'clients', identity: { destinationKey: 'id' } },
+            { source: 'customers', destination: 'clients', identity: { destinationKey: 'client_id' } },
+          ],
+        },
+      };
+
+      mockDb.query.mockImplementation(async (sql: string) => {
+        if (sql.includes('FROM migration_plan_versions')) return { rows: [planVersion] };
+        if (sql.includes('FROM approvals')) return { rows: [{ approval_status: 'APPROVE', resource_hash: 'hash_ambig' }] };
+        if (sql.includes('FROM mapping_versions')) return { rows: [ambiguousMapping] };
+        if (sql.includes('INSERT INTO migration_runs')) return { rows: [{ id: 'run_ambig', status: 'QUEUED' }] };
+        return { rows: [] };
+      });
+
+      await expect(
+        migrationService.startMigrationRun('pv_ambig', 'user_1'),
+      ).rejects.toThrow(/Ambiguous mapping: multiple mappings match/);
     });
   });
 });

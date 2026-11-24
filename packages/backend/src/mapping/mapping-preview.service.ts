@@ -6,9 +6,23 @@ export class MappingPreviewService {
   /**
    * Applies mapping DSL to sample records without destination side-effects
    */
-  preview(mappingJson: any, sampleRecords: any[]): any[] {
+  preview(mappingJson: any, sampleRecords: any[], targetObject?: string): any[] {
     const defaultRecords = sampleRecords && sampleRecords.length > 0 ? sampleRecords : this.getDefaultSamples();
-    const objectMapping = mappingJson.objects ? mappingJson.objects[0] : null;
+    let objectMapping = null;
+    if (Array.isArray(mappingJson?.objects)) {
+      if (targetObject) {
+        objectMapping = mappingJson.objects.find(
+          (o: any) =>
+            ((o.source?.collection || o.source?.object || o.source) === targetObject) ||
+            ((o.destination?.table || o.destination?.object || o.destination) === targetObject),
+        );
+      }
+      if (!objectMapping && mappingJson.objects.length === 1) {
+        objectMapping = mappingJson.objects[0];
+      }
+    } else if (mappingJson?.source && mappingJson?.destination) {
+      objectMapping = mappingJson;
+    }
 
     if (!objectMapping) return [];
 

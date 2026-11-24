@@ -1058,14 +1058,20 @@ async function startWorker() {
             }
           }
 
-          // Exact source AND destination match required
+          // Exact source AND destination match required; fail closed on ambiguous or missing mapping
           let matchedMapping: ObjectMapping | null = null;
           if (Array.isArray(mappingJson.objects)) {
-            matchedMapping = mappingJson.objects.find(
+            const matches = mappingJson.objects.filter(
               (o: any) =>
                 (o.source?.collection || o.sourceObject || o.source) === job.data.sourceObject &&
                 (o.destination?.table || o.destinationObject || o.destination) === job.data.destinationObject,
             );
+            if (matches.length > 1) {
+              throw new Error(
+                `[Worker Security] Ambiguous mapping: multiple approved objects match source '${job.data.sourceObject}' and destination '${job.data.destinationObject}'. Fails closed.`,
+              );
+            }
+            matchedMapping = matches.length === 1 ? matches[0] : null;
           } else if (mappingJson.source && mappingJson.destination) {
             const sMatch = (mappingJson.source?.collection || mappingJson.source) === job.data.sourceObject;
             const dMatch = (mappingJson.destination?.table || mappingJson.destination) === job.data.destinationObject;
@@ -1160,6 +1166,9 @@ async function startWorker() {
               };
             }
 
+            if (!job.data.destinationKey && (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false')) {
+              throw new Error(`[Worker Security] Missing destinationKey in payload for batch ${job.data.batchKey}. Prohibiting implicit default 'id' in production.`);
+            }
             const effectiveDestKeyCol = job.data.destinationKey || 'id';
             const recordDestKey = String(raw[effectiveDestKeyCol] !== undefined ? raw[effectiveDestKeyCol] : envelope.sourceKey);
 
@@ -1195,6 +1204,9 @@ async function startWorker() {
                 }
                 if (!nextPayload.destinationConnectionId && job.data.destinationConnectionId) {
                   nextPayload.destinationConnectionId = job.data.destinationConnectionId;
+                }
+                if (!nextPayload.metadata && job.data.metadata) {
+                  nextPayload.metadata = job.data.metadata;
                 }
 
                 // Validate all required streaming metadata before outbox persistence

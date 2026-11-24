@@ -1000,7 +1000,7 @@ export default function MigrationWizardPage() {
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      window.URL.revokeObjectURL(url);
+      setTimeout(() => window.URL.revokeObjectURL(url), 1000);
 
       setReportSuccessMessage(`Successfully generated and downloaded ${format} report.`);
     } catch (err: any) {

@@ -53,6 +53,6 @@ export class ReportController {
 
     res.setHeader('Content-Type', contentType);
     res.setHeader('Content-Disposition', `attachment; filename="${file.filename}"`);
-    return res.send(file.content);
+    res.send(file.content);
   }
 }

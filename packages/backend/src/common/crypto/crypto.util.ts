@@ -61,11 +61,23 @@ export class CryptoUtil {
   /**
    * Recursively redacts sensitive keys from objects and arrays
    */
-  public static redactSecrets<T = any>(obj: T, redactKeys: string[] = appConfig.logRedactKeys): T {
+  public static redactSecrets<T = any>(
+    obj: T,
+    redactKeys: string[] = appConfig.logRedactKeys,
+    seen: WeakSet<object> = new WeakSet<object>(),
+  ): T {
     if (obj === null || obj === undefined) return obj;
+    if (obj instanceof Date || Buffer.isBuffer(obj)) return obj;
+
+    if (typeof obj === 'object') {
+      if (seen.has(obj as object)) {
+        return '[Circular]' as unknown as T;
+      }
+      seen.add(obj as object);
+    }
 
     if (Array.isArray(obj)) {
-      return obj.map((item) => this.redactSecrets(item, redactKeys)) as unknown as T;
+      return obj.map((item) => this.redactSecrets(item, redactKeys, seen)) as unknown as T;
     }
 
     if (typeof obj === 'object') {
@@ -79,7 +91,7 @@ export class CryptoUtil {
         if (shouldRedact) {
           result[key] = '[REDACTED]';
         } else if (typeof value === 'object' && value !== null) {
-          result[key] = this.redactSecrets(value, redactKeys);
+          result[key] = this.redactSecrets(value, redactKeys, seen);
         } else {
           result[key] = value;
         }

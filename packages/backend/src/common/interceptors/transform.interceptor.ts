@@ -33,6 +33,11 @@ export class TransformInterceptor<T> implements NestInterceptor<T, ApiResponse<T
 
     return next.handle().pipe(
       map((data) => {
+        const contentType = String(res?.getHeader?.('Content-Type') || '');
+        if (res?.headersSent || contentType.includes('text/csv') || contentType.includes('text/html')) {
+          return data;
+        }
+
         // Redact any accidental secret fields in data before responding (preserving accessToken on auth routes)
         let sanitizedData: any;
         if (isAuthRoute && data && typeof data === 'object') {

@@ -52,7 +52,9 @@ export class AllExceptionsFilter implements ExceptionFilter {
       },
     };
 
-    response.status(status).json(errorBody);
+    if (!response.headersSent) {
+      response.status(status).json(errorBody);
+    }
   }
 
   private statusToCode(status: number, fallbackCode?: string): string {

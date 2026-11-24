@@ -80,6 +80,10 @@ jobs:
           pnpm --filter @migrationguard/backend build
           pnpm --filter @migrationguard/frontend build
 
+      - name: Initialize PostgreSQL Test Database Schema
+        run: |
+          PGPASSWORD=testpassword psql -h localhost -U postgres -d migrationguard_test -f packages/backend/src/database/schema.sql
+
       - name: Test Core
         run: pnpm --filter @migrationguard/core test
 

@@ -10,6 +10,7 @@
  * - Resumes from last committed checkpoint without duplicating or skipping records
  */
 
+import pg from 'pg';
 import {
   DestinationConnector,
   MigrationBatch,
@@ -26,6 +27,7 @@ export interface RecoveryEngineConfig {
   manifestTracker: BatchManifestTracker;
   checkpointManager: CheckpointManager;
   idTracker?: IdTracker;
+  dbPool?: pg.Pool;
 }
 
 export interface ReconciliationResult {
@@ -51,12 +53,14 @@ export class RecoveryEngine {
   private manifestTracker: BatchManifestTracker;
   private checkpointManager: CheckpointManager;
   private idTracker?: IdTracker;
+  private dbPool?: pg.Pool;
 
   constructor(config: RecoveryEngineConfig) {
     this.destinationConnector = config.destinationConnector;
     this.manifestTracker = config.manifestTracker;
     this.checkpointManager = config.checkpointManager;
     this.idTracker = config.idTracker;
+    this.dbPool = config.dbPool;
   }
 
   private async transitionToCommitted(batch: MigrationBatch): Promise<void> {
@@ -83,6 +87,7 @@ export class RecoveryEngine {
     destinationKey = 'id',
     planVersionId?: string,
     mappingVersionId?: string,
+    projectedColumns?: string[],
   ): Promise<ResumePlan> {
     const batches = await this.manifestTracker.listBatches(migrationRunId);
     const objectBatches = batches.filter(
@@ -148,6 +153,7 @@ export class RecoveryEngine {
         destinationKey,
         effectivePlanVersionId,
         effectiveMappingVersionId,
+        projectedColumns,
       );
       if (reconciled) {
         reconciliationResults.push(reconciled);
@@ -182,29 +188,78 @@ export class RecoveryEngine {
     destinationKey = 'id',
     planVersionId?: string,
     mappingVersionId?: string,
+    projectedColumns?: string[],
   ): Promise<ReconciliationResult | null> {
-    const subStage = batch.subStage;
-    const status = batch.status;
+    const durableBatch = (await this.manifestTracker.getBatch(batch.migrationRunId, batch.batchKey)) || batch;
+    const subStage = durableBatch.subStage || batch.subStage;
+    const status = durableBatch.status || batch.status;
+    const currentBatch: MigrationBatch = {
+      ...batch,
+      ...durableBatch,
+      metadata: { ...(batch.metadata || {}), ...(durableBatch.metadata || {}) },
+      subStage,
+      status,
+    };
 
     let effectivePlanVersionId =
-      batch.planVersionId ||
-      (batch.metadata?.planVersionId as string) ||
-      (batch.metadata?.plan_version_id as string) ||
+      currentBatch.planVersionId ||
+      (currentBatch.metadata?.planVersionId as string) ||
+      (currentBatch.metadata?.plan_version_id as string) ||
       planVersionId;
     let effectiveMappingVersionId =
-      batch.mappingVersionId ||
-      (batch.metadata?.mappingVersionId as string) ||
-      (batch.metadata?.mapping_version_id as string) ||
+      currentBatch.mappingVersionId ||
+      (currentBatch.metadata?.mappingVersionId as string) ||
+      (currentBatch.metadata?.mapping_version_id as string) ||
       mappingVersionId;
 
     if (!effectivePlanVersionId || !effectiveMappingVersionId) {
       if (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false') {
         throw new Error(
-          `[Worker Recovery] Missing durable planVersionId or mappingVersionId for batch '${batch.batchKey}' in run '${batch.migrationRunId}'. Checkpoint recovery cannot proceed without durable version metadata in production.`,
+          `[Worker Recovery] Missing durable planVersionId or mappingVersionId for batch '${currentBatch.batchKey}' in run '${currentBatch.migrationRunId}'. Checkpoint recovery cannot proceed without durable version metadata in production.`,
         );
       }
       effectivePlanVersionId = effectivePlanVersionId || 'test_plan_version';
       effectiveMappingVersionId = effectiveMappingVersionId || 'test_mapping_version';
+    }
+
+    // Resolve canonical projected columns for destination records
+    let effectiveProjectedColumns: string[] | undefined = projectedColumns;
+    if (!effectiveProjectedColumns && currentBatch.metadata) {
+      if (Array.isArray(currentBatch.metadata.mappedDestinationFields)) {
+        effectiveProjectedColumns = currentBatch.metadata.mappedDestinationFields as string[];
+      } else if (Array.isArray(currentBatch.metadata.mappedColumns)) {
+        effectiveProjectedColumns = currentBatch.metadata.mappedColumns as string[];
+      } else if (Array.isArray(currentBatch.metadata.projectedColumns)) {
+        effectiveProjectedColumns = currentBatch.metadata.projectedColumns as string[];
+      }
+    }
+    if (!effectiveProjectedColumns && this.dbPool && effectiveMappingVersionId) {
+      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(effectiveMappingVersionId);
+      if (isUuid) {
+        try {
+          const mapRes = await this.dbPool.query('SELECT mapping_json FROM mapping_versions WHERE id = $1', [effectiveMappingVersionId]);
+          if (mapRes.rows.length > 0) {
+            const mJson = typeof mapRes.rows[0].mapping_json === 'string' ? JSON.parse(mapRes.rows[0].mapping_json) : mapRes.rows[0].mapping_json;
+            if (Array.isArray(mJson?.objects)) {
+              const matchedObj = mJson.objects.find(
+                (o: any) =>
+                  (o.source?.collection || o.source?.object || o.sourceObject || o.source) === currentBatch.sourceObject &&
+                  (o.destination?.table || o.destination?.object || o.destinationObject || o.destination) === destinationObject,
+              );
+              if (matchedObj && Array.isArray(matchedObj.fields)) {
+                const cols = matchedObj.fields
+                  .map((f: any) => f.destinationField || f.destination || f.destField)
+                  .filter(Boolean);
+                if (cols.length > 0) {
+                  effectiveProjectedColumns = Array.from(new Set(cols));
+                }
+              }
+            }
+          }
+        } catch {
+          // ignore lookup failure in test environments
+        }
+      }
     }
 
     // Batches in write-involved stages:
@@ -356,6 +411,7 @@ export class RecoveryEngine {
           destinationObject,
           destinationKeys,
           destinationKey,
+          effectiveProjectedColumns,
         );
 
         const foundKeyMap = new Map<string, Record<string, unknown>>();
@@ -414,7 +470,17 @@ export class RecoveryEngine {
             continue;
           }
           if (manifest.contentHash) {
-            const computedHash = calculateCanonicalHash(foundRecord);
+            let recordToHash = foundRecord;
+            if (effectiveProjectedColumns && effectiveProjectedColumns.length > 0) {
+              const projected: Record<string, unknown> = {};
+              for (const col of effectiveProjectedColumns) {
+                if (col in foundRecord) {
+                  projected[col] = foundRecord[col];
+                }
+              }
+              recordToHash = projected;
+            }
+            const computedHash = calculateCanonicalHash(recordToHash);
             const normComputed = computedHash.replace(/^sha256:/, '');
             const normManifest = manifest.contentHash.replace(/^sha256:/, '');
             if (normComputed !== normManifest) {

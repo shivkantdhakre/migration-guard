@@ -825,6 +825,7 @@ async function reconcileStrandedRunsOnStartup(): Promise<void> {
           manifestTracker,
           checkpointManager,
           idTracker,
+          dbPool: dbPool || undefined,
         });
 
         const resumePlan = await recoveryEngine.prepareResume(
@@ -971,6 +972,7 @@ async function startWorker() {
           manifestTracker,
           checkpointManager,
           idTracker,
+          dbPool: dbPool || undefined,
         });
 
         const destKey = job.data.destinationKey || (job.data.conflictColumns && job.data.conflictColumns.length > 0 ? job.data.conflictColumns[0] : 'id');
@@ -1003,7 +1005,13 @@ async function startWorker() {
             console.log(
               `[Worker] Detected uncommitted/in-flight batch ${job.data.batchKey} (status: ${existingBatch.status}, subStage: ${existingBatch.subStage}). Reconciling via RecoveryEngine.`,
             );
-            const reconciled = await recoveryEngine.reconcileBatch(existingBatch, job.data.destinationObject, destKey);
+            const reconciled = await recoveryEngine.reconcileBatch(
+              existingBatch,
+              job.data.destinationObject,
+              destKey,
+              job.data.planVersionId,
+              job.data.mappingVersionId,
+            );
             if (reconciled && reconciled.resolvedStatus === 'COMMITTED') {
               console.log(`[Worker] ✔ Reconciled and committed batch ${job.data.batchKey} via RecoveryEngine.`);
               await recomputeMigrationRunProgress(job.data.migrationRunId);
@@ -1035,6 +1043,7 @@ async function startWorker() {
 
         // Load mapping version and instantiate TransformationEngine if available
         let transformationEngine: TransformationEngine | null = null;
+        let mappedDestinationFields: string[] | undefined = undefined;
         const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(job.data.mappingVersionId || '');
         if (job.data.mappingVersionId && dbPool && isUuid) {
           const mapRes = await dbPool.query(
@@ -1063,8 +1072,8 @@ async function startWorker() {
           // Verify mapping hash
           const rawHash = mappingRow.mapping_hash;
           if (rawHash) {
-            const computedHash = 'sha256:' + require('crypto').createHash('sha256').update(canonicalizeJson(mappingJson)).digest('hex');
-            const simpleHash = 'sha256:' + require('crypto').createHash('sha256').update(JSON.stringify(mappingJson)).digest('hex');
+            const computedHash = 'sha256:' + crypto.createHash('sha256').update(canonicalizeJson(mappingJson)).digest('hex');
+            const simpleHash = 'sha256:' + crypto.createHash('sha256').update(JSON.stringify(mappingJson)).digest('hex');
             if (rawHash !== computedHash && rawHash !== simpleHash) {
               throw new Error(`[Worker Security] Approved mapping hash verification failed: content mismatch for ${job.data.mappingVersionId}.`);
             }
@@ -1084,11 +1093,21 @@ async function startWorker() {
               );
             }
             matchedMapping = matches.length === 1 ? matches[0] : null;
+            if (matchedMapping && Array.isArray((matchedMapping as any).fields)) {
+              mappedDestinationFields = (matchedMapping as any).fields
+                .map((f: any) => f.destinationField || f.destination || f.destField)
+                .filter(Boolean);
+            }
           } else if (mappingJson.source && mappingJson.destination) {
             const sMatch = (mappingJson.source?.collection || mappingJson.source?.object || mappingJson.sourceObject || mappingJson.source) === job.data.sourceObject;
             const dMatch = (mappingJson.destination?.table || mappingJson.destination?.object || mappingJson.destinationObject || mappingJson.destination) === job.data.destinationObject;
             if (sMatch && dMatch) {
               matchedMapping = mappingJson as ObjectMapping;
+              if (matchedMapping && Array.isArray((matchedMapping as any).fields)) {
+                mappedDestinationFields = (matchedMapping as any).fields
+                  .map((f: any) => f.destinationField || f.destination || f.destField)
+                  .filter(Boolean);
+              }
             }
           }
 
@@ -1228,6 +1247,10 @@ async function startWorker() {
                 }
                 if (!nextPayload.metadata && job.data.metadata) {
                   nextPayload.metadata = job.data.metadata;
+                }
+                if (mappedDestinationFields && mappedDestinationFields.length > 0) {
+                  const currentMeta = typeof nextPayload.metadata === 'object' && nextPayload.metadata !== null ? nextPayload.metadata : {};
+                  nextPayload.metadata = { ...currentMeta, mappedDestinationFields };
                 }
 
                 // Validate all required streaming metadata before outbox persistence

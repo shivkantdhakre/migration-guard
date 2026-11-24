@@ -300,13 +300,24 @@ export class PostgresDestinationConnector implements DestinationConnector {
     };
   }
 
-  async readByKeys(destinationObject: string, keys: string[], keyColumn = 'id'): Promise<DestinationRecord[]> {
+  async readByKeys(
+    destinationObject: string,
+    keys: string[],
+    keyColumn = 'id',
+    projectColumns?: string[],
+  ): Promise<DestinationRecord[]> {
     if (!keys || keys.length === 0) return [];
 
     const quotedTable = quoteIdent(destinationObject);
     const quotedCol = quoteIdent(keyColumn);
+    let selectClause = '*';
+    if (projectColumns && projectColumns.length > 0) {
+      const colsToSelect = new Set(projectColumns);
+      colsToSelect.add(keyColumn);
+      selectClause = Array.from(colsToSelect).map(quoteIdent).join(', ');
+    }
     const res = await this.pool.query(
-      `SELECT * FROM ${quotedTable} WHERE ${quotedCol} = ANY($1)`,
+      `SELECT ${selectClause} FROM ${quotedTable} WHERE ${quotedCol} = ANY($1)`,
       [keys],
     );
 

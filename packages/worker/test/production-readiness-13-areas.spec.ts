@@ -9,6 +9,8 @@ import { DestinationConnector, TransformedBatch, SourceRecordEnvelope } from '..
 import { PostgresStorageAdapters } from '../src/engine/postgres-storage-adapters.js';
 import { IdTracker } from '../src/engine/id-tracker.js';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 
 describe('Production Readiness Regression - Worker Areas (6, 7, 8, 9, 10, 11)', () => {
   describe('Area 6: Destination Write Integrity & Collision Detection', () => {
@@ -951,6 +953,19 @@ describe('Production Readiness Regression - Worker Areas (6, 7, 8, 9, 10, 11)', 
           const probe = new pg.Pool({ connectionString: testDbUrl, max: 2 });
           await probe.query('SELECT 1');
           realPgPool = probe;
+
+          // Ensure PostgreSQL schema is initialized before inserting relational fixtures
+          const candidateSchemaPaths = [
+            path.resolve(__dirname, '../../backend/src/database/schema.sql'),
+            path.resolve(__dirname, '../../../packages/backend/src/database/schema.sql'),
+            path.resolve(process.cwd(), 'packages/backend/src/database/schema.sql'),
+            path.resolve(process.cwd(), 'src/database/schema.sql'),
+          ];
+          const schemaSqlPath = candidateSchemaPaths.find((p) => fs.existsSync(p));
+          if (schemaSqlPath) {
+            const schemaSql = fs.readFileSync(schemaSqlPath, 'utf8');
+            await realPgPool.query(schemaSql);
+          }
 
           testWorkspaceId = crypto.randomUUID();
           testProjectId = crypto.randomUUID();

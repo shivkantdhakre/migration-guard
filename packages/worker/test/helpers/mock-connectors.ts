@@ -168,14 +168,26 @@ export class MockDestinationConnector implements DestinationConnector {
     destinationObject: string,
     keys: string[],
     keyColumn = 'id',
+    projectColumns?: string[],
   ): Promise<DestinationRecord[]> {
     const results: DestinationRecord[] = [];
     for (const key of keys) {
       if (this.store.has(key)) {
         const row = this.store.get(key)!;
+        let data = row;
+        if (projectColumns && projectColumns.length > 0) {
+          const projected: Record<string, unknown> = {};
+          for (const col of projectColumns) {
+            if (col in row) projected[col] = row[col];
+          }
+          if (keyColumn in row && !(keyColumn in projected)) {
+            projected[keyColumn] = row[keyColumn];
+          }
+          data = projected;
+        }
         results.push({
           destinationKey: String(row[keyColumn] !== undefined ? row[keyColumn] : key),
-          data: row,
+          data,
         });
       }
     }

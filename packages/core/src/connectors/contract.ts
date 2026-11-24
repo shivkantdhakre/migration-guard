@@ -132,7 +132,7 @@ export interface DestinationConnector {
   testConnection(): Promise<ConnectionTestResult>;
   inspectSchema(options?: DiscoveryOptions): Promise<SchemaSnapshot>;
   writeBatch(batch: TransformedBatch, options: WriteOptions): Promise<WriteResult>;
-  readByKeys(objectName: string, keys: StableKey[], keyColumn?: string): Promise<DestinationRecord[]>;
+  readByKeys(objectName: string, keys: StableKey[], keyColumn?: string, projectColumns?: string[]): Promise<DestinationRecord[]>;
   count(objectName: string): Promise<number>;
   close(): Promise<void>;
 }

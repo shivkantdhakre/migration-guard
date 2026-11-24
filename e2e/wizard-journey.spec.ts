@@ -219,25 +219,33 @@ test.describe('Tier 5 Browser E2E: Complete 14-Step Live Wizard Journey & Report
 
     workerProc = spawn(process.execPath, [workerEntry], {
       cwd: WORKER_DIR,
-      env: sharedEnv,
+      env: { ...sharedEnv, IGNORE_ENV_SOURCE_CONNECTOR: 'true', RUN_STANDALONE_WORKER: 'true' },
       stdio: 'pipe',
     });
     const getWorkerLogs = attachLogRingBuffer(workerProc, 'worker');
     await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(
-        () => reject(new Error(`Worker failed to emit ready log within 30s.\n${getWorkerLogs()}`)),
-        30_000,
-      );
+      let settled = false;
+      const onExit = (code: number | null) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(new Error(`Worker exited unexpectedly with code ${code}.\n${getWorkerLogs()}`));
+      };
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        workerProc?.off('exit', onExit);
+        reject(new Error(`Worker failed to emit ready log within 30s.\n${getWorkerLogs()}`));
+      }, 30_000);
       workerProc!.stdout?.on('data', (chunk) => {
-        if (chunk.toString().includes('Worker is listening for jobs')) {
+        if (!settled && chunk.toString().includes('Worker is listening for jobs')) {
+          settled = true;
           clearTimeout(timer);
+          workerProc?.off('exit', onExit);
           resolve();
         }
       });
-      workerProc!.once('exit', (code) => {
-        clearTimeout(timer);
-        reject(new Error(`Worker exited unexpectedly with code ${code}.\n${getWorkerLogs()}`));
-      });
+      workerProc!.once('exit', onExit);
     });
 
     const nextBin = frontRequire.resolve('next/dist/bin/next', { paths: [FRONTEND_DIR, REPO_ROOT] });

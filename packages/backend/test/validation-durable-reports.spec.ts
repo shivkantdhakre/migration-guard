@@ -307,4 +307,35 @@ describe('Validation & Durable Reports Acceptance Suite (Section 9.4)', () => {
     expect(downloadedCsv.content).toContain("'=1+1");
     expect(downloadedCsv.content).toContain("'@SUM(1+1)");
   });
+
+  it('7. cleanly generates HTML and CSV reports with 0 discrepancies when discrepancy_records table does not exist in PostgreSQL', async () => {
+    const valRunRes = await db.query(
+      `INSERT INTO validation_runs (workspace_id, migration_run_id, status, validation_profile_version, canonicalization_version, summary_json)
+       VALUES ($1, gen_random_uuid(), 'COMPLETED', '1.0', '1.0', '{}') RETURNING id`,
+      [wsId],
+    );
+    const valRunId = valRunRes.rows[0].id;
+
+    const origQuery = db.query.bind(db);
+    db.query = (async (text: string, params?: any[]) => {
+      if (text.includes('FROM discrepancy_records')) {
+        const pgErr: any = new Error('relation "discrepancy_records" does not exist');
+        pgErr.code = '42P01';
+        throw pgErr;
+      }
+      return origQuery(text, params);
+    }) as any;
+
+    try {
+      const htmlReport = await reportService.generateReport(valRunId, 'EXECUTIVE', 'HTML', user.user.id);
+      const downloadedHtml = await reportService.downloadReport(htmlReport.id, user.user.id);
+      expect(downloadedHtml.content).toContain('Discrepancies (0)');
+
+      const csvReport = await reportService.generateReport(valRunId, 'DETAILED', 'CSV', user.user.id);
+      const downloadedCsv = await reportService.downloadReport(csvReport.id, user.user.id);
+      expect(downloadedCsv.content).toContain('# MigrationGuard Validation Assurance Report');
+    } finally {
+      db.query = origQuery;
+    }
+  });
 });

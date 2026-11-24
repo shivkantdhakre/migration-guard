@@ -61,10 +61,18 @@ export class ReportService {
       [validationRunId],
     );
     if (discRes.rows.length === 0) {
-      discRes = await this.db.query(
-        'SELECT * FROM discrepancy_records WHERE validation_run_id = $1 ORDER BY severity ASC',
-        [validationRunId],
-      );
+      try {
+        const legacyDiscRes = await this.db.query(
+          'SELECT * FROM discrepancy_records WHERE validation_run_id = $1 ORDER BY severity ASC',
+          [validationRunId],
+        );
+        if (legacyDiscRes.rows.length > 0) {
+          discRes = legacyDiscRes;
+        }
+      } catch {
+        // Canonical PostgreSQL schema uses `discrepancies` (0 rows on clean runs);
+        // `discrepancy_records` only exists in legacy in-memory fixtures.
+      }
     }
 
     let content = '';

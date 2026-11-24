@@ -67,7 +67,7 @@ The 14-step Wizard frontend UI and backend routes are wired without non-demo fab
   - Accepts only single-statement unquoted `SELECT` queries without mutating/locking keywords (`INTO`, `FOR UPDATE/SHARE`, `INSERT`, `UPDATE`, `DELETE`, `CALL`, `OPERATOR`, etc.).
   - Rejects `EXPLAIN` / `EXPLAIN ANALYZE`, `SET`, `SHOW`, CTEs (`WITH`), quoted function calls (`"pg_notify"()`), and schema-qualified calls (`pg_catalog.set_config()`).
   - Restricts `::` casts, `CAST(... AS ...)`, array brackets, and typed literals strictly to pure built-in types (`SAFE_BUILTIN_CAST_TYPES`, e.g., `uuid`, `int4`, `text`, `timestamptz`, `jsonb`), rejecting user-defined casts (`$1::my_custom_type`) and OID casts (`::regclass`).
-  - Restricts SQL operators strictly to `SAFE_BUILTIN_OPERATORS` (`=`, `<>`, `!=`, `<`, `<=`, `>`, `>=`, `+`, `-`, `*`, `/`, `%`, `||`, `~`), rejecting custom operators (`<->`, `@>`, `@@`, `###`) and `OPERATOR(schema.op)` invocations that can execute functions.
+  - Restricts SQL operators strictly to `SAFE_BUILTIN_OPERATORS` (`=`, `<>`, `!=`, `<`, `>`, `<=`, `>=`, `+`, `-`, `*`, `/`, `%`, `||`, `::`), rejecting custom operators (`<->`, `@>`, `@@`, `###`) and `OPERATOR(schema.op)` invocations that can execute functions.
   - Restricts function calls strictly to an explicit allowlist of known pure built-ins (`COUNT`, `SUM`, `COALESCE`, `LOWER`, `DATE_TRUNC`, etc.), rejecting `pg_notify()`, `set_config()`, `nextval()`, `setval()`, `pg_advisory_lock()`, and arbitrary UDFs.
   - Safe `SELECT` retries up to 3 times on transient socket drops with exponential backoff and jitter; writes and rejected reads fail fast. Verified by `14/14` targeted tests in `packages/backend/test/database-retry-safety.spec.ts`.
 

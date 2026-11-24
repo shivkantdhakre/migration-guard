@@ -1,4 +1,4 @@
-import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit, Optional } from '@nestjs/common';
 import { Queue } from 'bullmq';
 import { Redis } from 'ioredis';
 import { appConfig } from '../config/configuration';
@@ -34,7 +34,7 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
   private isDestroyed = false;
   private customRedisUrl?: string;
 
-  constructor(customRedisUrl?: string) {
+  constructor(@Optional() @Inject('CUSTOM_REDIS_URL') customRedisUrl?: string) {
     this.customRedisUrl = customRedisUrl;
   }
 

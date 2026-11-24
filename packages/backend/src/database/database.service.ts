@@ -1,4 +1,4 @@
-import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { Inject, Injectable, OnModuleDestroy, OnModuleInit, Optional } from '@nestjs/common';
 import pg from 'pg';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -25,7 +25,10 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   private customDatabaseUrl?: string;
   private customSearchPath?: string;
 
-  constructor(customDatabaseUrl?: string, customSearchPath?: string) {
+  constructor(
+    @Optional() @Inject('CUSTOM_DATABASE_URL') customDatabaseUrl?: string,
+    @Optional() @Inject('CUSTOM_SEARCH_PATH') customSearchPath?: string,
+  ) {
     this.customDatabaseUrl = customDatabaseUrl;
     this.customSearchPath = customSearchPath;
   }

@@ -680,6 +680,15 @@ describe('Production Readiness Regression - Backend Areas (1, 2, 12, 13)', () =>
       // Target that does not exist in mapping must return empty (not silently fallback to object[0])
       const resUnmatched = previewService.preview(multiMapping, samples, 'orders', 'invoices');
       expect(resUnmatched).toHaveLength(0);
+
+      // Single target matching multiple sources throws ambiguity error requiring destination disambiguation
+      expect(() => previewService.preview(multiMapping, samples, 'users')).toThrow(
+        /Ambiguous mapping: multiple approved objects match source 'users'\. Specify destination to disambiguate\./,
+      );
+
+      // Single target passed as destination name cannot match as source (no source-OR-destination confusion)
+      const resDestAsSource = previewService.preview(multiMapping, samples, 'accounts');
+      expect(resDestAsSource).toHaveLength(0);
     });
   });
 

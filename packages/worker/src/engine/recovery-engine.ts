@@ -94,18 +94,26 @@ export class RecoveryEngine {
 
     // Examine each batch in sequence
     for (const batch of objectBatches) {
-      const effectivePlanVersionId =
+      let effectivePlanVersionId =
         batch.planVersionId ||
         (batch.metadata?.planVersionId as string) ||
         (batch.metadata?.plan_version_id as string) ||
-        planVersionId ||
-        'resumed_plan';
-      const effectiveMappingVersionId =
+        planVersionId;
+      let effectiveMappingVersionId =
         batch.mappingVersionId ||
         (batch.metadata?.mappingVersionId as string) ||
         (batch.metadata?.mapping_version_id as string) ||
-        mappingVersionId ||
-        'resumed_mapping';
+        mappingVersionId;
+
+      if (!effectivePlanVersionId || !effectiveMappingVersionId) {
+        if (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false') {
+          throw new Error(
+            `[Worker Recovery] Missing durable planVersionId or mappingVersionId for batch '${batch.batchKey}' in run '${migrationRunId}'. Checkpoint recovery cannot proceed without durable version metadata in production.`,
+          );
+        }
+        effectivePlanVersionId = effectivePlanVersionId || 'test_plan_version';
+        effectiveMappingVersionId = effectiveMappingVersionId || 'test_mapping_version';
+      }
 
       if (batch.status === 'COMMITTED') {
         const currentSeq = checkpoint?.lastCommittedSequenceNo ?? 0;
@@ -178,18 +186,26 @@ export class RecoveryEngine {
     const subStage = batch.subStage;
     const status = batch.status;
 
-    const effectivePlanVersionId =
+    let effectivePlanVersionId =
       batch.planVersionId ||
       (batch.metadata?.planVersionId as string) ||
       (batch.metadata?.plan_version_id as string) ||
-      planVersionId ||
-      'resumed_plan';
-    const effectiveMappingVersionId =
+      planVersionId;
+    let effectiveMappingVersionId =
       batch.mappingVersionId ||
       (batch.metadata?.mappingVersionId as string) ||
       (batch.metadata?.mapping_version_id as string) ||
-      mappingVersionId ||
-      'resumed_mapping';
+      mappingVersionId;
+
+    if (!effectivePlanVersionId || !effectiveMappingVersionId) {
+      if (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false') {
+        throw new Error(
+          `[Worker Recovery] Missing durable planVersionId or mappingVersionId for batch '${batch.batchKey}' in run '${batch.migrationRunId}'. Checkpoint recovery cannot proceed without durable version metadata in production.`,
+        );
+      }
+      effectivePlanVersionId = effectivePlanVersionId || 'test_plan_version';
+      effectiveMappingVersionId = effectiveMappingVersionId || 'test_mapping_version';
+    }
 
     // Batches in write-involved stages:
     // MANIFEST_COMMITTED, DESTINATION_WRITTEN, WRITE_STARTED, OUTCOME_UNKNOWN

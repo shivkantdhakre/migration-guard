@@ -1114,6 +1114,15 @@ async function startWorker() {
             const raw = (envelope.payload || {}) as Record<string, any>;
             const destObj = job.data.destinationObject || envelope.sourceObject;
 
+            // Preserve original source ID for the destination business ID (decoupled from internal typed keys)
+            const businessId = raw._id !== undefined && raw._id !== null
+              ? (typeof raw._id === 'object' && raw._id.toString ? raw._id.toString() : String(raw._id))
+              : (raw.id !== undefined && raw.id !== null
+                  ? String(raw.id)
+                  : (envelope.sourceKey.includes(':')
+                      ? envelope.sourceKey.substring(envelope.sourceKey.indexOf(':') + 1)
+                      : envelope.sourceKey));
+
             // Execute real mapping DSL via TransformationEngine when available
             if (transformationEngine) {
               const transformed = transformationEngine.transform((envelope.payload || envelope) as any);
@@ -1138,9 +1147,9 @@ async function startWorker() {
             if (destObj === 'orders') {
               const amount = raw.totalAmount || raw.order_total || raw.total_amount || 0;
               data = {
-                id: envelope.sourceKey,
+                id: businessId,
                 customer_id: raw.customerId || raw.customer_id,
-                order_number: raw.orderNumber || raw.order_number || `ORD-${envelope.sourceKey}`,
+                order_number: raw.orderNumber || raw.order_number || `ORD-${businessId}`,
                 total_amount: amount,
                 order_total: amount,
                 status: raw.status || 'PENDING',
@@ -1151,7 +1160,7 @@ async function startWorker() {
               };
             } else if (destObj === 'customer_attachments' || destObj === 'attachments') {
               data = {
-                id: envelope.sourceKey,
+                id: businessId,
                 customer_id: raw.customerId || raw.customer_id || raw.recordId,
                 file_name: raw.fileName || raw.file_name || 'attachment.bin',
                 file_size: raw.byteSize || raw.file_size || 0,
@@ -1165,7 +1174,7 @@ async function startWorker() {
               };
             } else {
               data = {
-                id: envelope.sourceKey,
+                id: businessId,
                 name: typeof raw.name === 'string' ? raw.name.trim() : raw.name || 'Unnamed',
                 email: typeof raw.email === 'string' ? raw.email.trim().toLowerCase() : raw.email || null,
                 phone: raw.phone || null,
@@ -1182,7 +1191,7 @@ async function startWorker() {
               throw new Error(`[Worker Security] Missing destinationKey in payload for batch ${job.data.batchKey}. Prohibiting implicit default 'id' in production.`);
             }
             const effectiveDestKeyCol = job.data.destinationKey || 'id';
-            const recordDestKey = String(raw[effectiveDestKeyCol] !== undefined ? raw[effectiveDestKeyCol] : envelope.sourceKey);
+            const recordDestKey = String(raw[effectiveDestKeyCol] !== undefined ? raw[effectiveDestKeyCol] : businessId);
 
             return {
               sourceObject: envelope.sourceObject,

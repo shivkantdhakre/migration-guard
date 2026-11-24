@@ -556,7 +556,7 @@ describe('Production Readiness Regression - Worker Areas (6, 7, 8, 9, 10, 11)', 
       expect(detectedObj.idType).toBe('ObjectId');
       expect(detectedStr.idType).toBe('string');
       expect(detectedObj.typedKey).toBe(`ObjectId:${hex}`);
-      expect(detectedStr.typedKey).toBe(`string:${hex}`);
+      expect(detectedStr.typedKey).toBe(hex);
       expect(detectedObj.typedKey).not.toBe(detectedStr.typedKey);
     });
 
@@ -570,7 +570,7 @@ describe('Production Readiness Regression - Worker Areas (6, 7, 8, 9, 10, 11)', 
       expect(detectedLong.idType).toBe('Long');
       expect(detectedNum.idType).toBe('number');
       expect(detectedLong.typedKey).toBe('Long:42');
-      expect(detectedNum.typedKey).toBe('number:42');
+      expect(detectedNum.typedKey).toBe('42');
       expect(detectedLong.typedKey).not.toBe(detectedNum.typedKey);
     });
 
@@ -649,6 +649,40 @@ describe('Production Readiness Regression - Worker Areas (6, 7, 8, 9, 10, 11)', 
       expect(advancedCheckpoints[0].mappingVersionId).toBe('mv_real_uuid_222');
       expect(advancedCheckpoints[0].planVersionId).not.toBe('resumed_plan');
       expect(advancedCheckpoints[0].mappingVersionId).not.toBe('resumed_mapping');
+    });
+
+    it('fails closed in production when durable version metadata is missing without synthetic placeholders', async () => {
+      const { RecoveryEngine } = await import('../src/engine/recovery-engine.js');
+      const mockTracker: any = {
+        listBatches: vi.fn().mockResolvedValue([
+          {
+            batchKey: 'batch_no_version',
+            sequenceNo: 1,
+            status: 'COMMITTED',
+            sourceObject: 'users',
+            destinationObject: 'users',
+            recordsWritten: 1,
+          },
+        ]),
+        listRecordManifests: vi.fn().mockResolvedValue([]),
+        transitionState: vi.fn().mockResolvedValue(undefined),
+      };
+
+      const recovery = new RecoveryEngine({
+        destinationConnector: { readByKeys: vi.fn() } as any,
+        manifestTracker: mockTracker,
+        checkpointManager: { getCheckpoint: vi.fn().mockResolvedValue(null), advanceCheckpoint: vi.fn() } as any,
+      });
+
+      const oldEnv = process.env.NODE_ENV;
+      process.env.NODE_ENV = 'production';
+      try {
+        await expect(recovery.prepareResume('run_strict', 'users', 'users')).rejects.toThrow(
+          /Missing durable planVersionId or mappingVersionId/,
+        );
+      } finally {
+        process.env.NODE_ENV = oldEnv;
+      }
     });
   });
 });

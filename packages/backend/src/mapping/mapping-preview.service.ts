@@ -31,20 +31,14 @@ export class MappingPreviewService {
         }
         objectMapping = matches.length === 1 ? matches[0] : null;
       } else if (targetSourceOrObject) {
-        // Target specified: require exact match; do not silently fall back to unrelated single-mapping
-        const matches = mappingJson.objects.filter(
+        // Target source object specified: require exact source match without source-OR-destination ambiguity
+        const candidateMatches = mappingJson.objects.filter(
           (o: any) =>
-            ((o.source?.collection || o.source?.object || o.sourceObject || o.source) === targetSourceOrObject) &&
-            ((o.destination?.table || o.destination?.object || o.destinationObject || o.destination) === targetSourceOrObject),
+            ((o.source?.collection || o.source?.object || o.sourceObject || o.source) === targetSourceOrObject),
         );
-        const candidateMatches = matches.length === 1 ? matches : mappingJson.objects.filter(
-          (o: any) =>
-            ((o.source?.collection || o.source?.object || o.sourceObject || o.source) === targetSourceOrObject) ||
-            ((o.destination?.table || o.destination?.object || o.destinationObject || o.destination) === targetSourceOrObject),
-        );
-        if (candidateMatches.length > 1 && isStrict) {
+        if (candidateMatches.length > 1) {
           throw new Error(
-            `Ambiguous mapping: multiple approved objects match target '${targetSourceOrObject}'.`,
+            `Ambiguous mapping: multiple approved objects match source '${targetSourceOrObject}'. Specify destination to disambiguate.`,
           );
         }
         objectMapping = candidateMatches.length === 1 ? candidateMatches[0] : null;
@@ -62,8 +56,7 @@ export class MappingPreviewService {
         }
       } else if (targetSourceOrObject) {
         const sMatch = (mappingJson.source?.collection || mappingJson.source?.object || mappingJson.sourceObject || mappingJson.source) === targetSourceOrObject;
-        const dMatch = (mappingJson.destination?.table || mappingJson.destination?.object || mappingJson.destinationObject || mappingJson.destination) === targetSourceOrObject;
-        if (sMatch || dMatch) {
+        if (sMatch) {
           objectMapping = mappingJson;
         }
       } else {

@@ -6,6 +6,7 @@ import { DatabaseService } from '../src/database/database.service';
 import { AuthService } from '../src/auth/auth.service';
 import { JwtService } from '@nestjs/jwt';
 import { appConfig } from '../src/config/configuration';
+import { CryptoUtil } from '../src/common/crypto/crypto.util';
 
 describe('Connection & Secret Redaction', () => {
   let db: DatabaseService;
@@ -179,5 +180,26 @@ describe('Connection & Secret Redaction', () => {
     expect(testResult.reachable).toBe(false);
     expect(testResult.status).toBe('ERROR');
     expect(testResult.error).toBeDefined();
+  });
+
+  it('preserves shared DAG object references in redactSecrets while breaking genuine cycles', () => {
+    const sharedCols = [{ name: 'customers', fields: [{ path: '_id', type: 'string' }] }];
+    const snapshot = {
+      snapshot_json: { collections: sharedCols, password: 'hidden' },
+      collections: sharedCols,
+      created_at: new Date('2026-11-24T00:00:00.000Z'),
+    };
+    const sanitizedSnapshot = CryptoUtil.redactSecrets(snapshot);
+    expect(sanitizedSnapshot.collections).toEqual([{ name: 'customers', fields: [{ path: '_id', type: 'string' }] }]);
+    expect(sanitizedSnapshot.snapshot_json.collections).toEqual(sanitizedSnapshot.collections);
+    expect(sanitizedSnapshot.snapshot_json.password).toBe('[REDACTED]');
+    expect(sanitizedSnapshot.created_at).toBeInstanceOf(Date);
+
+    const cyclic: any = { ok: true, secretValue: 'top_secret' };
+    cyclic.self = cyclic;
+    const sanitizedCyclic = CryptoUtil.redactSecrets(cyclic);
+    expect(sanitizedCyclic.ok).toBe(true);
+    expect(sanitizedCyclic.secretValue).toBe('[REDACTED]');
+    expect(sanitizedCyclic.self).toBe('[Circular]');
   });
 });

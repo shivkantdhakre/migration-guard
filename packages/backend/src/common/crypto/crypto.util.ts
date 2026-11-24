@@ -64,39 +64,40 @@ export class CryptoUtil {
   public static redactSecrets<T = any>(
     obj: T,
     redactKeys: string[] = appConfig.logRedactKeys,
-    seen: WeakSet<object> = new WeakSet<object>(),
+    ancestors: WeakSet<object> = new WeakSet<object>(),
   ): T {
     if (obj === null || obj === undefined) return obj;
     if (obj instanceof Date || Buffer.isBuffer(obj)) return obj;
 
     if (typeof obj === 'object') {
-      if (seen.has(obj as object)) {
+      if (ancestors.has(obj as object)) {
         return '[Circular]' as unknown as T;
       }
-      seen.add(obj as object);
-    }
-
-    if (Array.isArray(obj)) {
-      return obj.map((item) => this.redactSecrets(item, redactKeys, seen)) as unknown as T;
-    }
-
-    if (typeof obj === 'object') {
-      const result: Record<string, any> = {};
-      for (const [key, value] of Object.entries(obj)) {
-        const lowerKey = key.toLowerCase();
-        const shouldRedact = redactKeys.some(
-          (rk) => lowerKey === rk || lowerKey.includes(rk),
-        );
-
-        if (shouldRedact) {
-          result[key] = '[REDACTED]';
-        } else if (typeof value === 'object' && value !== null) {
-          result[key] = this.redactSecrets(value, redactKeys, seen);
-        } else {
-          result[key] = value;
+      ancestors.add(obj as object);
+      try {
+        if (Array.isArray(obj)) {
+          return obj.map((item) => this.redactSecrets(item, redactKeys, ancestors)) as unknown as T;
         }
+
+        const result: Record<string, any> = {};
+        for (const [key, value] of Object.entries(obj)) {
+          const lowerKey = key.toLowerCase();
+          const shouldRedact = redactKeys.some(
+            (rk) => lowerKey === rk || lowerKey.includes(rk),
+          );
+
+          if (shouldRedact) {
+            result[key] = '[REDACTED]';
+          } else if (typeof value === 'object' && value !== null) {
+            result[key] = this.redactSecrets(value, redactKeys, ancestors);
+          } else {
+            result[key] = value;
+          }
+        }
+        return result as T;
+      } finally {
+        ancestors.delete(obj as object);
       }
-      return result as T;
     }
 
     return obj;

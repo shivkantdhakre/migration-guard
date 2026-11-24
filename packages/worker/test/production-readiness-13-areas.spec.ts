@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import pg from 'pg';
 import { calculateCanonicalHash, TransformationEngine, ObjectMapping } from '@migrationguard/core';
 import { ObjectId, Long, Decimal128 } from 'mongodb';
 import { DestinationWriter } from '../src/engine/destination-writer.js';
@@ -915,6 +916,66 @@ describe('Production Readiness Regression - Worker Areas (6, 7, 8, 9, 10, 11)', 
       expect(String((tNum.payload as any).id).includes(':')).toBe(false);
 
       // 2. PostgreSQL persistence & atomic collision rejection
+      const testDbUrl = process.env.MIGRATIONGUARD_TEST_DATABASE_URL || process.env.TEST_DATABASE_URL;
+      let realPgPool: pg.Pool | null = null;
+      let testWorkspaceId: string | null = null;
+      let testProjectId: string | null = null;
+      let testPlanId: string | null = null;
+      let testPlanVerId: string | null = null;
+      let testSourceConnId: string | null = null;
+      let testDestConnId: string | null = null;
+      const actualRunId = crypto.randomUUID();
+
+      if (testDbUrl) {
+        try {
+          const probe = new pg.Pool({ connectionString: testDbUrl, max: 2 });
+          await probe.query('SELECT 1');
+          realPgPool = probe;
+
+          testWorkspaceId = crypto.randomUUID();
+          testProjectId = crypto.randomUUID();
+          testPlanId = crypto.randomUUID();
+          testPlanVerId = crypto.randomUUID();
+          testSourceConnId = crypto.randomUUID();
+          testDestConnId = crypto.randomUUID();
+
+          await realPgPool.query(`INSERT INTO workspaces (id, name, slug) VALUES ($1, 'Test WS', $2)`, [
+            testWorkspaceId,
+            `ws-col-${Date.now()}`,
+          ]);
+          await realPgPool.query(`INSERT INTO projects (id, workspace_id, name) VALUES ($1, $2, 'Test Proj')`, [
+            testProjectId,
+            testWorkspaceId,
+          ]);
+          await realPgPool.query(
+            `INSERT INTO connections (id, workspace_id, name, engine, connection_role, status)
+             VALUES ($1, $2, 'Src', 'MONGODB', 'SOURCE', 'HEALTHY'),
+                    ($3, $2, 'Dst', 'POSTGRESQL', 'DESTINATION', 'HEALTHY')`,
+            [testSourceConnId, testWorkspaceId, testDestConnId],
+          );
+          await realPgPool.query(`INSERT INTO migration_plans (id, workspace_id, project_id, name) VALUES ($1, $2, $3, 'Test Plan')`, [
+            testPlanId,
+            testWorkspaceId,
+            testProjectId,
+          ]);
+          await realPgPool.query(
+            `INSERT INTO migration_plan_versions (id, plan_id, source_connection_id, destination_connection_id, plan_hash)
+             VALUES ($1, $2, $3, $4, 'hash_col_test')`,
+            [testPlanVerId, testPlanId, testSourceConnId, testDestConnId],
+          );
+          await realPgPool.query(
+            `INSERT INTO migration_runs (id, workspace_id, project_id, plan_version_id, status)
+             VALUES ($1, $2, $3, $4, 'RUNNING')`,
+            [actualRunId, testWorkspaceId, testProjectId, testPlanVerId],
+          );
+        } catch {
+          if (realPgPool) {
+            await realPgPool.end().catch(() => {});
+            realPgPool = null;
+          }
+        }
+      }
+
       const idMappingsTable: Array<{
         migration_run_id: string;
         source_object: string;
@@ -966,71 +1027,96 @@ describe('Production Readiness Regression - Worker Areas (6, 7, 8, 9, 10, 11)', 
         query: vi.fn(async (sql, params) => mockClient.query(sql, params)),
       };
 
-      const pgAdapters = new PostgresStorageAdapters(mockPool);
+      const activePgPool = realPgPool || mockPool;
+      const pgAdapters = new PostgresStorageAdapters(activePgPool);
       const tracker = new IdTracker(pgAdapters);
 
-      // Record 1 (number:42) claims destination key '42'
-      await tracker.claimBatchMappings([
-        {
-          migrationRunId: runId,
-          sourceObject: tNum.sourceObject,
-          sourceKey: tNum.sourceKey, // 'number:42'
-          destinationObject: tNum.destinationObject,
-          destinationKey: tNum.destinationKey, // '42'
-        },
-      ]);
-      expect(idMappingsTable).toHaveLength(1);
-      expect(idMappingsTable[0].source_key).toBe('number:42');
-      expect(idMappingsTable[0].destination_key).toBe('42');
-
-      // Record 2 (string:42) attempting to claim the same destination key '42' must be rejected
-      await expect(
-        tracker.claimBatchMappings([
+      try {
+        // Record 1 (number:42) claims destination key '42'
+        await tracker.claimBatchMappings([
           {
-            migrationRunId: runId,
-            sourceObject: tStr.sourceObject,
-            sourceKey: tStr.sourceKey, // 'string:42'
-            destinationObject: tStr.destinationObject,
-            destinationKey: tStr.destinationKey, // '42'
+            migrationRunId: actualRunId,
+            sourceObject: tNum.sourceObject,
+            sourceKey: tNum.sourceKey, // 'number:42'
+            destinationObject: tNum.destinationObject,
+            destinationKey: tNum.destinationKey, // '42'
           },
-        ]),
-      ).rejects.toThrow(/Collision detected: distinct source record 'string:42' maps to destinationKey '42'/);
+        ]);
 
-      // Verify DestinationWriter integrates with tracker and aborts writeBatch on collision
-      const mockDestinationConnector: any = {
-        writeBatch: vi.fn(),
-        readByKeys: vi.fn(),
-      };
-      const destinationWriter = new DestinationWriter({
-        connector: mockDestinationConnector,
-        idTracker: tracker,
-      });
+        if (!realPgPool) {
+          expect(idMappingsTable).toHaveLength(1);
+          expect(idMappingsTable[0].source_key).toBe('number:42');
+          expect(idMappingsTable[0].destination_key).toBe('42');
+        } else {
+          const res = await realPgPool.query(
+            `SELECT source_key, destination_key FROM id_mappings WHERE migration_run_id = $1`,
+            [actualRunId],
+          );
+          expect(res.rows).toHaveLength(1);
+          expect(res.rows[0].source_key).toBe('number:42');
+          expect(res.rows[0].destination_key).toBe('42');
+        }
 
-      const batchToAttempt: TransformedBatch = {
-        batchKey: 'batch_collision_test',
-        destinationObject: 'customers',
-        records: [
-          {
-            destinationKey: tStr.destinationKey,
-            sourceKey: tStr.sourceKey,
-            sourceObject: tStr.sourceObject,
-            destinationObject: tStr.destinationObject,
-            data: tStr.payload as Record<string, unknown>,
-          },
-        ],
-      };
+        // Record 2 (string:42) attempting to claim the same destination key '42' must be rejected
+        await expect(
+          tracker.claimBatchMappings([
+            {
+              migrationRunId: actualRunId,
+              sourceObject: tStr.sourceObject,
+              sourceKey: tStr.sourceKey, // 'string:42'
+              destinationObject: tStr.destinationObject,
+              destinationKey: tStr.destinationKey, // '42'
+            },
+          ]),
+        ).rejects.toThrow(/Collision detected: distinct source record 'string:42' maps to destinationKey '42'/);
 
-      await expect(
-        destinationWriter.write(batchToAttempt, {
-          migrationRunId: runId,
+        // Verify DestinationWriter integrates with tracker and aborts writeBatch on collision
+        const mockDestinationConnector: any = {
+          writeBatch: vi.fn(),
+          readByKeys: vi.fn(),
+        };
+        const destinationWriter = new DestinationWriter({
+          connector: mockDestinationConnector,
+          idTracker: tracker,
+        });
+
+        const batchToAttempt: TransformedBatch = {
           batchKey: 'batch_collision_test',
-          sourceObject: 'customers',
-          writeMode: 'upsert',
-        }),
-      ).rejects.toThrow(/Collision detected/);
+          destinationObject: 'customers',
+          records: [
+            {
+              destinationKey: tStr.destinationKey,
+              sourceKey: tStr.sourceKey,
+              sourceObject: tStr.sourceObject,
+              destinationObject: tStr.destinationObject,
+              data: tStr.payload as Record<string, unknown>,
+            },
+          ],
+        };
 
-      // Confirm destination connector was NEVER called due to early collision rejection
-      expect(mockDestinationConnector.writeBatch).not.toHaveBeenCalled();
+        await expect(
+          destinationWriter.write(batchToAttempt, {
+            migrationRunId: actualRunId,
+            batchKey: 'batch_collision_test',
+            sourceObject: 'customers',
+            writeMode: 'upsert',
+          }),
+        ).rejects.toThrow(/Collision detected/);
+
+        // Confirm destination connector was NEVER called due to early collision rejection
+        expect(mockDestinationConnector.writeBatch).not.toHaveBeenCalled();
+      } finally {
+        if (realPgPool) {
+          await realPgPool.query(`DELETE FROM id_mappings WHERE migration_run_id = $1`, [actualRunId]).catch(() => {});
+          await realPgPool.query(`DELETE FROM migration_runs WHERE id = $1`, [actualRunId]).catch(() => {});
+          await realPgPool.query(`DELETE FROM migration_plan_versions WHERE id = $1`, [testPlanVerId]).catch(() => {});
+          await realPgPool.query(`DELETE FROM migration_plans WHERE id = $1`, [testPlanId]).catch(() => {});
+          await realPgPool.query(`DELETE FROM connections WHERE id IN ($1, $2)`, [testSourceConnId, testDestConnId]).catch(() => {});
+          await realPgPool.query(`DELETE FROM projects WHERE id = $1`, [testProjectId]).catch(() => {});
+          await realPgPool.query(`DELETE FROM workspaces WHERE id = $1`, [testWorkspaceId]).catch(() => {});
+          await realPgPool.end().catch(() => {});
+        }
+      }
     });
   });
 

@@ -258,6 +258,7 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.15)', { t
     let workerChild5: ChildProcess | null = null;
     let workerChild6: ChildProcess | null = null;
     let queue: Queue | null = null;
+    let mappingVersionId: string | null = null;
 
     try {
       // 4. Align and Execute Canonical Production Schema (Section 6)
@@ -383,10 +384,40 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.15)', { t
         [planId, workspaceId, projectId],
       );
 
+      // Seed Approved Mapping Version (UUID) matching Canonical Production Schema & Exact Source/Dest
+      mappingVersionId = crypto.randomUUID();
+      const mappingJson = {
+        source: { collection: sourceCollection },
+        destination: { table: destTable },
+        identity: {
+          sourceKey: '_id',
+          destinationKey: 'id',
+          strategy: 'PRESERVE_AS_TEXT',
+        },
+        fields: [
+          { sourcePath: '_id', destinationPath: 'id', transform: 'direct' },
+          { sourcePath: 'name', destinationPath: 'name', transform: 'direct' },
+          { sourcePath: 'email', destinationPath: 'email', transform: 'direct' },
+          { sourcePath: 'phone', destinationPath: 'phone', transform: 'direct' },
+          { sourcePath: 'tier', destinationPath: 'tier', transform: 'direct' },
+          { sourcePath: 'status', destinationPath: 'status', transform: 'direct' },
+          { sourcePath: 'metadata', destinationPath: 'metadata', transform: 'direct' },
+          { sourcePath: 'createdAt', destinationPath: 'created_at', transform: 'direct' },
+        ],
+      };
+      const mappingCanonical = independentCanonicalize(mappingJson);
+      const mappingHash = 'sha256:' + crypto.createHash('sha256').update(mappingCanonical).digest('hex');
+
       await testPool.query(
-        `INSERT INTO migration_plan_versions (id, plan_id, version, source_connection_id, destination_connection_id, plan_hash)
-         VALUES ($1, $2, 1, $3, $4, 'e2e_plan_hash_001')`,
-        [planVersionId, planId, sourceConnId, destConnId],
+        `INSERT INTO mapping_versions (id, workspace_id, plan_id, version, mapping_json, mapping_hash)
+         VALUES ($1, $2, $3, 1, $4, $5)`,
+        [mappingVersionId, workspaceId, planId, JSON.stringify(mappingJson), mappingHash],
+      );
+
+      await testPool.query(
+        `INSERT INTO migration_plan_versions (id, plan_id, version, source_connection_id, destination_connection_id, mapping_version_id, plan_hash)
+         VALUES ($1, $2, 1, $3, $4, $5, 'e2e_plan_hash_001')`,
+        [planVersionId, planId, sourceConnId, destConnId, mappingVersionId],
       );
 
       // Migration Run Record matching Canonical Production Schema
@@ -497,7 +528,7 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.15)', { t
         destinationObject: destTable,
         batchSize: 10,
         planVersionId: planVersionId,
-        mappingVersionId: 'map-v1',
+        mappingVersionId: mappingVersionId!,
         writeMode: 'upsert',
       };
 
@@ -615,7 +646,7 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.15)', { t
         batchSize: 5,
         cursorStart: { lastId: 'cust_mongo_0010' },
         planVersionId: planVersionId,
-        mappingVersionId: 'map-v1',
+        mappingVersionId: mappingVersionId!,
         writeMode: 'upsert',
       };
 
@@ -732,7 +763,7 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.15)', { t
         batchSize: 5,
         cursorStart: { lastId: 'cust_mongo_0015' },
         planVersionId: planVersionId,
-        mappingVersionId: 'map-v1',
+        mappingVersionId: mappingVersionId!,
         writeMode: 'upsert',
       };
 
@@ -980,6 +1011,9 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.15)', { t
         await testPool.query(`DELETE FROM id_mappings WHERE migration_run_id = $1`, [runId]).catch(() => {});
         await testPool.query(`DELETE FROM migration_runs WHERE id = $1`, [runId]).catch(() => {});
         await testPool.query(`DELETE FROM migration_plan_versions WHERE id = $1`, [planVersionId]).catch(() => {});
+        if (mappingVersionId) {
+          await testPool.query(`DELETE FROM mapping_versions WHERE id = $1`, [mappingVersionId]).catch(() => {});
+        }
         await testPool.query(`DELETE FROM migration_plans WHERE id = $1`, [planId]).catch(() => {});
         await testPool.query(`DELETE FROM connection_secrets WHERE connection_id IN ($1, $2)`, [sourceConnId, destConnId]).catch(() => {});
         await testPool.query(`DELETE FROM connections WHERE id IN ($1, $2)`, [sourceConnId, destConnId]).catch(() => {});

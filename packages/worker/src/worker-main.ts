@@ -1132,7 +1132,7 @@ async function startWorker() {
                 sourceObject: transformed.sourceObject,
                 destinationObject: transformed.destinationObject,
                 data: transformed.payload,
-                contentHash: transformed.canonicalHash || calculateCanonicalHash(raw),
+                contentHash: calculateCanonicalHash(raw),
               };
             }
 

@@ -37,18 +37,34 @@ async function isTcpReachable(host: string, port: number, timeoutMs = 1500): Pro
   });
 }
 
-async function waitForHttpReady(url: string, timeoutMs = 45_000): Promise<void> {
+async function waitForHttpReady(url: string, timeoutMs = 45_000, getLogs?: () => string): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
       const res = await fetch(url);
-      if (res.status < 500) return;
+      if (res.ok) return;
     } catch {
       // retry
     }
     await new Promise((r) => setTimeout(r, 400));
   }
-  throw new Error(`Timed out waiting for HTTP endpoint: ${url}`);
+  const extra = getLogs ? `\n--- Process Logs ---\n${getLogs()}` : '';
+  throw new Error(`Timed out waiting for HTTP endpoint: ${url}${extra}`);
+}
+
+function attachLogRingBuffer(proc: ChildProcess, label: string, maxLines = 80): () => string {
+  const lines: string[] = [];
+  const pushChunk = (stream: string, chunk: Buffer | string) => {
+    for (const line of chunk.toString().split(/\r?\n/)) {
+      if (line.trim()) {
+        lines.push(`[${label}:${stream}] ${line}`);
+        if (lines.length > maxLines) lines.shift();
+      }
+    }
+  };
+  proc.stdout?.on('data', (c) => pushChunk('out', c));
+  proc.stderr?.on('data', (c) => pushChunk('err', c));
+  return () => lines.join('\n');
 }
 
 async function apiJson(baseUrl: string, p: string, method: string, body?: any, token?: string) {
@@ -198,22 +214,30 @@ test.describe('Tier 5 Browser E2E: Complete 14-Step Live Wizard Journey & Report
       env: { ...sharedEnv, PORT: '4000', CORS_ALLOWED_ORIGINS: 'http://localhost:3000,http://127.0.0.1:3000' },
       stdio: 'pipe',
     });
-    await waitForHttpReady('http://127.0.0.1:4000/health/liveness', 45_000);
+    const getBackendLogs = attachLogRingBuffer(backendProc, 'backend');
+    await waitForHttpReady('http://127.0.0.1:4000/health/liveness', 45_000, getBackendLogs);
 
     workerProc = spawn(process.execPath, [workerEntry], {
       cwd: WORKER_DIR,
       env: sharedEnv,
       stdio: 'pipe',
     });
+    const getWorkerLogs = attachLogRingBuffer(workerProc, 'worker');
     await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('Worker failed to emit ready log within 30s')), 30_000);
+      const timer = setTimeout(
+        () => reject(new Error(`Worker failed to emit ready log within 30s.\n${getWorkerLogs()}`)),
+        30_000,
+      );
       workerProc!.stdout?.on('data', (chunk) => {
         if (chunk.toString().includes('Worker is listening for jobs')) {
           clearTimeout(timer);
           resolve();
         }
       });
-      workerProc!.stderr?.on('data', () => {});
+      workerProc!.once('exit', (code) => {
+        clearTimeout(timer);
+        reject(new Error(`Worker exited unexpectedly with code ${code}.\n${getWorkerLogs()}`));
+      });
     });
 
     const nextBin = frontRequire.resolve('next/dist/bin/next', { paths: [FRONTEND_DIR, REPO_ROOT] });
@@ -227,7 +251,8 @@ test.describe('Tier 5 Browser E2E: Complete 14-Step Live Wizard Journey & Report
       },
       stdio: 'pipe',
     });
-    await waitForHttpReady('http://localhost:3000/wizard', 45_000);
+    const getFrontendLogs = attachLogRingBuffer(frontendProc, 'frontend');
+    await waitForHttpReady('http://localhost:3000/wizard', 45_000, getFrontendLogs);
 
     void adminUrl;
   });

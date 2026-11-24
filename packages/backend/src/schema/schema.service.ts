@@ -349,13 +349,22 @@ export class SchemaService {
     await this.workspaceService.assertWorkspaceAccess(conn.workspace_id, userId, 'Viewer');
 
     const res = await this.db.query(
-      `SELECT id, workspace_id, connection_id, connection_version, schema_version, created_at
+      `SELECT id, workspace_id, connection_id, connection_version, schema_version, snapshot_json, created_at
        FROM schema_snapshots
        WHERE connection_id = $1
        ORDER BY created_at DESC`,
       [connectionId],
     );
-    return res.rows;
+    return res.rows.map((r) => ({
+      ...r,
+      capturedAt: r.created_at,
+      ...(r.snapshot_json && typeof r.snapshot_json === 'object'
+        ? {
+            collections: r.snapshot_json.collections,
+            tables: r.snapshot_json.tables,
+          }
+        : {}),
+    }));
   }
 
   async getSnapshot(snapshotId: string, userId: string) {

@@ -643,7 +643,8 @@ export default function MigrationWizardPage() {
       const snapshotSample =
         snap?.samples?.customers?.[0] ||
         snap?.snapshot_json?.samples?.customers?.[0] ||
-        snap?.collections?.[0]?.sampleDocuments?.[0];
+        snap?.collections?.[0]?.sampleDocuments?.[0] ||
+        snap?.snapshot_json?.collections?.[0]?.sampleDocuments?.[0];
 
       let sampleDoc = snapshotSample;
       if (!sampleDoc) {
@@ -1346,7 +1347,7 @@ export default function MigrationWizardPage() {
                         {Array.isArray(col.fields) && col.fields.length > 0 ? (
                           <div className="text-[11px] text-infra-muted">
                             <span className="text-infra-text">Fields: </span>
-                            {col.fields.map((f: any) => typeof f === 'string' ? f : f.name).join(', ')}
+                            {col.fields.map((f: any) => (typeof f === 'string' ? f : f.name || f.path)).join(', ')}
                           </div>
                         ) : (
                           <div className="text-[11px] text-infra-muted">

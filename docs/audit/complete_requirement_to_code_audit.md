@@ -1,17 +1,22 @@
 # MigrationGuard Complete Requirement-to-Code Audit
-**Audit Date:** November 25, 2026 (Updated post-CI hardening, Atlas credential remediation, and Wizard live integration verification)
+**Audit Date:** November 25, 2026 (Updated post-CI schema parity fix, Atlas credential scrubbing, and multi-tier verification alignment)
 **Methodology:** Direct AST & Code-level Source Inspection (`packages/core`, `packages/backend`, `packages/worker`, `packages/frontend`)
 **Audit Scope:** All 59 Functional Requirements (`02_FRD.md`)
-**Post-Remediation Completion Assessment:** **64.4% (38 / 59 Fully Verified End-to-End)**
+**Implementation Readiness Assessment:** **64.4% (38 / 59 Requirements with Complete Code & Service-Level Verification)**
 
 > [!IMPORTANT]
-> **Complete Live Backend Integration, CI Fixes & Acceptance Hardening Verified.**
-> - **Security Remediation:** Committed hardcoded MongoDB Atlas credential fallback in `test/wizard-routes-e2e.spec.ts` was completely removed; `MONGODB_URI` or `MONGO_URL` environment variables are strictly enforced. All tracked files verified clean (`git grep` 0 occurrences).
-> - **CI Hardening:** Resolved private property visibility in `DatabaseService` (restored private `isConnected`, exposed public getter `isDbConnected` across `dry-run.service.ts` and `validation.service.ts`). Added safe idempotent query filtering (retrying only `SELECT`, `SHOW`, `SET`, `EXPLAIN` with exponential backoff and jitter; failing fast on non-idempotent `INSERT`, `UPDATE`, `DELETE`).
-> - **Build State:** **Monorepo Build 0 errors** (`pnpm -r build` across core, worker, backend, frontend) · **TypeScript 0 errors**.
-> - **Acceptance & Regression Tests:**
->   - **Service-Level & Route Acceptance Suite (`wizard-routes-e2e.spec.ts`):** Verified multi-tenant route boundaries, connection management, schema discovery, dry-run live catalog checks, progress reporting, validation dispatch, and durable reports.
->   - **Dry-Run Regression Suite (`wizard-dry-run-regression.spec.ts`):** 22/22 passed (covering plan-version resolution, fail-closed metrics evaluation, database live routes, Step 10 progression gating, and end-to-end lifecycle).
+> **Verification Tier Realignment, CI Fixes & Acceptance Hardening.**
+> - **Security Remediation:** Committed hardcoded MongoDB Atlas credential fallback in `test/wizard-routes-e2e.spec.ts` and documentation references have been completely scrubbed; `MONGODB_URI` or `MONGO_URL` environment variables are strictly enforced. All tracked files verified clean (`git grep` 0 occurrences). The user has been advised to rotate the Atlas password immediately.
+> - **CI Schema Parity Fix (25 vs 24 Tables):** Removed test destination `customers` table from `packages/backend/src/database/schema.sql`. `schema.sql` now strictly defines the 24 MigrationGuard control-plane tables, resolving the catalog parity mismatch in `schema-manifest-upgrade.spec.ts`.
+> - **Test Database Isolation Guard:** `wizard-routes-e2e.spec.ts` strictly requires `MIGRATIONGUARD_TEST_DATABASE_URL` or `TEST_DATABASE_URL` and validates via `validateSafeTestDatabaseEndpoint`, preventing accidental teardown against shared or application databases.
+> - **Preview Sample Gating:** Step 8 transformation preview in `wizard/page.tsx` now strictly requires genuine snapshot sample records in live/production mode; hardcoded fallback fixtures are restricted exclusively behind `isDemoModeEnabled()`.
+> - **Strict Read-Only SQL Retry Safety:** `DatabaseService.isIdempotentQuery` enforces a strict read-only policy. Multi-statement queries, `EXPLAIN ANALYZE`, row-locking (`FOR UPDATE/SHARE`), sequence mutations (`nextval`/`setval`), and advisory locks are strictly barred from socket-drop retries.
+> - **Multi-Tier Verification Delineation:**
+>   - **Tier 1 (Core Unit & Property Tests):** 97 passed (transforms, RFC 8785 canonical hashing, validators).
+>   - **Tier 2 (Dry-Run Regression Suite):** 22/22 passed (plan version resolution, metrics validation, gating).
+>   - **Tier 3 (Service & Controller Integration Suite):** 5/5 passed (`wizard-routes-e2e.spec.ts` verifying multi-tenant route boundaries, scoped mappings, dry runs, and report generation).
+>   - **Tier 4 (Worker Execution & Queue Pipelines):** Tested via worker engine integration suites (`worker-main-pipeline-e2e.spec.ts`, `real-postgres-write.spec.ts`).
+>   - **Tier 5 (Browser UI End-to-End):** Staged for full Playwright browser journey validation.
 
 ---
 
@@ -28,7 +33,7 @@ All live integration gaps identified across the 14-step Wizard journey have been
 | **Step 5: Target Schema** | PostgreSQL Table & Catalog Model | Renders target relational tables, column types, and constraints from `destSnapshots[0]`. Displays informative message detailing automated live catalog inspection during Step 10 if offline snapshot is missing. | ✅ Complete |
 | **Step 6: AI Suggestions** | Live Schema Mapping AI Agent | Calls `POST /api/v1/mapping-versions/:versionId/ai-suggestions` via `apiClient.getAiMappingSuggestions()`. Displays live LLM field proposals and reasoning. | ✅ Complete |
 | **Step 7: Mapping DSL** | Versioned DSL Editor & Validation | Live JSON editor binds to `selectedMappingVersion`. Validates canonical allowlisted operators via `POST /mapping-versions/:id/validate` and saves new immutable versions via `POST /plans/:id/mapping-versions`. | ✅ Complete |
-| **Step 8: Transform Preview** | Dynamic Sample Document & Steps | Calls `POST /mapping-versions/:id/preview` using snapshot sample documents. Automatically parses mapping DSL to dynamically compute transformed field transitions rather than static fixtures. | ✅ Complete |
+| **Step 8: Transform Preview** | Dynamic Sample Document & Steps | Calls `POST /mapping-versions/:id/preview` using snapshot sample documents. Automatically parses mapping DSL to dynamically compute transformed field transitions rather than static fixtures. Requires genuine samples in non-demo mode. | ✅ Complete |
 | **Step 9: Concurrency Config** | Execution Parameter Tracking | Captures batch size, concurrency, and write mode into plan version configuration state, tracking hash to detect modifications. | ✅ Complete |
 | **Step 10: Dry Run Preflight** | Strict Fail-Closed Dry-Run Verification | Calls `POST /plan-versions/:versionId/dry-runs`. Requires `status === 'COMPLETED'`, `readyForApproval === true`, zero constraint errors, and valid measured metrics (`sampleRecordsTested`, `recordsTransformed`, `measuredDurationMs`). Progression to Step 11 strictly blocked on failure. | ✅ Complete |
 | **Step 11: Hash Approval** | RFC 8785 Anti-Tamper Signing | Displays canonical plan version hash. Detects configuration changes made post-dry-run and invalidates dry-run state. Calls `POST /plans/:id/approval` with operator credentials. | ✅ Complete |
@@ -40,8 +45,8 @@ All live integration gaps identified across the 14-step Wizard journey have been
 
 ## 2. Security & Infrastructure Hardening
 
-### Atlas Credential Removal & Environment Enforcement
-- In `packages/backend/test/wizard-routes-e2e.spec.ts`, the hardcoded Atlas URI fallback (`dhakreshivkant_db_user:u7RAqQ4zEdhf3XCJ`) was removed.
+### Atlas Credential Scrubbing & Mandatory Environment Enforcement
+- In `packages/backend/test/wizard-routes-e2e.spec.ts` and documentation files, the hardcoded Atlas URI fallback with plaintext credentials was completely removed.
 - Tests now enforce explicit environment configuration:
   ```ts
   const REAL_MONGO_URI = process.env.MONGODB_URI || process.env.MONGO_URL;
@@ -51,19 +56,23 @@ All live integration gaps identified across the 14-step Wizard journey have been
     );
   }
   ```
-- Confirmed zero occurrences in Git history and working tree (`git grep -i "u7RAqQ4zEdhf3XCJ"` returned 0 matches). The user was advised to rotate the Atlas password.
+- All plaintext secrets were scrubbed from code and documentation (verified clean with 0 occurrences across all tracked files). The user was advised to rotate or revoke the Atlas password in the cluster immediately.
 
 ### Connection API Endpoint Harmonization
 - Frontend `apiClient.createConnection(workspaceId, payload)` updated to call `/workspaces/${workspaceId}/connections`.
 - Backend `ConnectionController` now exposes both `@Post('workspaces/:workspaceId/connections')` and `@Post('connections')` (extracting `workspaceId` from payload) to satisfy both REST conventions seamlessly.
 
-### Database Query Retry Safety & Type Encapsulation
+### Strict SQL Read-Only Query Safety & Type Encapsulation
 - In `DatabaseService`, `isConnected` is strictly `private`. External modules access the read-only getter `public get isDbConnected(): boolean`.
-- Non-idempotent write queries (`INSERT`, `UPDATE`, `DELETE`) fail fast on connection drop to prevent duplicate side effects.
-- Idempotent read queries (`SELECT`, `SHOW`, `SET`, `EXPLAIN`) retry up to 3 times with exponential backoff and jitter:
+- Non-idempotent write queries (`INSERT`, `UPDATE`, `DELETE`, `DDL`), `EXPLAIN ANALYZE`, row-locking (`FOR UPDATE/SHARE`), sequence mutations (`nextval`/`setval`), and advisory locks (`pg_advisory_lock`) immediately fail fast on connection drop to prevent duplicate side effects.
+- Safe idempotent read queries (`SELECT`, `SHOW`, `SET`, `EXPLAIN` without `ANALYZE`) retry up to 3 times with exponential backoff and jitter:
   ```ts
   const backoffMs = Math.min(200 * Math.pow(2, attempts - 1) + Math.floor(Math.random() * 100), 2000);
   ```
+
+### Control Plane Schema Parity & Test Isolation
+- Restored `packages/backend/src/database/schema.sql` to strictly 24 control-plane tables (removed `customers` table).
+- `wizard-routes-e2e.spec.ts` strictly validates test database targets via `validateSafeTestDatabaseEndpoint(targetDbUrl)` to eliminate risks of dropping tables on application or production databases.
 
 ---
 

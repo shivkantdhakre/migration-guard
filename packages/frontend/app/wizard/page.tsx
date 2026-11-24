@@ -629,20 +629,31 @@ export default function MigrationWizardPage() {
     setPreviewLoading(true);
     setPreviewError(null);
     try {
-      // 1. Prefer sample record from snapshot, fallback to discovered attributes
+      // 1. Require genuine sample record from source snapshot in live mode
       const snap: any = sourceSnapshots[0];
       const snapshotSample =
         snap?.samples?.customers?.[0] ||
         snap?.snapshot_json?.samples?.customers?.[0] ||
         snap?.collections?.[0]?.sampleDocuments?.[0];
 
-      const sampleDoc = snapshotSample || {
-        _id: '507f1f77bcf86cd799439011',
-        name: '   Acme Enterprise LLC   ',
-        email: 'CONTACT@ACME.COM',
-        createdAt: '2026-11-19T20:00:00.000Z',
-        metadata: { street: '100 Market St', city: 'San Francisco', state: 'CA' },
-      };
+      let sampleDoc = snapshotSample;
+      if (!sampleDoc) {
+        if (isDemoModeEnabled()) {
+          sampleDoc = {
+            _id: '507f1f77bcf86cd799439011',
+            name: '   Acme Enterprise LLC   ',
+            email: 'CONTACT@ACME.COM',
+            createdAt: '2026-11-19T20:00:00.000Z',
+            metadata: { street: '100 Market St', city: 'San Francisco', state: 'CA' },
+          };
+        } else {
+          setPreviewError(
+            'Cannot preview transformations: no sample document available in source schema snapshot. Capture a schema snapshot containing sample documents or enable Demo Mode.',
+          );
+          setPreviewLoading(false);
+          return;
+        }
+      }
 
       const res: any = await apiClient.previewTransform(selectedMappingVersion.id, sampleDoc);
       const previewItem = Array.isArray(res?.preview) ? res.preview[0] : (res?.preview || res);

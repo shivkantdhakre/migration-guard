@@ -21,6 +21,7 @@ import { ReportController } from '../src/report/report.controller';
 import { JwtService } from '@nestjs/jwt';
 import { appConfig } from '../src/config/configuration';
 import { resolvePlanVersionId, evaluateDryRunResponse } from '../../frontend/lib/wizard-utils';
+import { validateSafeTestDatabaseEndpoint } from './redis-test-utils';
 
 vi.setConfig({ testTimeout: 120000, hookTimeout: 120000 });
 
@@ -31,7 +32,7 @@ if (!REAL_MONGO_URI) {
   );
 }
 
-describe('Wizard Routes & Service-Level Backend Integration Acceptance Suite', () => {
+describe('Wizard Routes & Service/Controller Integration Suite', () => {
   let db: DatabaseService;
   let workspaceService: WorkspaceService;
   let projectService: ProjectService;
@@ -59,8 +60,14 @@ describe('Wizard Routes & Service-Level Backend Integration Acceptance Suite', (
 
   const targetDbUrl =
     process.env.MIGRATIONGUARD_TEST_DATABASE_URL ||
-    process.env.TEST_DATABASE_URL ||
-    appConfig.databaseUrl;
+    process.env.TEST_DATABASE_URL;
+
+  if (!targetDbUrl) {
+    throw new Error(
+      '[Safety Guard] MIGRATIONGUARD_TEST_DATABASE_URL or TEST_DATABASE_URL must be explicitly configured. Running integration tests against default application database is strictly prohibited.',
+    );
+  }
+  validateSafeTestDatabaseEndpoint(targetDbUrl);
 
   beforeEach(async () => {
     process.env.ALLOW_IN_MEMORY_DB = 'false';
@@ -454,9 +461,9 @@ describe('Wizard Routes & Service-Level Backend Integration Acceptance Suite', (
     });
   });
 
-  describe('5. Migration Execution, Validation & Durable Reports', () => {
+  describe('5. Service-Level Migration Dispatch, Validation & Durable Reports', () => {
     it(
-      'executes end-to-end cutover, triggers validation, generates and downloads reports',
+      'orchestrates service-level migration run, progress polling, validation dispatch, and report generation',
       async () => {
       const proj = await projectService.createProject(wsA, 'CutoverProj', 'Desc', userA.user.id);
       const plan = await planService.createPlan(proj.id, { name: 'Cutover Plan' }, userA.user.id);

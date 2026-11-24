@@ -519,17 +519,55 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Only idempotent read queries (SELECT, SHOW, SET, EXPLAIN) are safe to retry on transient connection resets.
-   * Mutating queries (INSERT, UPDATE, DELETE) are never blindly retried to prevent duplicate side effects.
+   * Only strictly read-only, non-mutating statements without side-effects are safe to retry on transient socket drops.
+   * Mutating queries (INSERT, UPDATE, DELETE, DDL), EXPLAIN ANALYZE, row-locking queries (FOR UPDATE/SHARE),
+   * sequence mutations (nextval/setval), and advisory locks are never retried.
    */
   private isIdempotentQuery(sql: string): boolean {
-    const trimmed = sql.trim().toUpperCase();
-    return (
-      trimmed.startsWith('SELECT') ||
-      trimmed.startsWith('SHOW') ||
-      trimmed.startsWith('SET') ||
-      trimmed.startsWith('EXPLAIN')
-    );
+    if (!sql || typeof sql !== 'string') return false;
+    const clean = sql.trim();
+    if (!clean) return false;
+
+    // Reject multi-statement queries to prevent injection of mutating commands after a read
+    const statements = clean.split(';').map((s) => s.trim()).filter(Boolean);
+    if (statements.length > 1) return false;
+
+    const normalized = clean.toUpperCase();
+
+    // Must strictly start with safe read-only commands
+    const isAllowedStart =
+      normalized.startsWith('SELECT') ||
+      normalized.startsWith('SHOW') ||
+      normalized.startsWith('SET') ||
+      (normalized.startsWith('EXPLAIN') && !normalized.includes('ANALYZE') && !normalized.includes('ANALYSE'));
+
+    if (!isAllowedStart) return false;
+
+    // Reject any mutating keywords, DDL, side-effecting functions, locking, or advisory locks
+    const forbiddenPatterns = [
+      /\bINSERT\b/i,
+      /\bUPDATE\b/i,
+      /\bDELETE\b/i,
+      /\bDROP\b/i,
+      /\bCREATE\b/i,
+      /\bALTER\b/i,
+      /\bTRUNCATE\b/i,
+      /\bGRANT\b/i,
+      /\bREVOKE\b/i,
+      /\bVACUUM\b/i,
+      /\bREFRESH\s+MATERIALIZED\b/i,
+      /\bFOR\s+(?:UPDATE|SHARE|KEY\s+SHARE|NO\s+KEY\s+UPDATE)\b/i,
+      /\b(?:NEXTVAL|SETVAL)\s*\(/i,
+      /\bPG_(?:TRY_)?ADVISORY_(?:XACT_)?LOCK\b/i,
+    ];
+
+    for (const pattern of forbiddenPatterns) {
+      if (pattern.test(clean)) {
+        return false;
+      }
+    }
+
+    return true;
   }
 
   /**

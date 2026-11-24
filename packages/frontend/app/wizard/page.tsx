@@ -54,6 +54,8 @@ import {
   resolvePlanVersionId,
   evaluateDryRunResponse,
   canTransitionWizardStep,
+  computeStep13DiscrepancyMetrics,
+  DiscrepancyFetchStatus,
   WizardStepGateState,
 } from '../../lib/wizard-utils';
 
@@ -176,6 +178,10 @@ export default function MigrationWizardPage() {
   const [isValidating, setIsValidating] = useState(false);
   const [valError, setValError] = useState<string | null>(null);
   const [discrepancies, setDiscrepancies] = useState<DiscrepancyRecord[]>([]);
+  const [discrepancyFetchStatus, setDiscrepancyFetchStatus] = useState<DiscrepancyFetchStatus>(
+    isDemo ? 'loaded' : 'idle',
+  );
+  const [discrepancyFetchError, setDiscrepancyFetchError] = useState<string | null>(null);
   const [validationChecks, setValidationChecks] = useState<any[]>([]);
 
   // Step 14: Reports Export State
@@ -196,6 +202,7 @@ export default function MigrationWizardPage() {
       if (!prev) return null;
       return {
         ...prev,
+        status: 'DRAFT',
         versionId: undefined,
         planHash: 'sha256:pending',
       };
@@ -437,6 +444,13 @@ export default function MigrationWizardPage() {
     }
   };
 
+  const ensurePlanContainer = async (): Promise<string> => {
+    if (plan?.id) return plan.id;
+    const createdPlan = await apiClient.createPlan(projectId, 'E-Commerce Modernization Plan');
+    setPlan(createdPlan);
+    return createdPlan.id;
+  };
+
   /**
    * Requirement 3: Create or retrieve a persisted migration plan version before dry-run execution.
    */
@@ -451,14 +465,8 @@ export default function MigrationWizardPage() {
     setPlanPersistError(null);
 
     try {
-      let currentPlanId = plan?.id;
-
       // If no persisted plan container exists yet, create one
-      if (!currentPlanId) {
-        const createdPlan = await apiClient.createPlan(projectId, 'E-Commerce Modernization Plan');
-        currentPlanId = createdPlan.id;
-        setPlan(createdPlan);
-      }
+      const currentPlanId = await ensurePlanContainer();
 
       // Requirement 2: Ensure a real persisted mapping version exists
       let activeMapping = selectedMappingVersion;
@@ -545,20 +553,21 @@ export default function MigrationWizardPage() {
    * Step 6: Call AI mapping suggestion API
    */
   const handleGetAiSuggestions = async () => {
-    let mappingId = selectedMappingVersion?.id;
-    if (!mappingId && plan?.id) {
-      const created = await ensureRealMappingVersion(plan.id);
-      mappingId = created?.id;
-    }
-
-    if (!mappingId) {
-      setAiError('A valid mapping version is required before calling AI suggestions.');
-      return;
-    }
-
     setAiLoading(true);
     setAiError(null);
     try {
+      let mappingId = selectedMappingVersion?.id;
+      if (!mappingId) {
+        const targetPlanId = await ensurePlanContainer();
+        const created = await ensureRealMappingVersion(targetPlanId);
+        mappingId = created?.id;
+      }
+
+      if (!mappingId) {
+        setAiError('A valid mapping version is required before calling AI suggestions.');
+        return;
+      }
+
       const res: any = await apiClient.getAiMappingSuggestions(mappingId, {
         sourceSnapshotId: sourceSnapshots[0]?.id || (isDemo ? 'snap-mongo-001' : undefined),
         targetSnapshotId: destSnapshots[0]?.id || (isDemo ? 'snap-pg-001' : undefined),
@@ -594,11 +603,6 @@ export default function MigrationWizardPage() {
   };
 
   const handleSaveMappingEdits = async () => {
-    if (!plan?.id) {
-      setMappingActionError('A migration plan container must exist before saving mapping versions.');
-      return;
-    }
-
     let parsedDsl: any;
     try {
       parsedDsl = JSON.parse(mappingDslText);
@@ -610,7 +614,8 @@ export default function MigrationWizardPage() {
     setIsSavingMapping(true);
     setMappingActionError(null);
     try {
-      const created = await apiClient.createMappingVersion(plan.id, parsedDsl);
+      const targetPlanId = await ensurePlanContainer();
+      const created = await apiClient.createMappingVersion(targetPlanId, parsedDsl);
       setSelectedMappingVersion(created);
       setMappings((prev) => [created, ...prev.filter((m) => m.id !== created.id)]);
       setMappingValidationResult({ valid: true, issues: [] });
@@ -795,6 +800,7 @@ export default function MigrationWizardPage() {
       hasMigrationRun: Boolean(migrationRun?.id),
       migrationRunStatus: runProgress?.status || migrationRun?.status || null,
       hasValidationRun: Boolean(validationRun?.id),
+      discrepancyFetchStatus,
       ...overrides,
     }),
     [
@@ -810,6 +816,7 @@ export default function MigrationWizardPage() {
       migrationRun?.status,
       runProgress?.status,
       validationRun?.id,
+      discrepancyFetchStatus,
     ],
   );
 
@@ -893,6 +900,34 @@ export default function MigrationWizardPage() {
     return () => clearInterval(interval);
   }, [migrationRun?.id]);
 
+  const loadValidationDiscrepancies = async (valId: string) => {
+    setDiscrepancyFetchStatus('loading');
+    setDiscrepancyFetchError(null);
+    setDiscrepancies([]);
+    setValidationChecks([]);
+
+    try {
+      const discList = await apiClient.getDiscrepancies(valId);
+      setDiscrepancies(Array.isArray(discList) ? discList : []);
+      setDiscrepancyFetchStatus('loaded');
+      setDiscrepancyFetchError(null);
+    } catch (err: any) {
+      setDiscrepancies([]);
+      setDiscrepancyFetchStatus('error');
+      setDiscrepancyFetchError(
+        err?.message || 'Failed to load validation discrepancies from backend.',
+      );
+      return;
+    }
+
+    try {
+      const checks = await apiClient.getValidationChecks(valId);
+      setValidationChecks(Array.isArray(checks) ? checks : []);
+    } catch {
+      setValidationChecks([]);
+    }
+  };
+
   /**
    * Step 13: Trigger validation and fetch discrepancies
    */
@@ -912,17 +947,23 @@ export default function MigrationWizardPage() {
 
     setIsValidating(true);
     setValError(null);
+    setValidationRun(null);
+    setDiscrepancyFetchError(null);
+    setDiscrepancies([]);
+    setValidationChecks([]);
+    setDiscrepancyFetchStatus('loading');
     try {
       const val = await apiClient.triggerValidation(runId);
       const valId = val.id || (val as any).validationRunId;
       setValidationRun(val);
-
-      const discList = await apiClient.getDiscrepancies(valId);
-      setDiscrepancies(Array.isArray(discList) ? discList : []);
-
-      const checks = await apiClient.getValidationChecks(valId);
-      setValidationChecks(Array.isArray(checks) ? checks : []);
+      if (valId) {
+        await loadValidationDiscrepancies(valId);
+      } else {
+        setDiscrepancyFetchStatus('error');
+        setDiscrepancyFetchError('Validation succeeded without returning a validation run ID.');
+      }
     } catch (err: any) {
+      setDiscrepancyFetchStatus('idle');
       setValError(err?.message || 'Failed to trigger validation in backend.');
     } finally {
       setIsValidating(false);
@@ -1971,9 +2012,33 @@ export default function MigrationWizardPage() {
               </div>
             )}
 
+            {discrepancyFetchStatus === 'error' && discrepancyFetchError && (
+              <div className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/30 text-xs font-mono text-rose-300 flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <AlertCircle size={15} className="text-rose-400 shrink-0" />
+                  <span>
+                    Failed to fetch discrepancy metrics ({discrepancyFetchError}). Category counts are withheld (—) so fetch failures are not mistaken for zero discrepancies.
+                  </span>
+                </div>
+                {validationRun?.id && (
+                  <button
+                    onClick={() => loadValidationDiscrepancies(validationRun.id)}
+                    className="px-2.5 py-1 rounded bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 text-rose-200 whitespace-nowrap"
+                  >
+                    Retry Fetching Discrepancies
+                  </button>
+                )}
+              </div>
+            )}
+
             {(() => {
               const hasValidation = Boolean(validationRun);
-              const valStatus = validationRun?.status || (isDemo ? 'VERIFIED' : 'NOT STARTED');
+              const valStatus =
+                (validationRun as any)?.outcome ||
+                (validationRun as any)?.summaryJson?.outcome ||
+                (validationRun as any)?.summary_json?.outcome ||
+                validationRun?.status ||
+                (isDemo ? 'VERIFIED' : 'NOT STARTED');
               const valBadgeVariant =
                 valStatus === 'PASSED' || valStatus === 'VERIFIED'
                   ? 'emerald'
@@ -1983,32 +2048,24 @@ export default function MigrationWizardPage() {
                   ? 'amber'
                   : 'slate';
 
-              const attachCount = hasValidation
-                ? discrepancies.filter((d) => d.category === 'ATTACHMENT_MISSING' || d.category === 'ATTACHMENT_CHECKSUM_MISMATCH').length
-                : isDemo
-                ? 15
-                : null;
-              const dupCount = hasValidation
-                ? discrepancies.filter((d) => d.category === 'DUPLICATE_RECORD').length
-                : isDemo
-                ? 10
-                : null;
-              const brokenRefCount = hasValidation
-                ? discrepancies.filter((d) => d.category === 'BROKEN_REFERENCE').length
-                : isDemo
-                ? 8
-                : null;
-              const metaMismatchCount = hasValidation
-                ? discrepancies.filter((d) => d.category === 'METADATA_MISMATCH').length
-                : isDemo
-                ? 12
-                : null;
+              const metrics = computeStep13DiscrepancyMetrics({
+                isDemo,
+                hasValidationRun: hasValidation,
+                discrepancyFetchStatus,
+                discrepancies,
+              });
+              const attachCount = metrics.missingAttachments;
+              const dupCount = metrics.duplicateRecords;
+              const brokenRefCount = metrics.brokenReferences;
+              const metaMismatchCount = metrics.metadataMismatches;
 
               return (
                 <div
                   className={`p-4 rounded-xl border text-xs font-mono space-y-3 ${
                     hasValidation || isDemo
-                      ? 'bg-amber-500/10 border-amber-500/30 text-amber-300'
+                      ? discrepancyFetchStatus === 'error'
+                        ? 'bg-rose-500/10 border-rose-500/30 text-rose-300'
+                        : 'bg-amber-500/10 border-amber-500/30 text-amber-300'
                       : 'bg-infra-surface border-infra-border text-infra-muted'
                   }`}
                 >
@@ -2020,6 +2077,18 @@ export default function MigrationWizardPage() {
                   {!hasValidation && !isDemo && (
                     <p className="text-[11px] text-infra-muted font-sans">
                       NO DATA — Validation has not been executed for this migration run yet. Start a run in Step 12 and click <span className="text-amber-300 font-semibold">Trigger Validation</span> to obtain live discrepancy metrics.
+                    </p>
+                  )}
+
+                  {hasValidation && !isDemo && discrepancyFetchStatus === 'loading' && (
+                    <p className="text-[11px] text-amber-300 font-sans">
+                      Loading discrepancy reconciliation counts from backend...
+                    </p>
+                  )}
+
+                  {hasValidation && !isDemo && discrepancyFetchStatus === 'error' && (
+                    <p className="text-[11px] text-rose-300 font-sans">
+                      Discrepancy metrics unavailable due to fetch error — retry loading discrepancies before exporting compliance reports.
                     </p>
                   )}
 

@@ -40,6 +40,9 @@ minio-data/
 mongo-data/
 postgres-data/
 
-# Coverage
+# Coverage & Playwright
 coverage/
 .nyc_output/
+test-results/
+playwright-report/
+blob-report/

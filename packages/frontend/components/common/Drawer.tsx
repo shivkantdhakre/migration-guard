@@ -51,6 +51,7 @@ export function Drawer({
             </div>
             <button
               onClick={onClose}
+              aria-label="Close drawer"
               className="text-infra-muted hover:text-infra-heading p-1.5 rounded-lg hover:bg-infra-cardHover transition-colors"
             >
               <X size={18} />

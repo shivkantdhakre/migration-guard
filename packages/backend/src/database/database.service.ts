@@ -4,6 +4,14 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { appConfig } from '../config/configuration';
+import {
+  analyzeReadQueryAstSync,
+  ensurePgParserLoaded,
+  isPgParserLoaded,
+  QueryableLike,
+  SemanticRetrySafetyResult,
+  verifyQuerySemanticRetrySafety as verifyCatalogRetrySafety,
+} from './sql-retry-safety';
 
 export interface QueryResult<T = any> {
   rows: T[];
@@ -80,6 +88,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleInit() {
+    await ensurePgParserLoaded();
     this.initMemoryTables();
     const isInMemoryAllowed = process.env.ALLOW_IN_MEMORY_DB === 'true';
 
@@ -1008,23 +1017,32 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     return { nextIdx: idx, bracketIndexes };
   }
 
+  public static async initSqlParser(): Promise<void> {
+    await ensurePgParserLoaded();
+  }
+
+  public static async verifyQuerySemanticRetrySafety(
+    queryable: QueryableLike,
+    sql: string,
+  ): Promise<SemanticRetrySafetyResult> {
+    return verifyCatalogRetrySafety(queryable, sql);
+  }
+
   /**
-   * Evaluates whether a SQL statement passes our strict read-only SQL-tokenizer & pure-function
-   * allowlist policy, failing closed on unrecognized constructs, custom casts, and custom operators.
+   * Evaluates whether a SQL statement passes our strict read-only PostgreSQL AST policy
+   * (using PostgreSQL 18 C parser via libpg-query when loaded, with strict fail-closed lexical fallback
+   * if invoked synchronously before initSqlParser).
    *
-   * Note: This is a lexical token/structural allowlist policy (not a full PostgreSQL grammar AST parser).
-   * Policy (fail-closed):
-   * - Single statement only (rejects multi-statement queries).
-   * - Must begin with SELECT (rejects WITH CTEs, EXPLAIN/EXPLAIN ANALYZE, SET, SHOW, CALL, DO, DDL, DML).
-   * - Disallows mutating/locking keywords (INSERT, UPDATE, DELETE, INTO, FOR UPDATE/SHARE, OPERATOR, etc.).
-   * - Allowlists only built-in pure operators (=, <>, !=, <, >, <=, >=, +, -, *, /, %, ||, ::).
-   * - Rejects custom casts ($1::custom_type, CAST($1 AS custom_type), custom_type 'str') and only allows built-in scalar types.
-   * - Rejects quoted-identifier function calls ("fn"()) and schema-qualified calls (schema.fn()).
-   * - Rejects ANY unrecognized function call not present in SAFE_PURE_SQL_FUNCTIONS
-   *   (blocking pg_notify, set_config, nextval, setval, pg_advisory_lock, and arbitrary UDFs).
+   * Note: AST/lexical syntax checks alone do NOT prove semantic resolution against database-specific
+   * custom types, casts, operators, or function overloads — live queries on PostgreSQL MUST also pass
+   * `verifyQuerySemanticRetrySafety()` catalog inspection before a retry is permitted.
    */
   public static isSafeRetryableReadQuery(sql: string): boolean {
     if (!sql || typeof sql !== 'string' || !sql.trim()) return false;
+
+    if (isPgParserLoaded()) {
+      return analyzeReadQueryAstSync(sql) !== null;
+    }
 
     const tokens = DatabaseService.tokenizeSql(sql);
     if (!tokens || tokens.length === 0) return false;
@@ -1155,6 +1173,12 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     return true;
   }
 
+  public static async isSafeRetryableReadQueryAsync(sql: string): Promise<boolean> {
+    if (!sql || typeof sql !== 'string' || !sql.trim()) return false;
+    await ensurePgParserLoaded();
+    return analyzeReadQueryAstSync(sql) !== null;
+  }
+
   private isIdempotentQuery(sql: string): boolean {
     return DatabaseService.isSafeRetryableReadQuery(sql);
   }
@@ -1168,7 +1192,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     if (this.isConnected && this.pool) {
       let attempts = 0;
       const maxAttempts = 3;
-      const canRetry = this.isIdempotentQuery(text);
+      const canRetryAst = await DatabaseService.isSafeRetryableReadQueryAsync(text);
 
       while (attempts < maxAttempts) {
         attempts++;
@@ -1189,7 +1213,14 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
             err.message?.includes('Connection terminated') ||
             err.message?.includes('closed unexpectedly');
 
-          if (isTransient && canRetry && attempts < maxAttempts) {
+          if (isTransient && canRetryAst && attempts < maxAttempts) {
+            const semanticCheck = await DatabaseService.verifyQuerySemanticRetrySafety(this.pool, text);
+            if (!semanticCheck.safe) {
+              console.warn(
+                `[DatabaseService] Semantic retry safety guard blocked retry: ${semanticCheck.reason}`,
+              );
+              throw err;
+            }
             const backoffMs = Math.min(200 * Math.pow(2, attempts - 1) + Math.floor(Math.random() * 100), 2000);
             console.warn(
               `[DatabaseService] Transient database socket error on idempotent query (${err.message}), retrying (attempt ${attempts}/${maxAttempts}) in ${backoffMs}ms...`,

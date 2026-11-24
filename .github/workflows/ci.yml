@@ -75,11 +75,15 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Typecheck and Build packages
+        env:
+          NEXT_PUBLIC_API_URL: "http://localhost:4000/api/v1"
+          NEXT_PUBLIC_DEMO_MODE: "false"
         run: |
           pnpm --filter @migrationguard/core build
           pnpm --filter @migrationguard/worker build
           pnpm --filter @migrationguard/backend build
           pnpm --filter @migrationguard/frontend build
+          pnpm --filter @migrationguard/frontend run build:next
 
       - name: Initialize PostgreSQL Test Database Schema
         run: |
@@ -93,3 +97,12 @@ jobs:
 
       - name: Test Backend
         run: pnpm --filter @migrationguard/backend test
+
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Test Browser E2E (Playwright)
+        env:
+          NEXT_PUBLIC_API_URL: "http://localhost:4000/api/v1"
+          NEXT_PUBLIC_DEMO_MODE: "false"
+        run: pnpm run test:e2e

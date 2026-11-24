@@ -3,6 +3,7 @@ import {
   resolvePlanVersionId,
   evaluateDryRunResponse,
   canTransitionWizardStep,
+  computeStep13DiscrepancyMetrics,
   WizardStepGateState,
 } from '../../frontend/lib/wizard-utils';
 import { DryRunService } from '../src/plan/dry-run.service';
@@ -493,11 +494,66 @@ describe('Priority 1: Wizard Dry-Run Integration & Fail-Closed Regression Suite'
       expect(canTransitionWizardStep(13, 12, readyGateState).allowed).toBe(true);
     });
 
-    it('blocks Step 13->14 audit export jump until validation run exists in live mode', () => {
+    it('blocks Step 13->14 audit export jump until validation run exists and discrepancies finish loading', () => {
       expect(
         canTransitionWizardStep(14, 13, { ...readyGateState, hasValidationRun: false }).allowed,
       ).toBe(false);
-      expect(canTransitionWizardStep(14, 13, readyGateState).allowed).toBe(true);
+      expect(
+        canTransitionWizardStep(14, 13, {
+          ...readyGateState,
+          hasValidationRun: true,
+          discrepancyFetchStatus: 'error',
+        }).allowed,
+      ).toBe(false);
+      expect(
+        canTransitionWizardStep(14, 13, {
+          ...readyGateState,
+          hasValidationRun: true,
+          discrepancyFetchStatus: 'loading',
+        }).allowed,
+      ).toBe(false);
+      expect(
+        canTransitionWizardStep(14, 13, {
+          ...readyGateState,
+          hasValidationRun: true,
+          discrepancyFetchStatus: 'loaded',
+        }).allowed,
+      ).toBe(true);
+    });
+
+    it('withholds numerical discrepancy counts (returns null) when discrepancy fetch fails or is still loading', () => {
+      const errorMetrics = computeStep13DiscrepancyMetrics({
+        isDemo: false,
+        hasValidationRun: true,
+        discrepancyFetchStatus: 'error',
+        discrepancies: [],
+      });
+      expect(errorMetrics.metricsReady).toBe(false);
+      expect(errorMetrics.missingAttachments).toBeNull();
+      expect(errorMetrics.duplicateRecords).toBeNull();
+      expect(errorMetrics.brokenReferences).toBeNull();
+      expect(errorMetrics.metadataMismatches).toBeNull();
+
+      const loadingMetrics = computeStep13DiscrepancyMetrics({
+        isDemo: false,
+        hasValidationRun: true,
+        discrepancyFetchStatus: 'loading',
+        discrepancies: [],
+      });
+      expect(loadingMetrics.metricsReady).toBe(false);
+      expect(loadingMetrics.missingAttachments).toBeNull();
+
+      const loadedZeroMetrics = computeStep13DiscrepancyMetrics({
+        isDemo: false,
+        hasValidationRun: true,
+        discrepancyFetchStatus: 'loaded',
+        discrepancies: [],
+      });
+      expect(loadedZeroMetrics.metricsReady).toBe(true);
+      expect(loadedZeroMetrics.missingAttachments).toBe(0);
+      expect(loadedZeroMetrics.duplicateRecords).toBe(0);
+      expect(loadedZeroMetrics.brokenReferences).toBe(0);
+      expect(loadedZeroMetrics.metadataMismatches).toBe(0);
     });
 
     it('always permits backward navigation and non-gated intermediate steps', () => {

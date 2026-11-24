@@ -549,7 +549,14 @@ export const apiClient = {
       {},
       { discrepancies: MOCK_DISCREPANCIES }
     );
-    const list = res?.discrepancies !== undefined ? res.discrepancies : (Array.isArray(res) ? res : MOCK_DISCREPANCIES);
+    const list =
+      res?.discrepancies !== undefined
+        ? res.discrepancies
+        : Array.isArray(res)
+        ? res
+        : isDemoModeEnabled()
+        ? MOCK_DISCREPANCIES
+        : [];
     return list;
   },
 

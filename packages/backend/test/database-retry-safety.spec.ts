@@ -1,7 +1,11 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeAll } from 'vitest';
 import { DatabaseService } from '../src/database/database.service';
 
-describe('DatabaseService Retry-Safety SQL Classifier & Query Policy', () => {
+describe('DatabaseService Retry-Safety SQL AST Classifier & Semantic Policy', () => {
+  beforeAll(async () => {
+    await DatabaseService.initSqlParser();
+  });
+
   describe('1. Strictly Allows Known-Safe Single SELECT Read Queries', () => {
     it('allows parameterized single-table SELECT statements', () => {
       expect(DatabaseService.isSafeRetryableReadQuery('SELECT * FROM workspaces WHERE id = $1')).toBe(true);
@@ -121,8 +125,8 @@ describe('DatabaseService Retry-Safety SQL Classifier & Query Policy', () => {
       expect(DatabaseService.isSafeRetryableReadQuery('SELECT $1 @> $2')).toBe(false);
       expect(DatabaseService.isSafeRetryableReadQuery('SELECT $1 @@ $2')).toBe(false);
       expect(DatabaseService.isSafeRetryableReadQuery('SELECT $1 ### $2')).toBe(false);
-      expect(DatabaseService.isSafeRetryableReadQuery('SELECT $1 OPERATOR(public.my_op) $2')).toBe(false);
-      expect(DatabaseService.isSafeRetryableReadQuery('SELECT $1=-1')).toBe(false);
+      expect(DatabaseService.isSafeRetryableReadQuery('SELECT $1 OPERATOR(public.+) $2')).toBe(false);
+      expect(DatabaseService.isSafeRetryableReadQuery('SELECT $1 =| $2')).toBe(false);
     });
 
     it('fails closed on malformed, unclosed strings, comments, or dollar-quotes', () => {
@@ -134,15 +138,52 @@ describe('DatabaseService Retry-Safety SQL Classifier & Query Policy', () => {
     });
   });
 
-  describe('3. DatabaseService.query Live Retry vs Fail-Fast Behavior', () => {
-    it('retries safe SELECT on transient ECONNRESET and succeeds, while failing fast on pg_notify and INSERT', async () => {
+  describe('3. DatabaseService.query Live Retry vs Semantic Fail-Closed Behavior', () => {
+    it('retries safe SELECT on transient ECONNRESET when pg_catalog passes, while failing fast on pg_notify, INSERT, and semantic hazards', async () => {
       const db = new DatabaseService();
       let selectAttempts = 0;
       let notifyAttempts = 0;
       let insertAttempts = 0;
+      let customCastAttempts = 0;
 
       const mockPool = {
-        query: vi.fn(async (sql: string) => {
+        query: vi.fn(async (sql: string, params: any[] = []) => {
+          if (sql.includes('current_schemas')) {
+            return {
+              rows: [{ search_schemas: ['pg_catalog', 'public'], explicit_schemas: ['public'] }],
+              rowCount: 1,
+            };
+          }
+          if (sql.includes('FROM pg_catalog.pg_class')) {
+            const relname = params[1];
+            return {
+              rows: [{ oid: relname === 'records' ? 2001 : 1001, nspname: 'public', relname, relkind: 'r', relrowsecurity: false }],
+              rowCount: 1,
+            };
+          }
+          if (sql.includes('FROM pg_catalog.pg_rewrite')) {
+            return { rows: [{ cnt: 0 }], rowCount: 1 };
+          }
+          if (sql.includes('FROM pg_catalog.pg_attribute')) {
+            const oid = params[0];
+            if (oid === 2001) {
+              return {
+                rows: [{ attname: 'custom_value', typname: 'custom_secret', typnamespace: 'public', typtype: 'c' }],
+                rowCount: 1,
+              };
+            }
+            return {
+              rows: [
+                { attname: 'id', typname: 'uuid', typnamespace: 'pg_catalog', typtype: 'b' },
+                { attname: 'name', typname: 'text', typnamespace: 'pg_catalog', typtype: 'b' },
+              ],
+              rowCount: 2,
+            };
+          }
+          if (sql.includes('FROM pg_catalog.pg_proc') || sql.includes('FROM pg_catalog.pg_operator') || sql.includes('FROM pg_catalog.pg_cast')) {
+            return { rows: [], rowCount: 0 };
+          }
+
           if (sql.startsWith('SELECT * FROM workspaces')) {
             selectAttempts++;
             if (selectAttempts < 2) {
@@ -151,6 +192,12 @@ describe('DatabaseService Retry-Safety SQL Classifier & Query Policy', () => {
               throw err;
             }
             return { rows: [{ id: 'ws-1' }], rowCount: 1 };
+          }
+          if (sql.includes('custom_value::text')) {
+            customCastAttempts++;
+            const err: any = new Error('read ECONNRESET');
+            err.code = 'ECONNRESET';
+            throw err;
           }
           if (sql.includes('pg_notify')) {
             notifyAttempts++;
@@ -170,10 +217,14 @@ describe('DatabaseService Retry-Safety SQL Classifier & Query Policy', () => {
       (db as any).pool = mockPool;
       (db as any).isConnected = true;
 
-      // Safe SELECT retries once and succeeds
+      // Safe SELECT retries once and succeeds after catalog verification passes
       const selectRes = await db.query('SELECT * FROM workspaces WHERE id = $1', ['ws-1']);
       expect(selectRes.rows).toEqual([{ id: 'ws-1' }]);
       expect(selectAttempts).toBe(2);
+
+      // Lexical-passing custom source cast query fails semantic catalog check and NEVER retries
+      await expect(db.query('SELECT custom_value::text FROM records')).rejects.toThrow(/ECONNRESET/);
+      expect(customCastAttempts).toBe(1);
 
       // Side-effecting pg_notify NEVER retries (fails after 1 attempt)
       await expect(db.query("SELECT pg_notify('ch', 'msg')")).rejects.toThrow(/ECONNRESET/);
@@ -182,6 +233,29 @@ describe('DatabaseService Retry-Safety SQL Classifier & Query Policy', () => {
       // Mutating INSERT NEVER retries (fails after 1 attempt)
       await expect(db.query('INSERT INTO users (email) VALUES ($1)', ['a@b.com'])).rejects.toThrow(/Connection terminated/);
       expect(insertAttempts).toBe(1);
+    });
+
+    it('fails closed when search_path does not put pg_catalog first', async () => {
+      const db = new DatabaseService();
+      let attempts = 0;
+      (db as any).pool = {
+        query: vi.fn(async (sql: string) => {
+          if (sql.includes('current_schemas')) {
+            return {
+              rows: [{ search_schemas: ['public', 'pg_catalog'], explicit_schemas: ['public'] }],
+              rowCount: 1,
+            };
+          }
+          attempts++;
+          const err: any = new Error('read ECONNRESET');
+          err.code = 'ECONNRESET';
+          throw err;
+        }),
+      };
+      (db as any).isConnected = true;
+
+      await expect(db.query('SELECT LOWER(email) FROM users WHERE id = $1', ['u-1'])).rejects.toThrow(/ECONNRESET/);
+      expect(attempts).toBe(1);
     });
   });
 });

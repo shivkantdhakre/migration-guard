@@ -1,4 +1,4 @@
-import type { MigrationPlan, DryRunResult } from './types';
+import type { MigrationPlan, DryRunResult, DiscrepancyRecord } from './types';
 
 export interface DryRunEvaluation {
   success: boolean;
@@ -140,6 +140,68 @@ export function evaluateDryRunResponse(res: any): DryRunEvaluation {
   };
 }
 
+export type DiscrepancyFetchStatus = 'idle' | 'loading' | 'loaded' | 'error';
+
+export interface Step13DiscrepancyMetrics {
+  metricsReady: boolean;
+  missingAttachments: number | null;
+  duplicateRecords: number | null;
+  brokenReferences: number | null;
+  metadataMismatches: number | null;
+}
+
+/**
+ * Computes Step 13 discrepancy category counts while ensuring failed or incomplete
+ * discrepancy fetches NEVER render fabricated zero counts or stale numbers from earlier runs.
+ */
+export function computeStep13DiscrepancyMetrics(params: {
+  isDemo: boolean;
+  hasValidationRun: boolean;
+  discrepancyFetchStatus: DiscrepancyFetchStatus;
+  discrepancies: DiscrepancyRecord[];
+}): Step13DiscrepancyMetrics {
+  const { isDemo, hasValidationRun, discrepancyFetchStatus, discrepancies } = params;
+
+  if (!hasValidationRun) {
+    if (isDemo) {
+      return {
+        metricsReady: true,
+        missingAttachments: 15,
+        duplicateRecords: 10,
+        brokenReferences: 8,
+        metadataMismatches: 12,
+      };
+    }
+    return {
+      metricsReady: false,
+      missingAttachments: null,
+      duplicateRecords: null,
+      brokenReferences: null,
+      metadataMismatches: null,
+    };
+  }
+
+  if (!isDemo && discrepancyFetchStatus !== 'loaded') {
+    return {
+      metricsReady: false,
+      missingAttachments: null,
+      duplicateRecords: null,
+      brokenReferences: null,
+      metadataMismatches: null,
+    };
+  }
+
+  return {
+    metricsReady: true,
+    missingAttachments: discrepancies.filter(
+      (d) => d.category === 'ATTACHMENT_MISSING' || d.category === 'ATTACHMENT_CHECKSUM_MISMATCH',
+    ).length,
+    duplicateRecords: discrepancies.filter((d) => d.category === 'DUPLICATE_RECORD').length,
+    brokenReferences: discrepancies.filter((d) => d.category === 'BROKEN_REFERENCE').length,
+    metadataMismatches: discrepancies.filter((d) => d.category === 'METADATA_MISMATCH').length,
+  };
+}
+
 export interface WizardStepGateState {
   isDemo: boolean;
   sourceConnId: string;
@@ -152,6 +214,7 @@ export interface WizardStepGateState {
   hasMigrationRun: boolean;
   migrationRunStatus?: string | null;
   hasValidationRun: boolean;
+  discrepancyFetchStatus?: DiscrepancyFetchStatus;
 }
 
 export interface WizardStepGateResult {
@@ -224,6 +287,21 @@ export function canTransitionWizardStep(
     return {
       allowed: false,
       reason: 'Execute post-migration validation in Step 13 before advancing to reports',
+    };
+  }
+
+  if (
+    targetStep > 13 &&
+    !state.isDemo &&
+    state.discrepancyFetchStatus !== undefined &&
+    state.discrepancyFetchStatus !== 'loaded'
+  ) {
+    return {
+      allowed: false,
+      reason:
+        state.discrepancyFetchStatus === 'error'
+          ? 'Discrepancy fetch failed in Step 13 — retry fetching discrepancies before exporting reports'
+          : 'Wait for Step 13 discrepancy results to finish loading before advancing',
     };
   }
 

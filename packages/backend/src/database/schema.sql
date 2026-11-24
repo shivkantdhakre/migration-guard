@@ -180,11 +180,6 @@ CREATE TABLE IF NOT EXISTS migration_batches (
     source_object TEXT NOT NULL DEFAULT 'customers',
     destination_object TEXT NOT NULL DEFAULT 'customers',
     mapping_version_id UUID,
-    source_connection_id UUID REFERENCES connections(id) ON DELETE SET NULL,
-    destination_connection_id UUID REFERENCES connections(id) ON DELETE SET NULL,
-    destination_key TEXT,
-    plan_version_id UUID REFERENCES migration_plan_versions(id) ON DELETE SET NULL,
-    metadata JSONB DEFAULT '{}'::jsonb,
     source_cursor_start JSONB,
     source_cursor_end JSONB,
     records_read BIGINT NOT NULL DEFAULT 0,
@@ -196,6 +191,11 @@ CREATE TABLE IF NOT EXISTS migration_batches (
     completed_at TIMESTAMPTZ,
     error_summary JSONB,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    source_connection_id UUID REFERENCES connections(id) ON DELETE SET NULL,
+    destination_connection_id UUID REFERENCES connections(id) ON DELETE SET NULL,
+    destination_key TEXT,
+    plan_version_id UUID REFERENCES migration_plan_versions(id) ON DELETE SET NULL,
+    metadata JSONB DEFAULT '{}'::jsonb,
     CONSTRAINT uq_batch_run_key UNIQUE (migration_run_id, batch_key),
     CONSTRAINT uq_migration_batches_identity UNIQUE (id, migration_run_id, batch_key)
 );
@@ -506,12 +506,12 @@ BEGIN
   ALTER TABLE migration_batches ADD COLUMN IF NOT EXISTS source_object TEXT NOT NULL DEFAULT 'customers';
   ALTER TABLE migration_batches ADD COLUMN IF NOT EXISTS destination_object TEXT NOT NULL DEFAULT 'customers';
   ALTER TABLE migration_batches ADD COLUMN IF NOT EXISTS mapping_version_id UUID;
+  ALTER TABLE migration_batches ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
   ALTER TABLE migration_batches ADD COLUMN IF NOT EXISTS source_connection_id UUID;
   ALTER TABLE migration_batches ADD COLUMN IF NOT EXISTS destination_connection_id UUID;
   ALTER TABLE migration_batches ADD COLUMN IF NOT EXISTS destination_key TEXT;
   ALTER TABLE migration_batches ADD COLUMN IF NOT EXISTS plan_version_id UUID;
   ALTER TABLE migration_batches ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'::jsonb;
-  ALTER TABLE migration_batches ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
 END $$;
 
 -- Validation Runs

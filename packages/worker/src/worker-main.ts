@@ -573,8 +573,10 @@ async function getDestinationConnector(payload: MigrationJobPayload): Promise<De
  */
 async function recomputeMigrationRunProgress(runId: string): Promise<void> {
   if (!dbPool) return;
+  const client = await dbPool.connect();
   try {
-    const totalsRes = await dbPool.query(
+    await client.query('BEGIN');
+    const totalsRes = await client.query(
       `SELECT COALESCE(SUM(records_written), 0) AS total_written,
               COALESCE(SUM(records_read), 0) AS total_read
        FROM migration_batches
@@ -585,7 +587,7 @@ async function recomputeMigrationRunProgress(runId: string): Promise<void> {
     const totalRead = Number(totalsRes.rows[0]?.total_read || 0);
 
     // Concurrency-safe progress update
-    await dbPool.query(
+    await client.query(
       `UPDATE migration_runs 
        SET progress_json = jsonb_set(
              jsonb_set(
@@ -602,7 +604,7 @@ async function recomputeMigrationRunProgress(runId: string): Promise<void> {
     );
 
     // Recompute migration status from all batches before finalizing
-    const statusCountsRes = await dbPool.query(
+    const statusCountsRes = await client.query(
       `SELECT status, COUNT(*)::int AS count
        FROM migration_batches
        WHERE migration_run_id = $1
@@ -617,55 +619,59 @@ async function recomputeMigrationRunProgress(runId: string): Promise<void> {
       totalBatches += Number(r.count);
     }
 
-    if (totalBatches === 0) return;
+    if (totalBatches > 0) {
+      const nonTerminalCount =
+        (counts.get('PENDING') || 0) +
+        (counts.get('QUEUED') || 0) +
+        (counts.get('RUNNING') || 0) +
+        (counts.get('RETRY_WAIT') || 0);
 
-    const nonTerminalCount =
-      (counts.get('PENDING') || 0) +
-      (counts.get('QUEUED') || 0) +
-      (counts.get('RUNNING') || 0) +
-      (counts.get('RETRY_WAIT') || 0);
+      if (nonTerminalCount > 0) {
+        // Never mark a migration COMPLETED while any batch is in RETRY_WAIT or another non-terminal state.
+        // If a migration was previously marked terminal (e.g. FAILED) but now has a retry in flight, update back to RUNNING.
+        await client.query(
+          `UPDATE migration_runs
+           SET status = 'RUNNING', completed_at = NULL, updated_at = NOW()
+           WHERE id = $1 AND status NOT IN ('PAUSED', 'CANCELLED', 'RUNNING')`,
+          [runId],
+        );
+      } else {
+        // All batches are in terminal states: COMMITTED, FAILED_PERMANENT, FAILED_RETRYABLE, OUTCOME_UNKNOWN
+        const failedCount =
+          (counts.get('FAILED_PERMANENT') || 0) +
+          (counts.get('FAILED_RETRYABLE') || 0) +
+          (counts.get('OUTCOME_UNKNOWN') || 0);
 
-    if (nonTerminalCount > 0) {
-      // Never mark a migration COMPLETED while any batch is in RETRY_WAIT or another non-terminal state.
-      // If a migration was previously marked terminal (e.g. FAILED) but now has a retry in flight, update back to RUNNING.
-      await dbPool.query(
-        `UPDATE migration_runs
-         SET status = 'RUNNING', completed_at = NULL, updated_at = NOW()
-         WHERE id = $1 AND status NOT IN ('PAUSED', 'CANCELLED', 'RUNNING')`,
-        [runId],
-      );
-      return;
+        const committedCount = counts.get('COMMITTED') || 0;
+
+        if (failedCount === 0 && committedCount === totalBatches) {
+          // All batches COMMITTED! Mark run COMPLETED (even if it was previously marked terminal FAILED)
+          await client.query(
+            `UPDATE migration_runs
+             SET status = 'COMPLETED', completed_at = NOW(), updated_at = NOW()
+             WHERE id = $1 AND status NOT IN ('PAUSED', 'CANCELLED', 'COMPLETED')`,
+            [runId],
+          );
+          console.log(`[Worker] Migration run ${runId} finalized with status: COMPLETED`);
+        } else if (failedCount > 0) {
+          // Terminal failure
+          await client.query(
+            `UPDATE migration_runs
+             SET status = 'FAILED', completed_at = NOW(), updated_at = NOW()
+             WHERE id = $1 AND status NOT IN ('PAUSED', 'CANCELLED', 'FAILED')`,
+            [runId],
+          );
+          console.log(`[Worker] Migration run ${runId} finalized with status: FAILED (${failedCount} failed batch(es))`);
+        }
+      }
     }
-
-    // All batches are in terminal states: COMMITTED, FAILED_PERMANENT, FAILED_RETRYABLE, OUTCOME_UNKNOWN
-    const failedCount =
-      (counts.get('FAILED_PERMANENT') || 0) +
-      (counts.get('FAILED_RETRYABLE') || 0) +
-      (counts.get('OUTCOME_UNKNOWN') || 0);
-
-    const committedCount = counts.get('COMMITTED') || 0;
-
-    if (failedCount === 0 && committedCount === totalBatches) {
-      // All batches COMMITTED! Mark run COMPLETED (even if it was previously marked terminal FAILED)
-      await dbPool.query(
-        `UPDATE migration_runs
-         SET status = 'COMPLETED', completed_at = NOW(), updated_at = NOW()
-         WHERE id = $1 AND status NOT IN ('PAUSED', 'CANCELLED', 'COMPLETED')`,
-        [runId],
-      );
-      console.log(`[Worker] Migration run ${runId} finalized with status: COMPLETED`);
-    } else if (failedCount > 0) {
-      // Terminal failure
-      await dbPool.query(
-        `UPDATE migration_runs
-         SET status = 'FAILED', completed_at = NOW(), updated_at = NOW()
-         WHERE id = $1 AND status NOT IN ('PAUSED', 'CANCELLED', 'FAILED')`,
-        [runId],
-      );
-      console.log(`[Worker] Migration run ${runId} finalized with status: FAILED (${failedCount} failed batch(es))`);
-    }
+    await client.query('COMMIT');
   } catch (err: any) {
-    console.warn(`[Worker] Notice during recomputeMigrationRunProgress: ${err.message}`);
+    await client.query('ROLLBACK').catch(() => {});
+    console.error(`[Worker] Error during recomputeMigrationRunProgress for run ${runId}: ${err.message}`);
+    throw err;
+  } finally {
+    client.release();
   }
 }
 
@@ -690,21 +696,23 @@ async function reconcileStrandedRunsOnStartup(): Promise<void> {
     for (const row of candidateRuns.rows) {
       const runId = row.id;
       const objectsRes = await dbPool.query(
-        `SELECT DISTINCT source_object, destination_object
+        `SELECT DISTINCT source_object, destination_object,
+                source_connection_id, destination_connection_id, destination_key, plan_version_id, mapping_version_id
          FROM migration_batches
          WHERE migration_run_id = $1`,
         [runId],
       );
 
       const isStrict = process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false';
-      if (!row.plan_version_id && isStrict) {
+      const effectivePlanVersionId = row.plan_version_id || objectsRes.rows[0]?.plan_version_id;
+      if (!effectivePlanVersionId && isStrict) {
         throw new Error(`[Worker Recovery] Missing plan_version_id for stranded run ${runId}. Startup recovery failed closed.`);
       }
 
       let planRow: any = null;
       let objects: any[] = [];
 
-      if (row.plan_version_id) {
+      if (effectivePlanVersionId) {
         const planRes = await dbPool.query(
           `SELECT mpv.id as plan_version_id,
                   mpv.destination_connection_id,
@@ -716,16 +724,16 @@ async function reconcileStrandedRunsOnStartup(): Promise<void> {
            FROM migration_plan_versions mpv
            LEFT JOIN mapping_versions mv ON mv.id = mpv.mapping_version_id
            WHERE mpv.id = $1`,
-          [row.plan_version_id],
+          [effectivePlanVersionId],
         );
         if (planRes.rows.length === 0) {
-          throw new Error(`[Worker Recovery] Plan version ${row.plan_version_id} not found for stranded run ${runId}`);
+          throw new Error(`[Worker Recovery] Plan version ${effectivePlanVersionId} not found for stranded run ${runId}`);
         }
 
         planRow = planRes.rows[0];
         const destConnId = planRow.destination_connection_id;
         if (!destConnId && isStrict) {
-          throw new Error(`[Worker Recovery] No destination connection configured on plan version ${row.plan_version_id} for run ${runId}`);
+          throw new Error(`[Worker Recovery] No destination connection configured on plan version ${effectivePlanVersionId} for run ${runId}`);
         }
 
         const mappingJson = typeof planRow.mapping_json === 'string'
@@ -736,7 +744,7 @@ async function reconcileStrandedRunsOnStartup(): Promise<void> {
           : (mappingJson.source ? [mappingJson] : []);
 
         if (objects.length === 0 && isStrict) {
-          throw new Error(`[Worker Recovery] No mapped objects found on plan version ${row.plan_version_id} for stranded run ${runId}. Startup recovery failed closed.`);
+          throw new Error(`[Worker Recovery] No mapped objects found on plan version ${effectivePlanVersionId} for stranded run ${runId}. Startup recovery failed closed.`);
         }
       }
 
@@ -750,7 +758,7 @@ async function reconcileStrandedRunsOnStartup(): Promise<void> {
         const dstObj = objRow.destination_object || 'customers';
 
         let objDestConnector = defaultDestinationConnector;
-        let objDestKey: string | null = null;
+        let objDestKey: string | null = objRow.destination_key || null;
 
         if (planRow) {
           const exactMatches = objects.filter(
@@ -763,21 +771,22 @@ async function reconcileStrandedRunsOnStartup(): Promise<void> {
             throw new Error(`[Worker Recovery] Ambiguous mapping: multiple objects match '${srcObj}' -> '${dstObj}' in run ${runId}. Startup recovery failed closed.`);
           }
 
-          const matched = exactMatches.length === 1
-            ? exactMatches[0]
-            : (objects.length === 1 ? objects[0] : null);
+          // Exact matching only: NO single-mapping fallback!
+          const matched = exactMatches.length === 1 ? exactMatches[0] : null;
 
           if (!matched && isStrict) {
-            throw new Error(`[Worker Recovery] No matching object mapping found for '${srcObj}' -> '${dstObj}' in plan version ${row.plan_version_id} for run ${runId}. Startup recovery failed closed.`);
+            throw new Error(`[Worker Recovery] No matching object mapping found for '${srcObj}' -> '${dstObj}' in plan version ${effectivePlanVersionId} for run ${runId}. Startup recovery failed closed.`);
           }
 
-          if (matched?.identity?.destinationKey || matched?.destination?.key || matched?.destination?.identityKey) {
-            objDestKey = matched.identity?.destinationKey || matched.destination?.key || matched.destination?.identityKey;
-          } else if (planRow.execution_config_json?.conflictColumns?.[0]) {
-            objDestKey = planRow.execution_config_json.conflictColumns[0];
+          if (!objDestKey) {
+            if (matched?.identity?.destinationKey || matched?.destination?.key || matched?.destination?.identityKey) {
+              objDestKey = matched.identity?.destinationKey || matched.destination?.key || matched.destination?.identityKey;
+            } else if (planRow.execution_config_json?.conflictColumns?.[0]) {
+              objDestKey = planRow.execution_config_json.conflictColumns[0];
+            }
           }
 
-          const objDestConnId = matched?.destinationConnectionId || matched?.destination?.connectionId || planRow.destination_connection_id;
+          const objDestConnId = objRow.destination_connection_id || matched?.destinationConnectionId || matched?.destination?.connectionId || planRow.destination_connection_id;
           if (!objDestConnId && isStrict) {
             throw new Error(`[Worker Recovery] No destination connection configured for object '${dstObj}' in run ${runId}. Refusing control-plane fallback in production.`);
           }
@@ -1211,17 +1220,24 @@ async function startWorker() {
                     `INSERT INTO migration_batches (
                        id, migration_run_id, batch_key, sequence_no, status,
                        source_object, destination_object, mapping_version_id,
+                       source_connection_id, destination_connection_id, destination_key, plan_version_id, metadata,
                        source_cursor_start, source_cursor_end,
                        records_read, records_written, records_skipped, records_failed, attempt_count, updated_at
                      ) VALUES (
                        gen_random_uuid(), $1, $2, $3, 'PENDING',
                        $4, $5, $6,
-                       $7, $8,
+                       $7, $8, $9, $10, $11,
+                       $12, $13,
                        0, 0, 0, 0, 0, NOW()
                      ) ON CONFLICT (migration_run_id, batch_key) DO UPDATE SET
                        source_object = EXCLUDED.source_object,
                        destination_object = EXCLUDED.destination_object,
                        mapping_version_id = EXCLUDED.mapping_version_id,
+                       source_connection_id = EXCLUDED.source_connection_id,
+                       destination_connection_id = EXCLUDED.destination_connection_id,
+                       destination_key = EXCLUDED.destination_key,
+                       plan_version_id = EXCLUDED.plan_version_id,
+                       metadata = EXCLUDED.metadata,
                        source_cursor_start = EXCLUDED.source_cursor_start,
                        source_cursor_end = EXCLUDED.source_cursor_end,
                        updated_at = NOW()`,
@@ -1232,6 +1248,18 @@ async function startWorker() {
                       nextPayload.sourceObject,
                       nextPayload.destinationObject,
                       nextPayload.mappingVersionId || null,
+                      nextPayload.sourceConnectionId || null,
+                      nextPayload.destinationConnectionId || null,
+                      nextPayload.destinationKey || null,
+                      nextPayload.planVersionId || null,
+                      JSON.stringify({
+                        sourceConnectionId: nextPayload.sourceConnectionId,
+                        destinationConnectionId: nextPayload.destinationConnectionId,
+                        destinationKey: nextPayload.destinationKey,
+                        planVersionId: nextPayload.planVersionId,
+                        mappingVersionId: nextPayload.mappingVersionId,
+                        ...(nextPayload.metadata || {}),
+                      }),
                       JSON.stringify(nextPayload.cursorStart || {}),
                       JSON.stringify(nextPayload.cursorEnd || {}),
                     ],

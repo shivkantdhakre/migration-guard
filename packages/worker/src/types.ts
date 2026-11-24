@@ -26,7 +26,7 @@ export interface SourceRecordEnvelope {
 
 export interface SourceCursor {
   lastId?: string | number | null;
-  lastIdType?: 'ObjectId' | 'string' | 'number' | 'other';
+  lastIdType?: 'ObjectId' | 'string' | 'number' | 'Long' | 'Decimal128' | 'other';
   sortField?: string;
   sortValue?: unknown;
   offset?: number;
@@ -152,6 +152,12 @@ export interface MigrationBatch {
   subStage?: BatchSubStage;
   sourceObject: string;
   destinationObject: string;
+  sourceConnectionId?: string;
+  destinationConnectionId?: string;
+  destinationKey?: string;
+  planVersionId?: string;
+  mappingVersionId?: string;
+  metadata?: Record<string, unknown>;
   sourceCursorStart: SourceCursor | null;
   sourceCursorEnd: SourceCursor | null;
   recordsRead: number;
@@ -228,6 +234,7 @@ export interface MigrationJobPayload {
   destinationKey?: string;
   sourceConnectionId?: string;
   destinationConnectionId?: string;
+  metadata?: Record<string, unknown>;
 }
 
 export type MigrationRunStatus =

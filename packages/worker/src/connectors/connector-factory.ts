@@ -1,5 +1,5 @@
 import pg from 'pg';
-import { MongoClient, ObjectId } from 'mongodb';
+import { MongoClient, ObjectId, Long, Decimal128 } from 'mongodb';
 import {
   DestinationConnector,
   SourceConnector,
@@ -11,6 +11,56 @@ import {
   SourceBatch,
   ReadBatchOptions,
 } from '../types.js';
+
+export type MongoIdType = 'ObjectId' | 'string' | 'number' | 'Long' | 'Decimal128' | 'other';
+
+export function detectBsonId(rawId: any): { idStr: string; idType: MongoIdType } {
+  if (rawId === null || rawId === undefined) {
+    return { idStr: '', idType: 'other' };
+  }
+  if (rawId instanceof ObjectId || (typeof rawId === 'object' && (rawId as any)._bsontype === 'ObjectID')) {
+    return { idStr: rawId.toString(), idType: 'ObjectId' };
+  }
+  if (rawId instanceof Long || (typeof rawId === 'object' && (rawId as any)._bsontype === 'Long')) {
+    return { idStr: rawId.toString(), idType: 'Long' };
+  }
+  if (rawId instanceof Decimal128 || (typeof rawId === 'object' && (rawId as any)._bsontype === 'Decimal128')) {
+    return { idStr: rawId.toString(), idType: 'Decimal128' };
+  }
+  if (typeof rawId === 'number') {
+    return { idStr: String(rawId), idType: 'number' };
+  }
+  if (typeof rawId === 'string') {
+    return { idStr: rawId, idType: 'string' };
+  }
+  return { idStr: String(rawId), idType: 'other' };
+}
+
+export function reconstructBsonId(lastId: any, lastIdType?: string): any {
+  if (lastId === null || lastId === undefined) return lastId;
+  const str = String(lastId);
+  switch (lastIdType) {
+    case 'ObjectId':
+      return new ObjectId(str);
+    case 'Long':
+      return Long.fromString(str);
+    case 'Decimal128':
+      return Decimal128.fromString(str);
+    case 'number':
+      return Number(str);
+    case 'string':
+      return str;
+    default:
+      if (/^[0-9a-fA-F]{24}$/.test(str)) {
+        try {
+          return new ObjectId(str);
+        } catch {
+          return lastId;
+        }
+      }
+      return lastId;
+  }
+}
 
 export function quoteIdent(name: string): string {
   if (!name) {
@@ -259,6 +309,11 @@ export class MongoSourceConnector implements SourceConnector {
   private dbName: string;
 
   constructor(connectionString: string, dbName = 'migrationguard_test') {
+    if (process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false') {
+      if (!dbName || dbName === 'migrationguard_e2e_source') {
+        throw new Error('[Security] In production, MongoDB database name must be explicitly configured and cannot use default/e2e databases.');
+      }
+    }
     this.client = new MongoClient(connectionString, { connectTimeoutMS: 10000 });
     this.dbName = dbName;
   }
@@ -286,24 +341,8 @@ export class MongoSourceConnector implements SourceConnector {
     const filter: Record<string, unknown> = {};
 
     if (cursor?.lastId !== undefined && cursor?.lastId !== null) {
-      if (cursor.lastIdType === 'ObjectId') {
-        filter._id = { $gt: new ObjectId(String(cursor.lastId)) };
-      } else if (cursor.lastIdType === 'number') {
-        filter._id = { $gt: Number(cursor.lastId) };
-      } else if (cursor.lastIdType === 'string') {
-        filter._id = { $gt: String(cursor.lastId) };
-      } else {
-        const lastIdStr = String(cursor.lastId);
-        if (/^[0-9a-fA-F]{24}$/.test(lastIdStr)) {
-          try {
-            filter._id = { $gt: new ObjectId(lastIdStr) };
-          } catch {
-            filter._id = { $gt: cursor.lastId };
-          }
-        } else {
-          filter._id = { $gt: cursor.lastId };
-        }
-      }
+      const reconstructed = reconstructBsonId(cursor.lastId, cursor.lastIdType);
+      filter._id = { $gt: reconstructed };
     }
 
     const limit = options.batchSize || 1000;
@@ -318,20 +357,12 @@ export class MongoSourceConnector implements SourceConnector {
 
     const records = batchDocs.map((doc) => {
       const rawId = doc._id;
-      let idType: 'ObjectId' | 'string' | 'number' | 'other' = 'other';
-      if (rawId instanceof ObjectId || (rawId && typeof rawId === 'object' && (rawId as any)._bsontype === 'ObjectID')) {
-        idType = 'ObjectId';
-      } else if (typeof rawId === 'string') {
-        idType = 'string';
-      } else if (typeof rawId === 'number') {
-        idType = 'number';
-      }
+      const { idStr, idType } = detectBsonId(rawId);
 
-      const id = String(rawId);
       return {
         sourceObject: options.sourceObject,
-        sourceKey: id,
-        sourceCursor: { lastId: id, lastIdType: idType },
+        sourceKey: idStr,
+        sourceCursor: { lastId: idStr, lastIdType: idType },
         payload: doc,
         extractedAt: new Date().toISOString(),
       };
@@ -340,16 +371,8 @@ export class MongoSourceConnector implements SourceConnector {
     const lastDoc = batchDocs[batchDocs.length - 1];
     let nextCursor: SourceCursor | null = null;
     if (hasMore && lastDoc) {
-      const rawId = lastDoc._id;
-      let idType: 'ObjectId' | 'string' | 'number' | 'other' = 'other';
-      if (rawId instanceof ObjectId || (rawId && typeof rawId === 'object' && (rawId as any)._bsontype === 'ObjectID')) {
-        idType = 'ObjectId';
-      } else if (typeof rawId === 'string') {
-        idType = 'string';
-      } else if (typeof rawId === 'number') {
-        idType = 'number';
-      }
-      nextCursor = { lastId: String(rawId), lastIdType: idType };
+      const { idStr, idType } = detectBsonId(lastDoc._id);
+      nextCursor = { lastId: idStr, lastIdType: idType };
     }
 
     return {

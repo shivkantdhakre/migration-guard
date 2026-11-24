@@ -264,6 +264,17 @@ export class ReadinessService {
                     WHERE tc.table_schema = 'public' AND tc.constraint_type IN ('PRIMARY KEY', 'UNIQUE')
                     ORDER BY tc.table_name, tc.constraint_name, kcu.ordinal_position
                   `);
+                  const constraintMap = new Map<string, { tableName: string; name: string; type: string; columns: string[] }>();
+                  for (const k of kRes.rows) {
+                    const key = `${k.table_name}:${k.constraint_name}`;
+                    let c = constraintMap.get(key);
+                    if (!c) {
+                      c = { tableName: k.table_name, name: k.constraint_name, type: k.constraint_type, columns: [] };
+                      constraintMap.set(key, c);
+                    }
+                    c.columns.push(k.column_name);
+                  }
+
                   const tableMap = new Map<string, any>();
                   for (const t of tRes.rows) {
                     tableMap.set(t.table_name, { name: t.table_name, columns: [], constraints: new Map() });
@@ -274,8 +285,14 @@ export class ReadinessService {
                       tbl = { name: c.table_name, columns: [], constraints: new Map() };
                       tableMap.set(c.table_name, tbl);
                     }
-                    const isPk = kRes.rows.some((k: any) => k.table_name === c.table_name && k.column_name === c.column_name && k.constraint_type === 'PRIMARY KEY');
-                    const isUnq = isPk || kRes.rows.some((k: any) => k.table_name === c.table_name && k.column_name === c.column_name && k.constraint_type === 'UNIQUE');
+                    // A column is individually a primary key only if it is the ONLY column of a PRIMARY KEY constraint
+                    const isPk = Array.from(constraintMap.values()).some(
+                      (con) => con.tableName === c.table_name && con.type === 'PRIMARY KEY' && con.columns.length === 1 && con.columns[0] === c.column_name,
+                    );
+                    // A column is individually unique only if it has its own single-column UNIQUE constraint or single-column PK
+                    const isUnq = isPk || Array.from(constraintMap.values()).some(
+                      (con) => con.tableName === c.table_name && con.type === 'UNIQUE' && con.columns.length === 1 && con.columns[0] === c.column_name,
+                    );
                     tbl.columns.push({
                       name: c.column_name,
                       type: c.udt_name || c.data_type,
@@ -288,15 +305,14 @@ export class ReadinessService {
                       maxLength: c.character_maximum_length,
                     });
                   }
-                  for (const k of kRes.rows) {
-                    const tbl = tableMap.get(k.table_name);
+                  for (const con of constraintMap.values()) {
+                    const tbl = tableMap.get(con.tableName);
                     if (tbl) {
-                      let c = tbl.constraints.get(k.constraint_name);
-                      if (!c) {
-                        c = { name: k.constraint_name, type: k.constraint_type, columns: [] };
-                        tbl.constraints.set(k.constraint_name, c);
-                      }
-                      c.columns.push(k.column_name);
+                      tbl.constraints.set(con.name, {
+                        name: con.name,
+                        type: con.type,
+                        columns: con.columns,
+                      });
                     }
                   }
                   liveDstEntities = Array.from(tableMap.values()).map(tbl => ({
@@ -321,9 +337,16 @@ export class ReadinessService {
 
     // 7. Verify Schema Compatibility & Missing Destination Tables across ALL Mapped Objects
     // Precedence: Live destination database catalog takes precedence over schema snapshots.
+    const isStrict = process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false';
+    if (isStrict && version.destination_connection_id) {
+      if (liveDstInspectionFailed || !liveDstEntities || liveDstEntities.length === 0) {
+        blockers.push('In production, live destination schema catalog inspection is mandatory when destination connection is configured. Refusing to fall back to snapshot data.');
+      }
+    }
+
     const effectiveDstEntities = (liveDstEntities && liveDstEntities.length > 0)
       ? liveDstEntities
-      : (dstSnapRow ? ((dstSnapRow.snapshot_json || {}).tables || (dstSnapRow.snapshot_json || {}).collections || (dstSnapRow.snapshot_json || {}).objects || []) : []);
+      : (isStrict && version.destination_connection_id ? [] : (dstSnapRow ? ((dstSnapRow.snapshot_json || {}).tables || (dstSnapRow.snapshot_json || {}).collections || (dstSnapRow.snapshot_json || {}).objects || []) : []));
 
     if ((dstSnapRow || (liveDstEntities && liveDstEntities.length > 0)) && objects.length > 0) {
       const dstEntities = effectiveDstEntities;
@@ -339,13 +362,35 @@ export class ReadinessService {
         }
 
         const rawCols = dTable.columns || dTable.fields || [];
-        const cols = rawCols.map((c: any) => ({
-          name: c.name || c.path,
-          nullable: c.nullable !== false && c.is_nullable !== 'NO',
-          isPrimaryKey: !!(c.isPrimaryKey || c.is_primary_key),
-          isUnique: !!(c.isUnique || c.is_unique || c.isPrimaryKey || c.is_primary_key),
-          type: (c.type || c.dataType || c.data_type || '').toLowerCase(),
-        }));
+        const tableConstraints: any[] = dTable.constraints || [];
+        const cols = rawCols.map((c: any) => {
+          let isPk = !!(c.isPrimaryKey || c.is_primary_key);
+          let isUnq = !!(c.isUnique || c.is_unique);
+          if (tableConstraints.length > 0) {
+            const inSinglePk = tableConstraints.some(
+              (con: any) => (con.type === 'PRIMARY KEY' || con.type === 'PRIMARY_KEY') && Array.isArray(con.columns) && con.columns.length === 1 && con.columns[0] === (c.name || c.path),
+            );
+            const inSingleUnq = tableConstraints.some(
+              (con: any) => con.type === 'UNIQUE' && Array.isArray(con.columns) && con.columns.length === 1 && con.columns[0] === (c.name || c.path),
+            );
+            const inCompositeOnly = tableConstraints.some(
+              (con: any) => (con.type === 'UNIQUE' || con.type === 'PRIMARY KEY' || con.type === 'PRIMARY_KEY') && Array.isArray(con.columns) && con.columns.length > 1 && con.columns.includes(c.name || c.path),
+            );
+            if (inSinglePk) isPk = true;
+            if (inSingleUnq || inSinglePk) isUnq = true;
+            if (inCompositeOnly && !inSingleUnq && !inSinglePk) {
+              isUnq = false;
+              isPk = false;
+            }
+          }
+          return {
+            name: c.name || c.path,
+            nullable: c.nullable !== false && c.is_nullable !== 'NO',
+            isPrimaryKey: isPk,
+            isUnique: isUnq || isPk,
+            type: (c.type || c.dataType || c.data_type || '').toLowerCase(),
+          };
+        });
 
         // Verify required fields (non-nullable unmapped columns)
         for (const col of cols) {

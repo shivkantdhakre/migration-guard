@@ -626,6 +626,36 @@ describe('Manifest Schema Upgrade & Historical Reconciliation (Run 005.20 Added-
             udt_name: 'timestamptz',
             is_nullable: 'YES',
           },
+          {
+            column_name: 'source_connection_id',
+            data_type: 'uuid',
+            udt_name: 'uuid',
+            is_nullable: 'YES',
+          },
+          {
+            column_name: 'destination_connection_id',
+            data_type: 'uuid',
+            udt_name: 'uuid',
+            is_nullable: 'YES',
+          },
+          {
+            column_name: 'destination_key',
+            data_type: 'text',
+            udt_name: 'text',
+            is_nullable: 'YES',
+          },
+          {
+            column_name: 'plan_version_id',
+            data_type: 'uuid',
+            udt_name: 'uuid',
+            is_nullable: 'YES',
+          },
+          {
+            column_name: 'metadata',
+            data_type: 'jsonb',
+            udt_name: 'jsonb',
+            is_nullable: 'YES',
+          },
         ],
         addedConstraints: [
           {

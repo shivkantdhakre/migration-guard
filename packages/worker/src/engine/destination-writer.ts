@@ -67,6 +67,27 @@ export class DestinationWriter {
     // 1. Deduplicate records within batch by destinationKey (in-batch idempotency guard)
     // Detect collisions where different source records map to the same destination key
     const dedupedRecords = this.deduplicateRecords(batch.records);
+
+    // Cross-batch collision detection: detect if destinationKey was already mapped to a different sourceKey in this migration run
+    if (this.idTracker) {
+      for (const r of dedupedRecords) {
+        const existingSourceKey = await this.idTracker.getSourceKey(
+          options.migrationRunId,
+          batch.destinationObject,
+          r.destinationKey,
+        );
+        if (existingSourceKey && existingSourceKey !== r.sourceKey) {
+          throw Object.assign(
+            new Error(
+              `Collision detected: distinct source record '${r.sourceKey}' maps to destinationKey '${r.destinationKey}' ` +
+                `which was already written by source record '${existingSourceKey}' in migration run '${options.migrationRunId}'.`,
+            ),
+            { code: 'COLLISION_DETECTED' },
+          );
+        }
+      }
+    }
+
     const sanitizedBatch: TransformedBatch = {
       destinationObject: batch.destinationObject,
       batchKey: batch.batchKey,
@@ -107,6 +128,24 @@ export class DestinationWriter {
     }
 
     // 4. Mark intermediate sub-stage: DESTINATION_WRITTEN
+    // Convert every unconfirmed write into a counted failure so QueueHandler cannot advance checkpoints or commit the batch
+    const unconfirmedRecords = sanitizedBatch.records.filter(
+      (r) =>
+        !writeResult.writtenKeys.includes(r.destinationKey) &&
+        !writeResult.skippedKeys.includes(r.destinationKey) &&
+        !writeResult.failedKeys.some((f) => f.key === r.destinationKey),
+    );
+
+    if (unconfirmedRecords.length > 0) {
+      for (const u of unconfirmedRecords) {
+        writeResult.failedKeys.push({
+          key: u.destinationKey,
+          error: `Destination connector did not confirm write for key '${u.destinationKey}'`,
+        });
+      }
+      writeResult.recordsFailed += unconfirmedRecords.length;
+    }
+
     if (this.manifestTracker) {
       await this.manifestTracker.updateSubStage(
         options.migrationRunId,

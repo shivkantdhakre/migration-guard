@@ -112,7 +112,7 @@ export class DryRunService {
     // In addition to snapshots, inspect live destination database schema if destination connection is configured
     let liveDestEntities: any[] | null = null;
     const isStrict = process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false';
-    const liveSchemaRequired = !destJson || isDestSnapStale;
+    const liveSchemaRequired = isStrict || !destJson || isDestSnapStale;
 
     if (version.destination_connection_id) {
       if (!this.credentialsService && isStrict && liveSchemaRequired) {
@@ -145,12 +145,23 @@ export class DryRunService {
                     WHERE table_schema = 'public'
                   `);
                   const kRes = await pool.query(`
-                    SELECT tc.table_name, kcu.column_name, tc.constraint_type
+                    SELECT tc.table_name, tc.constraint_name, tc.constraint_type, kcu.column_name
                     FROM information_schema.table_constraints tc
                     JOIN information_schema.key_column_usage kcu
                       ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
                     WHERE tc.table_schema = 'public' AND tc.constraint_type IN ('PRIMARY KEY', 'UNIQUE')
                   `);
+
+                  const constraintMap = new Map<string, { tableName: string; name: string; type: string; columns: string[] }>();
+                  for (const k of kRes.rows) {
+                    const key = `${k.table_name}:${k.constraint_name}`;
+                    let c = constraintMap.get(key);
+                    if (!c) {
+                      c = { tableName: k.table_name, name: k.constraint_name, type: k.constraint_type, columns: [] };
+                      constraintMap.set(key, c);
+                    }
+                    c.columns.push(k.column_name);
+                  }
 
                   const tableMap = new Map<string, any>();
                   for (const t of tRes.rows) {
@@ -162,8 +173,12 @@ export class DryRunService {
                       tbl = { name: c.table_name, columns: [] };
                       tableMap.set(c.table_name, tbl);
                     }
-                    const isPk = kRes.rows.some((k: any) => k.table_name === c.table_name && k.column_name === c.column_name && k.constraint_type === 'PRIMARY KEY');
-                    const isUnq = isPk || kRes.rows.some((k: any) => k.table_name === c.table_name && k.column_name === c.column_name && k.constraint_type === 'UNIQUE');
+                    const isPk = Array.from(constraintMap.values()).some(
+                      (con) => con.tableName === c.table_name && con.type === 'PRIMARY KEY' && con.columns.length === 1 && con.columns[0] === c.column_name,
+                    );
+                    const isUnq = isPk || Array.from(constraintMap.values()).some(
+                      (con) => con.tableName === c.table_name && con.type === 'UNIQUE' && con.columns.length === 1 && con.columns[0] === c.column_name,
+                    );
                     tbl.columns.push({
                       name: c.column_name,
                       type: c.udt_name || c.data_type,
@@ -192,16 +207,22 @@ export class DryRunService {
               throw err;
             }
             throw new BadRequestException(
-              `Cannot perform dry run: live destination catalog inspection failed (${err.message}). In production, live inspection failures cannot be bypassed by falling back to schema snapshots.`,
+              `Cannot perform dry run: live destination catalog inspection failed (${err.message}). Dry run failed closed in production: live inspection failures cannot be bypassed by falling back to schema snapshots.`,
             );
           }
         }
       }
     }
 
+    if (isStrict && version.destination_connection_id && (!liveDestEntities || liveDestEntities.length === 0)) {
+      throw new BadRequestException(
+        'Cannot perform dry run: live destination catalog inspection is mandatory in production when destination connection is configured. Dry run failed closed in production: live inspection failed or returned empty catalog.',
+      );
+    }
+
     if (isStrict && isDestSnapStale && (!liveDestEntities || liveDestEntities.length === 0)) {
       throw new BadRequestException(
-        `Cannot perform dry run: destination schema snapshot ${version.destination_schema_snapshot_id} is stale and live inspection failed. Refusing to continue with stale snapshot in production.`,
+        `Cannot perform dry run: destination schema snapshot ${version.destination_schema_snapshot_id} is stale and live inspection failed. Dry run failed closed in production: refusing to continue with stale snapshot in production.`,
       );
     }
 

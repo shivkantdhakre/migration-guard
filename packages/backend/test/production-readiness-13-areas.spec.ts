@@ -206,6 +206,155 @@ describe('Production Readiness Regression - Backend Areas (1, 2, 12, 13)', () =>
       expect(report.ready).toBe(false);
       expect(report.blockers.some((b) => b.includes('not backed by a matching composite primary key or unique constraint'))).toBe(true);
     });
+
+    it('refuses single-column identity key when column only participates in a composite unique constraint', async () => {
+      const readinessService = new ReadinessService(
+        mockDb,
+        mockWorkspaceService,
+        mockConnectionService,
+        mockCredentialsService,
+      );
+
+      const planVersion = {
+        id: 'pv_composite_single',
+        migration_plan_id: 'plan_comp_single',
+        mapping_version_id: 'mv_composite_single',
+        source_connection_id: 'src_conn_1',
+        destination_connection_id: 'dst_conn_1',
+        source_schema_snapshot_id: 'snap_src_1',
+        destination_schema_snapshot_id: 'snap_dst_1',
+        execution_config_json: { batchSize: 1000 },
+      };
+
+      // Configuration maps single identity key 'tenant_id'
+      const mappingVersion = {
+        id: 'mv_composite_single',
+        version: 1,
+        mapping_hash: 'abc1234567890123456789',
+        mapping_json: {
+          objects: [
+            {
+              source: { collection: 'tenants' },
+              destination: { table: 'tenants_target' },
+              identity: { sourceKey: 'id', destinationKey: 'tenant_id' }, // Configured as single identity!
+              fields: [
+                { destinationPath: 'tenant_id' },
+                { destinationPath: 'org_id' },
+              ],
+            },
+          ],
+        },
+      };
+
+      // Destination table has composite constraint UNIQUE(tenant_id, org_id) - NOT single column unique!
+      const dstSnapshot = {
+        id: 'snap_dst_1',
+        schema_version: 1,
+        created_at: new Date('2026-01-01'),
+        snapshot_json: {
+          tables: [
+            {
+              name: 'tenants_target',
+              columns: [
+                { name: 'tenant_id', type: 'varchar', nullable: false, isPrimaryKey: false, isUnique: false },
+                { name: 'org_id', type: 'varchar', nullable: false, isPrimaryKey: false, isUnique: false },
+              ],
+              constraints: [
+                { name: 'uq_tenant_org', type: 'UNIQUE', columns: ['tenant_id', 'org_id'] },
+              ],
+            },
+          ],
+        },
+      };
+
+      mockDb.query.mockImplementation(async (sql: string, params: any[]) => {
+        if (sql.includes('FROM migration_plan_versions')) return { rows: [planVersion] };
+        if (sql.includes('FROM mapping_versions')) return { rows: [mappingVersion] };
+        if (sql.includes('FROM schema_snapshots WHERE id = $1')) {
+          if (params[0] === 'snap_dst_1') return { rows: [dstSnapshot] };
+          if (params[0] === 'snap_src_1') return { rows: [{ id: 'snap_src_1', snapshot_json: { collections: [] } }] };
+        }
+        if (sql.includes('FROM connections WHERE id = $1')) {
+          return { rows: [{ id: params[0], engine: 'POSTGRESQL', credential_version: 1 }] };
+        }
+        if (sql.includes('SELECT id, schema_version FROM schema_snapshots')) {
+          return { rows: [] };
+        }
+        return { rows: [] };
+      });
+
+      const report = await readinessService.checkReadiness('pv_composite_single');
+
+      expect(report.ready).toBe(false);
+      expect(report.blockers).toContain(
+        "Identity column 'tenant_id' for destination table 'tenants_target' is not backed by a primary key or unique constraint.",
+      );
+    });
+
+    it('in production, reports blocker when live destination schema catalog inspection fails and refuses snapshot fallback', async () => {
+      const origEnv = process.env.NODE_ENV;
+      process.env.NODE_ENV = 'production';
+
+      try {
+        const readinessService = new ReadinessService(
+          mockDb,
+          mockWorkspaceService,
+          mockConnectionService,
+          mockCredentialsService,
+        );
+
+        const planVersion = {
+          id: 'pv_prod_live_fail',
+          migration_plan_id: 'plan_1',
+          mapping_version_id: 'mv_1',
+          source_connection_id: 'src_1',
+          destination_connection_id: 'dst_1',
+          source_schema_snapshot_id: 'snap_src_1',
+          destination_schema_snapshot_id: 'snap_dst_1',
+          execution_config_json: { batchSize: 1000 },
+        };
+
+        mockDb.query.mockImplementation(async (sql: string, params: any[]) => {
+          if (sql.includes('FROM migration_plan_versions')) return { rows: [planVersion] };
+          if (sql.includes('FROM mapping_versions')) {
+            return {
+              rows: [
+                {
+                  id: 'mv_1',
+                  mapping_json: {
+                    objects: [
+                      {
+                        source: { collection: 'users' },
+                        destination: { table: 'users_target' },
+                        identity: { sourceKey: 'id', destinationKey: 'id' },
+                        fields: [{ destinationPath: 'id' }],
+                      },
+                    ],
+                  },
+                },
+              ],
+            };
+          }
+          if (sql.includes('FROM schema_snapshots WHERE id = $1')) {
+            return { rows: [{ id: params[0], snapshot_json: { tables: [] }, schema_version: 1, created_at: new Date() }] };
+          }
+          if (sql.includes('FROM connections WHERE id = $1')) {
+            return { rows: [{ id: 'dst_1', engine: 'POSTGRESQL', credential_version: 1 }] };
+          }
+          return { rows: [] };
+        });
+
+        mockCredentialsService.getDecryptedCredentials.mockRejectedValue(
+          new Error('Live connection refused'),
+        );
+
+        const report = await readinessService.checkReadiness('pv_prod_live_fail');
+        expect(report.ready).toBe(false);
+        expect(report.blockers.some((b) => b.includes('Live destination schema catalog inspection failed') || b.includes('mandatory when destination connection is configured'))).toBe(true);
+      } finally {
+        process.env.NODE_ENV = origEnv;
+      }
+    });
   });
 
   describe('Area 12: Dry-run Schema Inspection', () => {

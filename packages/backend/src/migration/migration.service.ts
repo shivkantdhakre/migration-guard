@@ -206,15 +206,24 @@ export class MigrationService implements OnModuleInit, OnModuleDestroy {
         const cursorStart = i === 1 ? null : { offset: (i - 1) * batchSize };
         const cursorEnd = explicitBatchesPerTable ? { offset: i * batchSize } : undefined;
 
+        const batchMetadata = {
+          sourceConnectionId: resolvedSourceConnId,
+          destinationConnectionId: resolvedDestConnId,
+          destinationKey: resolvedDestKey,
+          planVersionId,
+          mappingVersionId: version.mapping_version_id,
+        };
+
         // Insert batch in PENDING state (Transactional Outbox Pattern) with complete immutable context
         await this.db.query(
           `INSERT INTO migration_batches (
              migration_run_id, batch_key, sequence_no, status,
              source_object, destination_object, mapping_version_id,
              source_cursor_start, source_cursor_end,
-             records_read, records_written, records_skipped, records_failed
+             records_read, records_written, records_skipped, records_failed,
+             source_connection_id, destination_connection_id, destination_key, plan_version_id, metadata
            )
-           VALUES ($1, $2, $3, 'PENDING', $4, $5, $6, $7, $8, 0, 0, 0, 0)`,
+           VALUES ($1, $2, $3, 'PENDING', $4, $5, $6, $7, $8, 0, 0, 0, 0, $9, $10, $11, $12, $13)`,
           [
             run.id,
             batchKey,
@@ -224,6 +233,11 @@ export class MigrationService implements OnModuleInit, OnModuleDestroy {
             version.mapping_version_id || null,
             cursorStart ? JSON.stringify(cursorStart) : null,
             cursorEnd ? JSON.stringify(cursorEnd) : null,
+            resolvedSourceConnId || null,
+            resolvedDestConnId || null,
+            resolvedDestKey,
+            planVersionId || null,
+            JSON.stringify(batchMetadata),
           ],
         );
 

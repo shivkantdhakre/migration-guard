@@ -395,14 +395,14 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.15)', { t
           strategy: 'PRESERVE_AS_TEXT',
         },
         fields: [
-          { sourcePath: '_id', destinationPath: 'id', transform: 'direct' },
-          { sourcePath: 'name', destinationPath: 'name', transform: 'direct' },
-          { sourcePath: 'email', destinationPath: 'email', transform: 'direct' },
-          { sourcePath: 'phone', destinationPath: 'phone', transform: 'direct' },
-          { sourcePath: 'tier', destinationPath: 'tier', transform: 'direct' },
-          { sourcePath: 'status', destinationPath: 'status', transform: 'direct' },
-          { sourcePath: 'metadata', destinationPath: 'metadata', transform: 'direct' },
-          { sourcePath: 'createdAt', destinationPath: 'created_at', transform: 'direct' },
+          { sourcePath: '_id', destinationPath: 'id' },
+          { sourcePath: 'name', destinationPath: 'name' },
+          { sourcePath: 'email', destinationPath: 'email' },
+          { sourcePath: 'phone', destinationPath: 'phone' },
+          { sourcePath: 'tier', destinationPath: 'tier' },
+          { sourcePath: 'status', destinationPath: 'status' },
+          { sourcePath: 'metadata', destinationPath: 'metadata' },
+          { sourcePath: 'createdAt', destinationPath: 'created_at' },
         ],
       };
       const mappingCanonical = independentCanonicalize(mappingJson);
@@ -969,7 +969,20 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.15)', { t
         // Uses independent test-only oracle completely decoupled from @migrationguard/core
         const originalSeed = seedCustomers.find((s) => s._id === unencodedSourceKey);
         expect(originalSeed).toBeDefined();
-        const expectedCanonicalJson = independentCanonicalize(originalSeed);
+
+        // Manifest content_hash must match the canonical RFC 8785 hash of the destination payload
+        // written to PostgreSQL, which is verified by RecoveryEngine during recovery reconciliation
+        const expectedDestPayload = {
+          id: originalSeed!._id,
+          name: originalSeed!.name,
+          email: originalSeed!.email,
+          phone: originalSeed!.phone,
+          tier: originalSeed!.tier,
+          status: originalSeed!.status,
+          metadata: originalSeed!.metadata,
+          created_at: originalSeed!.createdAt,
+        };
+        const expectedCanonicalJson = independentCanonicalize(expectedDestPayload);
         const expectedDigest = crypto.createHash('sha256').update(expectedCanonicalJson).digest('hex');
         const expectedContentHash = `sha256:${expectedDigest}`;
         expect(mRow.content_hash).toBe(expectedContentHash);

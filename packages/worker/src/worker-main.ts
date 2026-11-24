@@ -1132,7 +1132,7 @@ async function startWorker() {
                 sourceObject: transformed.sourceObject,
                 destinationObject: transformed.destinationObject,
                 data: transformed.payload,
-                contentHash: calculateCanonicalHash(raw),
+                contentHash: transformed.canonicalHash || calculateCanonicalHash(transformed.payload),
               };
             }
 
@@ -1199,7 +1199,7 @@ async function startWorker() {
               destinationObject: destObj,
               destinationKey: recordDestKey,
               data,
-              contentHash: calculateCanonicalHash(raw),
+              contentHash: calculateCanonicalHash(data),
             };
           },
           onNextBatchScheduled: process.env.ENABLE_WORKER_AUTO_STREAMING === 'true'

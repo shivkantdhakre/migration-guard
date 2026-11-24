@@ -31,10 +31,13 @@ export interface TransformOperationResult {
 }
 
 /**
- * Normalizes BSON values (ObjectId, Date, Decimal128, Binary) into plain JS values
+ * Normalizes BSON values (ObjectId, Date, Decimal128, Long, Binary) into plain JS values
  */
 export function normalizeBsonValue(val: unknown): unknown {
   if (val === null || val === undefined) return val;
+  if (typeof val === 'bigint') {
+    return val.toString();
+  }
   if (typeof val === 'object') {
     const obj = val as Record<string, unknown>;
     if (typeof obj.toHexString === 'function') {
@@ -44,6 +47,16 @@ export function normalizeBsonValue(val: unknown): unknown {
       return obj.toString();
     }
     if (obj._bsontype === 'ObjectId' && typeof obj.toString === 'function') {
+      return obj.toString();
+    }
+    if (obj._bsontype === 'Long' && typeof obj.toString === 'function') {
+      return obj.toString();
+    }
+    if (
+      typeof obj.low === 'number' &&
+      typeof obj.high === 'number' &&
+      typeof obj.toString === 'function'
+    ) {
       return obj.toString();
     }
     if (val instanceof Date) {

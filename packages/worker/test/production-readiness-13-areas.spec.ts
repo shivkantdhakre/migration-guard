@@ -915,8 +915,25 @@ describe('Production Readiness Regression - Worker Areas (6, 7, 8, 9, 10, 11)', 
       expect(typeof (tNum.payload as any).id).toBe('string');
       expect(String((tNum.payload as any).id).includes(':')).toBe(false);
 
+      // MongoDB BSON Long identity: Long(9007199254740993) must normalize to decimal string
+      const rawLongDoc = { _id: Long.fromString('9007199254740993'), name: 'Long Customer 9007199254740993' };
+      const longBson = detectBsonId(rawLongDoc._id);
+      expect(longBson.typedKey).toBe('Long:9007199254740993');
+      const envLong: SourceRecordEnvelope = {
+        sourceObject: 'customers',
+        sourceKey: longBson.typedKey,
+        payload: rawLongDoc,
+        extractedAt: new Date().toISOString(),
+      };
+      const tLong = engine.transform(envLong);
+      expect(tLong.sourceKey).toBe('Long:9007199254740993');
+      expect(tLong.destinationKey).toBe('9007199254740993');
+      expect((tLong.payload as any).id).toBe('9007199254740993');
+      expect(String((tLong.payload as any).id)).not.toBe('[object Object]');
+
       // 2. PostgreSQL persistence & atomic collision rejection
       const testDbUrl = process.env.MIGRATIONGUARD_TEST_DATABASE_URL || process.env.TEST_DATABASE_URL;
+      const isCi = process.env.CI === 'true';
       let realPgPool: pg.Pool | null = null;
       let testWorkspaceId: string | null = null;
       let testProjectId: string | null = null;
@@ -926,7 +943,10 @@ describe('Production Readiness Regression - Worker Areas (6, 7, 8, 9, 10, 11)', 
       let testDestConnId: string | null = null;
       const actualRunId = crypto.randomUUID();
 
-      if (testDbUrl) {
+      if (testDbUrl || isCi) {
+        if (!testDbUrl && isCi) {
+          throw new Error('[CI Mandatory Failure] MIGRATIONGUARD_TEST_DATABASE_URL or TEST_DATABASE_URL required in CI.');
+        }
         try {
           const probe = new pg.Pool({ connectionString: testDbUrl, max: 2 });
           await probe.query('SELECT 1');
@@ -968,12 +988,19 @@ describe('Production Readiness Regression - Worker Areas (6, 7, 8, 9, 10, 11)', 
              VALUES ($1, $2, $3, $4, 'RUNNING')`,
             [actualRunId, testWorkspaceId, testProjectId, testPlanVerId],
           );
-        } catch {
+        } catch (err: any) {
           if (realPgPool) {
             await realPgPool.end().catch(() => {});
             realPgPool = null;
           }
+          if (isCi) {
+            throw new Error(`[CI Mandatory Failure] Live PostgreSQL setup failed in CI: ${err.message}`);
+          }
         }
+      }
+
+      if (isCi) {
+        expect(realPgPool, 'In CI environment, real PostgreSQL pool must be connected and not null').not.toBeNull();
       }
 
       const idMappingsTable: Array<{

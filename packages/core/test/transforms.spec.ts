@@ -375,4 +375,45 @@ describe('Deterministic Transformation Engine (All 13 Allowlisted Transforms)', 
     const uuid = resolveDestinationKey('user_123', 'MAP_TO_UUID');
     assert.match(uuid, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
   });
+
+  // BSON Long and BigInt Normalization
+  it('BSON normalization: should correctly normalize Long and BigInt values to decimal strings', () => {
+    const mockLong = {
+      _bsontype: 'Long',
+      low: 1,
+      high: 2,
+      unsigned: false,
+      toString: () => '9007199254740993',
+    };
+
+    const mapping: ObjectMapping = {
+      source: { collection: 'test' },
+      destination: { table: 'test' },
+      identity: { sourceKey: '_id', destinationKey: 'id', strategy: 'PRESERVE_AS_TEXT' },
+      fields: [
+        { sourcePath: '_id', destinationPath: 'id' },
+      ],
+    };
+    const engine = new TransformationEngine(mapping);
+
+    // 1. Direct Long normalization
+    const resultLong = engine.transform({
+      sourceKey: 'Long:9007199254740993',
+      sourceObject: 'test',
+      payload: { _id: mockLong },
+    } as any);
+
+    assert.equal(resultLong.sourceKey, 'Long:9007199254740993');
+    assert.equal(resultLong.destinationKey, '9007199254740993');
+    assert.equal((resultLong.payload as any).id, '9007199254740993');
+    assert.notEqual(resultLong.destinationKey, '[object Object]');
+
+    // 2. BigInt normalization
+    const resultBigInt = engine.transform({
+      id: '1',
+      _id: BigInt('9007199254740995'),
+    });
+    assert.equal(resultBigInt.destinationKey, '9007199254740995');
+    assert.equal((resultBigInt.payload as any).id, '9007199254740995');
+  });
 });

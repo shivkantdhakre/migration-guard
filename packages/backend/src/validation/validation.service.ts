@@ -437,7 +437,13 @@ export class ValidationService {
         const connStr = destCredentials.connectionString || destCredentials.uri;
         if (connStr) {
           try {
-            const queryRunner = connStr === appConfig.databaseUrl
+            const isControlPlane =
+              connStr === appConfig.databaseUrl ||
+              connStr === process.env.MIGRATIONGUARD_TEST_DATABASE_URL ||
+              connStr === process.env.TEST_DATABASE_URL ||
+              connStr === process.env.DATABASE_URL;
+
+            const queryRunner = (isControlPlane && this.db.isConnected)
               ? this.db
               : new (require('pg').Pool)({ connectionString: connStr, connectionTimeoutMillis: 5000 });
             try {
@@ -446,7 +452,7 @@ export class ValidationService {
               destCount = parseInt(cRes.rows[0]?.cnt ?? '0', 10);
               destCountQueried = true;
             } finally {
-              if (connStr !== appConfig.databaseUrl && typeof (queryRunner as any)?.end === 'function') {
+              if (queryRunner !== this.db && typeof (queryRunner as any)?.end === 'function') {
                 await (queryRunner as any).end().catch(() => {});
               }
             }

@@ -55,12 +55,50 @@ describe('Wizard Routes & Live Backend Integration Acceptance E2E Suite', () => 
   let userB: any;
   let wsB: string;
 
+  const targetDbUrl =
+    process.env.MIGRATIONGUARD_TEST_DATABASE_URL ||
+    process.env.TEST_DATABASE_URL ||
+    appConfig.databaseUrl;
+
   beforeEach(async () => {
+    process.env.ALLOW_IN_MEMORY_DB = 'false';
+    process.env.FORCE_POSTGRES_DB = 'true';
     process.env.ALLOW_SYNTHETIC_SOURCE = 'false';
 
-    db = new DatabaseService();
+    db = new DatabaseService(targetDbUrl);
     await db.onModuleInit();
     db.resetMemoryStore();
+
+    // Ensure destination customers table exists with primary key
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS customers (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        email TEXT,
+        phone TEXT,
+        tier TEXT,
+        created_at TIMESTAMPTZ,
+        metadata JSONB DEFAULT '{}'::jsonb
+      )
+    `);
+
+    // Ensure sample documents exist in MongoDB source
+    try {
+      const { MongoClient } = require('mongodb');
+      const mClient = new MongoClient(REAL_MONGO_URI, { serverSelectionTimeoutMS: 5000 });
+      await mClient.connect();
+      const coll = mClient.db('migrationguard_e2e_source').collection('customers');
+      const cnt = await coll.countDocuments();
+      if (cnt === 0) {
+        await coll.insertMany([
+          { _id: '507f1f77bcf86cd799439011', name: 'Acme Corporation', email: 'info@acme.corp', createdAt: '2026-11-20T12:00:00.000Z', metadata: { city: 'San Francisco', state: 'CA' } },
+          { _id: '507f1f77bcf86cd799439012', name: 'Beta Industries', email: 'support@beta.io', createdAt: '2026-11-20T12:00:00.000Z', metadata: { city: 'Austin', state: 'TX' } },
+        ]);
+      }
+      await mClient.close().catch(() => {});
+    } catch (e: any) {
+      console.warn(`[wizard-routes-e2e] Notice checking source MongoDB: ${e.message}`);
+    }
 
     workspaceService = new WorkspaceService(db);
     projectService = new ProjectService(db, workspaceService);
@@ -264,7 +302,7 @@ describe('Wizard Routes & Live Backend Integration Acceptance E2E Suite', () => 
           engine: 'POSTGRESQL',
           connectionRole: 'DESTINATION',
           config: { database: 'neondb', schema: 'public' },
-          credentials: { connectionString: appConfig.databaseUrl },
+          credentials: { connectionString: targetDbUrl },
         },
         userA.user.id,
       );
@@ -379,7 +417,7 @@ describe('Wizard Routes & Live Backend Integration Acceptance E2E Suite', () => 
           engine: 'POSTGRESQL',
           connectionRole: 'DESTINATION',
           config: { database: 'neondb', schema: 'public' },
-          credentials: { connectionString: appConfig.databaseUrl },
+          credentials: { connectionString: targetDbUrl },
         },
         userA.user.id,
       );
@@ -432,7 +470,7 @@ describe('Wizard Routes & Live Backend Integration Acceptance E2E Suite', () => 
           engine: 'POSTGRESQL',
           connectionRole: 'DESTINATION',
           config: { database: 'neondb', schema: 'public' },
-          credentials: { connectionString: appConfig.databaseUrl },
+          credentials: { connectionString: targetDbUrl },
         },
         userA.user.id,
       );

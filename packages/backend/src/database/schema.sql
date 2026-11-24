@@ -663,3 +663,14 @@ CREATE INDEX IF NOT EXISTS ix_runs_workspace_status ON migration_runs (workspace
 CREATE INDEX IF NOT EXISTS ix_batches_run_seq ON migration_batches (migration_run_id, sequence_no);
 CREATE INDEX IF NOT EXISTS ix_discrepancies_validation_status ON discrepancies (validation_run_id, status, severity, category);
 CREATE INDEX IF NOT EXISTS ix_audit_workspace_date ON audit_events (workspace_id, created_at DESC);
+
+-- Standard test and demo destination tables (MongoDB customers & orders migration target)
+CREATE TABLE IF NOT EXISTS customers (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    email TEXT,
+    phone TEXT,
+    tier TEXT,
+    created_at TIMESTAMPTZ,
+    metadata JSONB DEFAULT '{}'::jsonb
+);

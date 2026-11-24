@@ -149,9 +149,15 @@ export class DryRunService {
             const creds = await this.credentialsService.getDecryptedCredentials(dstConn.id, dstConn.credential_version);
             const connStr = creds?.connectionString || creds?.uri || creds?.url;
             if (connStr) {
-              const queryRunner = connStr === appConfig.databaseUrl
+              const isControlPlane =
+                connStr === appConfig.databaseUrl ||
+                connStr === process.env.MIGRATIONGUARD_TEST_DATABASE_URL ||
+                connStr === process.env.TEST_DATABASE_URL ||
+                connStr === process.env.DATABASE_URL;
+
+              const queryRunner = (isControlPlane && this.db.isConnected)
                 ? this.db
-                : new (require('pg').Pool)({ connectionString: connStr, connectionTimeoutMillis: 2000 });
+                : new (require('pg').Pool)({ connectionString: connStr, connectionTimeoutMillis: 5000 });
               try {
                 const tRes = await queryRunner.query(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'`);
                 const cRes = await queryRunner.query(`
@@ -220,7 +226,7 @@ export class DryRunService {
                   });
                 }
               } finally {
-                if (connStr !== appConfig.databaseUrl && typeof (queryRunner as any)?.end === 'function') {
+                if (queryRunner !== this.db && typeof (queryRunner as any)?.end === 'function') {
                   await (queryRunner as any).end().catch(() => {});
                 }
               }

@@ -12,6 +12,15 @@ import { IdMappingRecord } from '../types.js';
 
 export interface IdMappingStorageAdapter {
   saveMappings(mappings: IdMappingRecord[]): Promise<void>;
+  claimMappings?(
+    mappings: Array<{
+      migrationRunId: string;
+      sourceObject: string;
+      sourceKey: string;
+      destinationObject: string;
+      destinationKey: string;
+    }>,
+  ): Promise<void>;
   findBySourceKey(
     migrationRunId: string,
     sourceObject: string,
@@ -32,10 +41,74 @@ export class InMemoryIdMappingStorage implements IdMappingStorageAdapter {
   // Key: `${migrationRunId}:${destinationObject}:${destinationKey}`
   private byDestKey = new Map<string, IdMappingRecord>();
 
-  public async saveMappings(mappings: IdMappingRecord[]): Promise<void> {
+  public async claimMappings(
+    mappings: Array<{
+      migrationRunId: string;
+      sourceObject: string;
+      sourceKey: string;
+      destinationObject: string;
+      destinationKey: string;
+    }>,
+  ): Promise<void> {
+    // Atomic check-and-reserve in memory: verify no collision on destinationKey or sourceKey
     for (const m of mappings) {
+      const dstKey = `${m.migrationRunId}:${m.destinationObject}:${m.destinationKey}`;
+      const existingDst = this.byDestKey.get(dstKey);
+      if (existingDst && existingDst.sourceKey !== m.sourceKey) {
+        throw Object.assign(
+          new Error(
+            `Collision detected: distinct source record '${m.sourceKey}' maps to destinationKey '${m.destinationKey}' ` +
+              `which was already claimed by source record '${existingDst.sourceKey}' in migration run '${m.migrationRunId}'.`,
+          ),
+          { code: 'COLLISION_DETECTED' },
+        );
+      }
+
+      const srcKey = `${m.migrationRunId}:${m.sourceObject}:${m.sourceKey}`;
+      const existingSrc = this.bySourceKey.get(srcKey);
+      if (existingSrc && existingSrc.destinationKey !== m.destinationKey) {
+        throw Object.assign(
+          new Error(
+            `Collision detected: source record '${m.sourceKey}' was already mapped to destinationKey '${existingSrc.destinationKey}', ` +
+              `cannot re-map to '${m.destinationKey}' in migration run '${m.migrationRunId}'.`,
+          ),
+          { code: 'COLLISION_DETECTED' },
+        );
+      }
+    }
+
+    // After verifying all mappings in batch, record them atomically
+    for (const m of mappings) {
+      const record: IdMappingRecord = {
+        id: randomUUID(),
+        migrationRunId: m.migrationRunId,
+        sourceObject: m.sourceObject,
+        sourceKey: m.sourceKey,
+        destinationObject: m.destinationObject,
+        destinationKey: m.destinationKey,
+        createdAt: new Date().toISOString(),
+      };
       const srcKey = `${m.migrationRunId}:${m.sourceObject}:${m.sourceKey}`;
       const dstKey = `${m.migrationRunId}:${m.destinationObject}:${m.destinationKey}`;
+      this.bySourceKey.set(srcKey, record);
+      this.byDestKey.set(dstKey, record);
+    }
+  }
+
+  public async saveMappings(mappings: IdMappingRecord[]): Promise<void> {
+    for (const m of mappings) {
+      const dstKey = `${m.migrationRunId}:${m.destinationObject}:${m.destinationKey}`;
+      const existingDst = this.byDestKey.get(dstKey);
+      if (existingDst && existingDst.sourceKey !== m.sourceKey) {
+        throw Object.assign(
+          new Error(
+            `Collision detected: distinct source record '${m.sourceKey}' maps to destinationKey '${m.destinationKey}' ` +
+              `which was already claimed by source record '${existingDst.sourceKey}' in migration run '${m.migrationRunId}'.`,
+          ),
+          { code: 'COLLISION_DETECTED' },
+        );
+      }
+      const srcKey = `${m.migrationRunId}:${m.sourceObject}:${m.sourceKey}`;
       this.bySourceKey.set(srcKey, m);
       this.byDestKey.set(dstKey, m);
     }
@@ -135,6 +208,34 @@ export class IdTracker {
 
     await this.adapter.saveMappings(records);
     return records;
+  }
+
+  public async claimBatchMappings(
+    mappings: Array<{
+      migrationRunId: string;
+      sourceObject: string;
+      sourceKey: string;
+      destinationObject: string;
+      destinationKey: string;
+    }>,
+  ): Promise<void> {
+    if (this.adapter.claimMappings) {
+      await this.adapter.claimMappings(mappings);
+    } else {
+      for (const m of mappings) {
+        const existing = await this.getSourceKey(m.migrationRunId, m.destinationObject, m.destinationKey);
+        if (existing && existing !== m.sourceKey) {
+          throw Object.assign(
+            new Error(
+              `Collision detected: distinct source record '${m.sourceKey}' maps to destinationKey '${m.destinationKey}' ` +
+                `which was already claimed by source record '${existing}' in migration run '${m.migrationRunId}'.`,
+            ),
+            { code: 'COLLISION_DETECTED' },
+          );
+        }
+      }
+      await this.recordBatchMappings(mappings);
+    }
   }
 
   public async getDestinationKey(

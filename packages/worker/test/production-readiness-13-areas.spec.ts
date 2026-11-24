@@ -477,4 +477,178 @@ describe('Production Readiness Regression - Worker Areas (6, 7, 8, 9, 10, 11)', 
       expect(page2Docs[0].toString()).toBe('1000000000000003');
     });
   });
+
+  describe('Finding 1: Atomic Cross-Batch Collision Detection via claimBatchMappings', () => {
+    it('prevents concurrent batches from claiming the same destination key for different source keys', async () => {
+      const { IdTracker, InMemoryIdMappingStorage } = await import('../src/engine/id-tracker.js');
+      const storage = new InMemoryIdMappingStorage();
+      const tracker = new IdTracker(storage);
+
+      const runId = 'run_atomic_collision_test';
+
+      // Batch 1 claims dest_999 for source_AAA
+      await tracker.claimBatchMappings([
+        {
+          migrationRunId: runId,
+          sourceObject: 'users',
+          sourceKey: 'source_AAA',
+          destinationObject: 'users',
+          destinationKey: 'dest_999',
+        },
+      ]);
+
+      // Batch 2 concurrently attempts to claim dest_999 for source_BBB
+      await expect(
+        tracker.claimBatchMappings([
+          {
+            migrationRunId: runId,
+            sourceObject: 'users',
+            sourceKey: 'source_BBB',
+            destinationObject: 'users',
+            destinationKey: 'dest_999',
+          },
+        ]),
+      ).rejects.toThrow(/Collision detected: distinct source record/);
+    });
+
+    it('allows idempotent re-claim of the same sourceKey -> destinationKey mapping', async () => {
+      const { IdTracker, InMemoryIdMappingStorage } = await import('../src/engine/id-tracker.js');
+      const storage = new InMemoryIdMappingStorage();
+      const tracker = new IdTracker(storage);
+
+      const runId = 'run_idempotent_test';
+
+      // First claim
+      await tracker.claimBatchMappings([
+        {
+          migrationRunId: runId,
+          sourceObject: 'users',
+          sourceKey: 'source_AAA',
+          destinationObject: 'users',
+          destinationKey: 'dest_999',
+        },
+      ]);
+
+      // Re-claim identical pair should succeed idempotently
+      await expect(
+        tracker.claimBatchMappings([
+          {
+            migrationRunId: runId,
+            sourceObject: 'users',
+            sourceKey: 'source_AAA',
+            destinationObject: 'users',
+            destinationKey: 'dest_999',
+          },
+        ]),
+      ).resolves.not.toThrow();
+    });
+  });
+
+  describe('Finding 2: BSON Type Tagging in Source Identity Keys', () => {
+    it('ensures ObjectId and string with identical hex representation produce distinct typed keys', () => {
+      const hex = '507f191e810c19729de860ea';
+      const objId = new ObjectId(hex);
+      const strId = hex;
+
+      const detectedObj = detectBsonId(objId);
+      const detectedStr = detectBsonId(strId);
+
+      expect(detectedObj.idType).toBe('ObjectId');
+      expect(detectedStr.idType).toBe('string');
+      expect(detectedObj.typedKey).toBe(`ObjectId:${hex}`);
+      expect(detectedStr.typedKey).toBe(`string:${hex}`);
+      expect(detectedObj.typedKey).not.toBe(detectedStr.typedKey);
+    });
+
+    it('ensures Long and number with identical value produce distinct typed keys', () => {
+      const longVal = Long.fromNumber(42);
+      const numVal = 42;
+
+      const detectedLong = detectBsonId(longVal);
+      const detectedNum = detectBsonId(numVal);
+
+      expect(detectedLong.idType).toBe('Long');
+      expect(detectedNum.idType).toBe('number');
+      expect(detectedLong.typedKey).toBe('Long:42');
+      expect(detectedNum.typedKey).toBe('number:42');
+      expect(detectedLong.typedKey).not.toBe(detectedNum.typedKey);
+    });
+
+    it('reconstructBsonId decodes typedKey prefixes when lastIdType is omitted', () => {
+      const reconstructedObj = reconstructBsonId('ObjectId:507f191e810c19729de860ea');
+      expect(reconstructedObj).toBeInstanceOf(ObjectId);
+      expect(reconstructedObj.toString()).toBe('507f191e810c19729de860ea');
+
+      const reconstructedLong = reconstructBsonId('Long:9007199254740993');
+      expect(reconstructedLong).toBeInstanceOf(Long);
+      expect(reconstructedLong.toString()).toBe('9007199254740993');
+    });
+  });
+
+  describe('Finding 4: RecoveryEngine Version ID Preservation & Dual-Object Filtering', () => {
+    it('propagates actual batch planVersionId and mappingVersionId to advanced checkpoints and filters by destinationObject', async () => {
+      const { RecoveryEngine } = await import('../src/engine/recovery-engine.js');
+      const advancedCheckpoints: any[] = [];
+
+      const mockManifestTracker: any = {
+        listBatches: vi.fn().mockResolvedValue([
+          {
+            batchKey: 'batch_customers_primary',
+            sequenceNo: 1,
+            status: 'COMMITTED',
+            sourceObject: 'customers',
+            destinationObject: 'clients',
+            planVersionId: 'pv_real_uuid_111',
+            mappingVersionId: 'mv_real_uuid_222',
+            recordsWritten: 10,
+            sourceCursorEnd: { lastId: '10' },
+          },
+          {
+            batchKey: 'batch_customers_archive',
+            sequenceNo: 1,
+            status: 'COMMITTED',
+            sourceObject: 'customers',
+            destinationObject: 'customers_archive', // Different destination object
+            planVersionId: 'pv_archive_uuid_333',
+            mappingVersionId: 'mv_archive_uuid_444',
+            recordsWritten: 5,
+            sourceCursorEnd: { lastId: '5' },
+          },
+        ]),
+        listRecordManifests: vi.fn().mockResolvedValue([]),
+        transitionState: vi.fn().mockResolvedValue(undefined),
+      };
+
+      const mockCheckpointManager: any = {
+        getCheckpoint: vi.fn().mockResolvedValue(null),
+        advanceCheckpoint: vi.fn().mockImplementation(async (params: any) => {
+          advancedCheckpoints.push(params);
+        }),
+      };
+
+      const mockConnector: any = {
+        readByKeys: vi.fn().mockResolvedValue([]),
+      };
+
+      const recovery = new RecoveryEngine({
+        destinationConnector: mockConnector,
+        manifestTracker: mockManifestTracker,
+        checkpointManager: mockCheckpointManager,
+      });
+
+      // Prepare resume specifically for customers -> clients
+      const plan = await recovery.prepareResume('run_recovery_test', 'customers', 'clients', 'id');
+
+      // Only batch_customers_primary should have been processed, NOT customers_archive
+      expect(plan.reconciledBatches).toHaveLength(1);
+      expect(plan.reconciledBatches[0].batchKey).toBe('batch_customers_primary');
+
+      // Checkpoint must preserve real version UUIDs rather than placeholder literals
+      expect(advancedCheckpoints).toHaveLength(1);
+      expect(advancedCheckpoints[0].planVersionId).toBe('pv_real_uuid_111');
+      expect(advancedCheckpoints[0].mappingVersionId).toBe('mv_real_uuid_222');
+      expect(advancedCheckpoints[0].planVersionId).not.toBe('resumed_plan');
+      expect(advancedCheckpoints[0].mappingVersionId).not.toBe('resumed_mapping');
+    });
+  });
 });

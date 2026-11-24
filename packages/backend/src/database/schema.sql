@@ -209,7 +209,8 @@ CREATE TABLE IF NOT EXISTS id_mappings (
     destination_object TEXT NOT NULL,
     destination_key TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT uq_id_mapping_source UNIQUE (migration_run_id, source_object, source_key)
+    CONSTRAINT uq_id_mapping_source UNIQUE (migration_run_id, source_object, source_key),
+    CONSTRAINT uq_id_mapping_destination UNIQUE (migration_run_id, destination_object, destination_key)
 );
 
 -- Record Manifests
@@ -512,6 +513,47 @@ BEGIN
   ALTER TABLE migration_batches ADD COLUMN IF NOT EXISTS destination_key TEXT;
   ALTER TABLE migration_batches ADD COLUMN IF NOT EXISTS plan_version_id UUID;
   ALTER TABLE migration_batches ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'::jsonb;
+
+  -- Add foreign key constraints on migration_batches (Finding 8: Schema upgrade FK parity)
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'fk_migration_batches_source_connection'
+      AND conrelid = 'migration_batches'::regclass
+      AND contype = 'f'
+  ) THEN
+    ALTER TABLE migration_batches ADD CONSTRAINT fk_migration_batches_source_connection
+      FOREIGN KEY (source_connection_id) REFERENCES connections(id) ON DELETE SET NULL;
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'fk_migration_batches_destination_connection'
+      AND conrelid = 'migration_batches'::regclass
+      AND contype = 'f'
+  ) THEN
+    ALTER TABLE migration_batches ADD CONSTRAINT fk_migration_batches_destination_connection
+      FOREIGN KEY (destination_connection_id) REFERENCES connections(id) ON DELETE SET NULL;
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'fk_migration_batches_plan_version'
+      AND conrelid = 'migration_batches'::regclass
+      AND contype = 'f'
+  ) THEN
+    ALTER TABLE migration_batches ADD CONSTRAINT fk_migration_batches_plan_version
+      FOREIGN KEY (plan_version_id) REFERENCES migration_plan_versions(id) ON DELETE SET NULL;
+  END IF;
+
+  -- Ensure id_mappings has unique constraint on destination key (Finding 1: Atomic cross-batch collision detection)
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'uq_id_mapping_destination'
+      AND conrelid = 'id_mappings'::regclass
+      AND contype = 'u'
+  ) THEN
+    ALTER TABLE id_mappings ADD CONSTRAINT uq_id_mapping_destination UNIQUE (migration_run_id, destination_object, destination_key);
+  END IF;
 END $$;
 
 -- Validation Runs

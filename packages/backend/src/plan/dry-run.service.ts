@@ -114,91 +114,119 @@ export class DryRunService {
     const isStrict = process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false';
     const liveSchemaRequired = isStrict || !destJson || isDestSnapStale;
 
+    // Collect all destination connection IDs from plan version and per-object mapping overrides (Finding 6)
+    const destConnIds = new Set<string>();
     if (version.destination_connection_id) {
+      destConnIds.add(version.destination_connection_id);
+    }
+    for (const m of mappings) {
+      const cId = (m as any)?.destinationConnectionId || (m as any)?.destination?.connectionId;
+      if (cId) destConnIds.add(cId);
+    }
+
+    if (destConnIds.size > 0) {
       if (!this.credentialsService && isStrict && liveSchemaRequired) {
         throw new BadRequestException('Cannot perform dry run: credentialsService is unavailable for live destination catalog inspection.');
       }
       if (this.credentialsService) {
         try {
-          const dstConnRes = await this.db.query('SELECT * FROM connections WHERE id = $1', [version.destination_connection_id]);
-          if (dstConnRes.rows.length === 0) {
-            if (isStrict && liveSchemaRequired) {
-              throw new BadRequestException(`Cannot perform dry run: destination connection '${version.destination_connection_id}' not found in workspace.`);
+          const tableMap = new Map<string, any>();
+          for (const connId of destConnIds) {
+            const dstConnRes = await this.db.query('SELECT * FROM connections WHERE id = $1', [connId]);
+            if (dstConnRes.rows.length === 0) {
+              if (isStrict && liveSchemaRequired) {
+                throw new BadRequestException(`Cannot perform dry run: destination connection '${connId}' not found in workspace.`);
+              }
+              continue;
             }
-          } else {
             const dstConn = dstConnRes.rows[0];
             if (dstConn.engine !== 'POSTGRESQL') {
               if (isStrict && liveSchemaRequired) {
                 throw new BadRequestException(`Cannot perform dry run: destination engine '${dstConn.engine}' is unsupported for live catalog inspection.`);
               }
-            } else {
-              const creds = await this.credentialsService.getDecryptedCredentials(dstConn.id, dstConn.credential_version);
-              const connStr = creds?.connectionString || creds?.uri || creds?.url;
-              if (connStr && connStr !== appConfig.databaseUrl) {
-                const pg = require('pg');
-                const pool = new pg.Pool({ connectionString: connStr, connectionTimeoutMillis: 2000 });
-                try {
-                  const tRes = await pool.query(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'`);
-                  const cRes = await pool.query(`
-                    SELECT table_name, column_name, data_type, udt_name, is_nullable, character_maximum_length
-                    FROM information_schema.columns
-                    WHERE table_schema = 'public'
-                  `);
-                  const kRes = await pool.query(`
-                    SELECT tc.table_name, tc.constraint_name, tc.constraint_type, kcu.column_name
-                    FROM information_schema.table_constraints tc
-                    JOIN information_schema.key_column_usage kcu
-                      ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
-                    WHERE tc.table_schema = 'public' AND tc.constraint_type IN ('PRIMARY KEY', 'UNIQUE')
-                  `);
-
-                  const constraintMap = new Map<string, { tableName: string; name: string; type: string; columns: string[] }>();
-                  for (const k of kRes.rows) {
-                    const key = `${k.table_name}:${k.constraint_name}`;
-                    let c = constraintMap.get(key);
-                    if (!c) {
-                      c = { tableName: k.table_name, name: k.constraint_name, type: k.constraint_type, columns: [] };
-                      constraintMap.set(key, c);
-                    }
-                    c.columns.push(k.column_name);
-                  }
-
-                  const tableMap = new Map<string, any>();
-                  for (const t of tRes.rows) {
-                    tableMap.set(t.table_name, { name: t.table_name, columns: [] });
-                  }
-                  for (const c of cRes.rows) {
-                    let tbl = tableMap.get(c.table_name);
-                    if (!tbl) {
-                      tbl = { name: c.table_name, columns: [] };
-                      tableMap.set(c.table_name, tbl);
-                    }
-                    const isPk = Array.from(constraintMap.values()).some(
-                      (con) => con.tableName === c.table_name && con.type === 'PRIMARY KEY' && con.columns.length === 1 && con.columns[0] === c.column_name,
-                    );
-                    const isUnq = isPk || Array.from(constraintMap.values()).some(
-                      (con) => con.tableName === c.table_name && con.type === 'UNIQUE' && con.columns.length === 1 && con.columns[0] === c.column_name,
-                    );
-                    tbl.columns.push({
-                      name: c.column_name,
-                      type: c.udt_name || c.data_type,
-                      data_type: c.data_type,
-                      udt_name: c.udt_name,
-                      nullable: c.is_nullable !== 'NO',
-                      is_nullable: c.is_nullable,
-                      isPrimaryKey: isPk,
-                      isUnique: isUnq,
-                      maxLength: c.character_maximum_length,
-                    });
-                  }
-                  liveDestEntities = Array.from(tableMap.values());
-                } finally {
-                  await pool.end().catch(() => {});
-                }
-              } else if (!connStr && isStrict && liveSchemaRequired) {
-                throw new BadRequestException('Cannot perform dry run: destination connection credentials missing or unavailable in vault.');
-              }
+              continue;
             }
+            const creds = await this.credentialsService.getDecryptedCredentials(dstConn.id, dstConn.credential_version);
+            const connStr = creds?.connectionString || creds?.uri || creds?.url;
+            if (connStr && connStr !== appConfig.databaseUrl) {
+              const pg = require('pg');
+              const pool = new pg.Pool({ connectionString: connStr, connectionTimeoutMillis: 2000 });
+              try {
+                const tRes = await pool.query(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'`);
+                const cRes = await pool.query(`
+                  SELECT table_name, column_name, data_type, udt_name, is_nullable, character_maximum_length
+                  FROM information_schema.columns
+                  WHERE table_schema = 'public'
+                `);
+                const kRes = await pool.query(`
+                  SELECT tc.table_name, tc.constraint_name, tc.constraint_type, kcu.column_name
+                  FROM information_schema.table_constraints tc
+                  JOIN information_schema.key_column_usage kcu
+                    ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
+                  WHERE tc.table_schema = 'public' AND tc.constraint_type IN ('PRIMARY KEY', 'UNIQUE')
+                `);
+
+                const constraintMap = new Map<string, { tableName: string; name: string; type: string; columns: string[] }>();
+                for (const k of kRes.rows) {
+                  const key = `${k.table_name}:${k.constraint_name}`;
+                  let c = constraintMap.get(key);
+                  if (!c) {
+                    c = { tableName: k.table_name, name: k.constraint_name, type: k.constraint_type, columns: [] };
+                    constraintMap.set(key, c);
+                  }
+                  c.columns.push(k.column_name);
+                }
+
+                for (const t of tRes.rows) {
+                  if (!tableMap.has(t.table_name)) {
+                    tableMap.set(t.table_name, { name: t.table_name, columns: [], constraints: [] });
+                  }
+                }
+                for (const c of constraintMap.values()) {
+                  let tbl = tableMap.get(c.tableName);
+                  if (!tbl) {
+                    tbl = { name: c.tableName, columns: [], constraints: [] };
+                    tableMap.set(c.tableName, tbl);
+                  }
+                  tbl.constraints.push({
+                    name: c.name,
+                    type: c.type,
+                    columns: c.columns,
+                  });
+                }
+                for (const c of cRes.rows) {
+                  let tbl = tableMap.get(c.table_name);
+                  if (!tbl) {
+                    tbl = { name: c.table_name, columns: [], constraints: [] };
+                    tableMap.set(c.table_name, tbl);
+                  }
+                  const isPk = Array.from(constraintMap.values()).some(
+                    (con) => con.tableName === c.table_name && con.type === 'PRIMARY KEY' && con.columns.length === 1 && con.columns[0] === c.column_name,
+                  );
+                  const isUnq = isPk || Array.from(constraintMap.values()).some(
+                    (con) => con.tableName === c.table_name && con.type === 'UNIQUE' && con.columns.length === 1 && con.columns[0] === c.column_name,
+                  );
+                  tbl.columns.push({
+                    name: c.column_name,
+                    type: c.udt_name || c.data_type,
+                    data_type: c.data_type,
+                    udt_name: c.udt_name,
+                    nullable: c.is_nullable !== 'NO',
+                    is_nullable: c.is_nullable,
+                    isPrimaryKey: isPk,
+                    isUnique: isUnq,
+                    maxLength: c.character_maximum_length,
+                  });
+                }
+              } finally {
+                await pool.end().catch(() => {});
+              }
+            } else if (!connStr && isStrict && liveSchemaRequired) {
+              throw new BadRequestException('Cannot perform dry run: destination connection credentials missing or unavailable in vault.');
+            }
+          }
+          if (tableMap.size > 0) {
+            liveDestEntities = Array.from(tableMap.values());
           }
         } catch (err: any) {
           console.warn(`[DryRunService] Live destination catalog inspection notice: ${err.message}`);
@@ -214,7 +242,7 @@ export class DryRunService {
       }
     }
 
-    if (isStrict && version.destination_connection_id && (!liveDestEntities || liveDestEntities.length === 0)) {
+    if (isStrict && destConnIds.size > 0 && (!liveDestEntities || liveDestEntities.length === 0)) {
       throw new BadRequestException(
         'Cannot perform dry run: live destination catalog inspection is mandatory in production when destination connection is configured. Dry run failed closed in production: live inspection failed or returned empty catalog.',
       );
@@ -269,11 +297,12 @@ export class DryRunService {
       let liveSamplingError: Error | null = null;
       let isVerifiedEmpty = false;
 
-      // 1. Live source connection sampling using decrypted credentials (P1: Real Source Sampling)
-      if (version.source_connection_id && this.credentialsService) {
+      // 1. Live source connection sampling using decrypted credentials (P1: Real Source Sampling, Finding 6: Per-object overrides)
+      const objSourceConnId = (mapping as any)?.sourceConnectionId || (mapping as any)?.source?.connectionId || version.source_connection_id;
+      if (objSourceConnId && this.credentialsService) {
         liveSamplingAttempted = true;
         try {
-          const srcConnRes = await this.db.query('SELECT * FROM connections WHERE id = $1', [version.source_connection_id]);
+          const srcConnRes = await this.db.query('SELECT * FROM connections WHERE id = $1', [objSourceConnId]);
           if (srcConnRes.rows.length > 0) {
             const srcConn = srcConnRes.rows[0];
             const creds = await this.credentialsService.getDecryptedCredentials(
@@ -447,7 +476,7 @@ export class DryRunService {
             name: c.name || c.path,
             type: (c.type || c.dataType || c.data_type || c.udt_name || '').toLowerCase(),
             nullable: c.nullable !== false && c.is_nullable !== 'NO',
-            isPrimaryKey: !!(c.isPrimaryKey || c.name === 'id' || c.path === 'id' || c.is_primary_key),
+            isPrimaryKey: !!(c.isPrimaryKey || c.is_primary_key),
             isUnique: !!(c.isUnique || c.unique || c.is_unique),
             maxLength: c.maxLength || c.character_maximum_length,
           }));
@@ -460,11 +489,25 @@ export class DryRunService {
               `Mapping for '${destObj}' lacks explicit identity.destinationKey configuration. Implicit default 'id' is prohibited in production.`,
             );
           }
-          const keyExists = cols.some((c: any) => c.name === destKey);
-          if (!keyExists) {
+          const keyCol = cols.find((c: any) => c.name === destKey);
+          if (!keyCol) {
             objConflicts.push(
               `Configured destination identity key '${destKey}' does not exist in destination table '${destObj}'.`,
             );
+          } else {
+            // Finding 5: Validate dedicated primary key or uniqueness constraint strictly in dry run
+            const tableConstraints: Array<{ name: string; type: string; columns: string[] }> = destTable.constraints || [];
+            const hasDedicatedConstraint =
+              keyCol.isPrimaryKey ||
+              keyCol.isUnique ||
+              tableConstraints.some(
+                (tc) => (tc.type === 'PRIMARY KEY' || tc.type === 'UNIQUE') && tc.columns.length === 1 && tc.columns[0] === destKey,
+              );
+            if (!hasDedicatedConstraint) {
+              objConflicts.push(
+                `Destination identity key '${destKey}' in table '${destObj}' is not backed by a primary key or unique constraint.`,
+              );
+            }
           }
 
           // 2. Nullability Validation (including non-nullable columns and primary keys)

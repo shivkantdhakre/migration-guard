@@ -549,4 +549,163 @@ describe('Production Readiness Regression - Backend Areas (1, 2, 12, 13)', () =>
       ).rejects.toThrow(/Ambiguous mapping: multiple mappings match/);
     });
   });
+
+  describe('Finding 5: Dry-Run Strict Identity & Composite Constraint Validation', () => {
+    it('rejects identity column named id when not backed by dedicated PK or uniqueness constraint', async () => {
+      const dryRunService = new DryRunService(
+        mockDb,
+        mockWorkspaceService,
+        mockConnectionService,
+        mockCredentialsService,
+      );
+
+      const planVersion = {
+        id: 'pv_dryrun_id_check',
+        plan_id: 'plan_test',
+        migration_plan_id: 'plan_test',
+        mapping_version_id: 'mv_dryrun_id_check',
+        source_connection_id: null,
+        destination_connection_id: null,
+        source_schema_snapshot_id: 'snap_src',
+        destination_schema_snapshot_id: 'snap_dst',
+        execution_config_json: {},
+      };
+
+      const plan = {
+        id: 'plan_test',
+        workspace_id: 'ws_1',
+        project_id: 'proj_1',
+      };
+
+      const mappingVersion = {
+        id: 'mv_dryrun_id_check',
+        mapping_json: {
+          objects: [
+            {
+              source: { object: 'users' },
+              destination: { object: 'users', key: 'id' },
+              identity: { sourceKey: 'id', destinationKey: 'id', strategy: 'PRESERVE_AS_TEXT' },
+              fields: [],
+            },
+          ],
+        },
+      };
+
+      // Destination schema snapshot where table 'users' has column 'id' that is NOT primary key and NOT unique
+      const destSnapshot = {
+        id: 'snap_dst',
+        schema_version: 1,
+        created_at: new Date(),
+        snapshot_json: {
+          tables: [
+            {
+              name: 'users',
+              columns: [
+                { name: 'id', type: 'text', nullable: false, isPrimaryKey: false, isUnique: false },
+                { name: 'name', type: 'text', nullable: true },
+              ],
+              constraints: [], // No PK or Unique constraint on 'id'!
+            },
+          ],
+        },
+      };
+
+      const srcSnapshot = {
+        id: 'snap_src',
+        schema_version: 1,
+        created_at: new Date(),
+        snapshot_json: {
+          collections: [{ name: 'users', fields: [{ path: 'id', type: 'string' }] }],
+        },
+      };
+
+      mockDb.query.mockImplementation(async (sql: string, params: any[]) => {
+        if (sql.includes('FROM migration_plan_versions')) return { rows: [planVersion] };
+        if (sql.includes('FROM migration_plans')) return { rows: [plan] };
+        if (sql.includes('FROM mapping_versions')) return { rows: [mappingVersion] };
+        if (sql.includes('FROM schema_snapshots') && params[0] === 'snap_dst') return { rows: [destSnapshot] };
+        if (sql.includes('FROM schema_snapshots') && params[0] === 'snap_src') return { rows: [srcSnapshot] };
+        if (sql.includes('FROM connections')) return { rows: [] };
+        if (sql.includes('SELECT id FROM users')) return { rows: [{ id: 'user_1' }] };
+        return { rows: [] };
+      });
+
+      const result = await dryRunService.startDryRun('pv_dryrun_id_check', 'user_1');
+      expect(result.potentialTypeConflicts).toContain(
+        "Destination identity key 'id' in table 'users' is not backed by a primary key or unique constraint.",
+      );
+    });
+  });
+
+  describe('Finding 7: MappingPreviewService Exact Matching & Fallback Prohibition', () => {
+    it('exact source AND destination matching resolves target object accurately and rejects ambiguous target', async () => {
+      const { MappingPreviewService } = await import('../src/mapping/mapping-preview.service');
+      const previewService = new MappingPreviewService();
+
+      const multiMapping = {
+        objects: [
+          {
+            source: { object: 'users' },
+            destination: { object: 'accounts' },
+            identity: { sourceKey: '_id', destinationKey: 'account_id', strategy: 'PRESERVE_AS_TEXT' },
+            fields: [{ sourcePath: 'name', destinationPath: 'account_name', transform: { op: 'TRIM_STRING' } }],
+          },
+          {
+            source: { object: 'users' },
+            destination: { object: 'user_profiles' },
+            identity: { sourceKey: '_id', destinationKey: 'profile_id', strategy: 'PRESERVE_AS_TEXT' },
+            fields: [{ sourcePath: 'name', destinationPath: 'display_name', transform: { op: 'UPPERCASE' } }],
+          },
+        ],
+      };
+
+      const samples = [{ _id: '123', name: '  Alice  ' }];
+
+      // Exact match for users -> accounts
+      const res1 = previewService.preview(multiMapping, samples, 'users', 'accounts');
+      expect(res1).toHaveLength(1);
+      expect(res1[0].transformedRecord).toEqual({
+        account_id: '123',
+        account_name: 'Alice',
+      });
+
+      // Exact match for users -> user_profiles
+      const res2 = previewService.preview(multiMapping, samples, 'users', 'user_profiles');
+      expect(res2).toHaveLength(1);
+      expect(res2[0].transformedRecord).toEqual({
+        profile_id: '123',
+        display_name: '  ALICE  ',
+      });
+
+      // Target that does not exist in mapping must return empty (not silently fallback to object[0])
+      const resUnmatched = previewService.preview(multiMapping, samples, 'orders', 'invoices');
+      expect(resUnmatched).toHaveLength(0);
+    });
+  });
+
+  describe('Finding 9: Autonomous Outbox Publisher Structured Error Logging & Metrics', () => {
+    it('captures dispatch errors in failure metrics and exposes getOutboxPublisherMetrics', async () => {
+      const { MigrationService } = await import('../src/migration/migration.service');
+      const mockQueue: any = {
+        dispatchBatches: vi.fn().mockRejectedValue(new Error('Redis connection timeout')),
+      };
+
+      const customDb: any = {
+        query: vi.fn().mockRejectedValue(new Error('Simulated control-plane db error')),
+      };
+
+      const migrationService = new MigrationService(customDb, mockWorkspaceService, mockQueue);
+
+      migrationService.startAutonomousOutboxPublisher(20);
+
+      // Wait a short time for timer to trigger
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      migrationService.stopAutonomousOutboxPublisher();
+
+      const metrics = migrationService.getOutboxPublisherMetrics();
+      expect(metrics.failureCount).toBeGreaterThan(0);
+      expect(metrics.lastError).toContain('Simulated control-plane db error');
+      expect(metrics.lastErrorTimestamp).toBeInstanceOf(Date);
+    });
+  });
 });

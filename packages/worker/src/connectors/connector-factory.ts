@@ -14,32 +14,48 @@ import {
 
 export type MongoIdType = 'ObjectId' | 'string' | 'number' | 'Long' | 'Decimal128' | 'other';
 
-export function detectBsonId(rawId: any): { idStr: string; idType: MongoIdType } {
+export function detectBsonId(rawId: any): { idStr: string; idType: MongoIdType; typedKey: string } {
   if (rawId === null || rawId === undefined) {
-    return { idStr: '', idType: 'other' };
+    return { idStr: '', idType: 'other', typedKey: 'other:' };
   }
+  let idStr = '';
+  let idType: MongoIdType = 'other';
   if (rawId instanceof ObjectId || (typeof rawId === 'object' && (rawId as any)._bsontype === 'ObjectID')) {
-    return { idStr: rawId.toString(), idType: 'ObjectId' };
+    idStr = rawId.toString();
+    idType = 'ObjectId';
+  } else if (rawId instanceof Long || (typeof rawId === 'object' && (rawId as any)._bsontype === 'Long')) {
+    idStr = rawId.toString();
+    idType = 'Long';
+  } else if (rawId instanceof Decimal128 || (typeof rawId === 'object' && (rawId as any)._bsontype === 'Decimal128')) {
+    idStr = rawId.toString();
+    idType = 'Decimal128';
+  } else if (typeof rawId === 'number') {
+    idStr = String(rawId);
+    idType = 'number';
+  } else if (typeof rawId === 'string') {
+    idStr = rawId;
+    idType = 'string';
+  } else {
+    idStr = String(rawId);
+    idType = 'other';
   }
-  if (rawId instanceof Long || (typeof rawId === 'object' && (rawId as any)._bsontype === 'Long')) {
-    return { idStr: rawId.toString(), idType: 'Long' };
-  }
-  if (rawId instanceof Decimal128 || (typeof rawId === 'object' && (rawId as any)._bsontype === 'Decimal128')) {
-    return { idStr: rawId.toString(), idType: 'Decimal128' };
-  }
-  if (typeof rawId === 'number') {
-    return { idStr: String(rawId), idType: 'number' };
-  }
-  if (typeof rawId === 'string') {
-    return { idStr: rawId, idType: 'string' };
-  }
-  return { idStr: String(rawId), idType: 'other' };
+  const typedKey = `${idType}:${idStr}`;
+  return { idStr, idType, typedKey };
 }
 
 export function reconstructBsonId(lastId: any, lastIdType?: string): any {
   if (lastId === null || lastId === undefined) return lastId;
-  const str = String(lastId);
-  switch (lastIdType) {
+  let str = String(lastId);
+  let type = lastIdType;
+  if (!type && str.includes(':')) {
+    const colonIdx = str.indexOf(':');
+    const prefix = str.substring(0, colonIdx);
+    if (['ObjectId', 'Long', 'Decimal128', 'number', 'string', 'other'].includes(prefix)) {
+      type = prefix as MongoIdType;
+      str = str.substring(colonIdx + 1);
+    }
+  }
+  switch (type) {
     case 'ObjectId':
       return new ObjectId(str);
     case 'Long':
@@ -55,10 +71,10 @@ export function reconstructBsonId(lastId: any, lastIdType?: string): any {
         try {
           return new ObjectId(str);
         } catch {
-          return lastId;
+          return str;
         }
       }
-      return lastId;
+      return str;
   }
 }
 
@@ -357,11 +373,11 @@ export class MongoSourceConnector implements SourceConnector {
 
     const records = batchDocs.map((doc) => {
       const rawId = doc._id;
-      const { idStr, idType } = detectBsonId(rawId);
+      const { idStr, idType, typedKey } = detectBsonId(rawId);
 
       return {
         sourceObject: options.sourceObject,
-        sourceKey: idStr,
+        sourceKey: typedKey,
         sourceCursor: { lastId: idStr, lastIdType: idType },
         payload: doc,
         extractedAt: new Date().toISOString(),

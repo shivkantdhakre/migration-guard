@@ -576,6 +576,19 @@ async function recomputeMigrationRunProgress(runId: string): Promise<void> {
   const client = await dbPool.connect();
   try {
     await client.query('BEGIN');
+
+    // Finding 3: Serialized run-status recomputation using transactional advisory lock and row-level lock
+    await client.query(`SELECT pg_advisory_xact_lock(hashtext('migration_run_status_' || $1))`, [runId]);
+    const runLockRes = await client.query(
+      `SELECT id, status FROM migration_runs WHERE id = $1 FOR UPDATE`,
+      [runId],
+    );
+    if (runLockRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return;
+    }
+    const currentRunStatus = runLockRes.rows[0].status;
+
     const totalsRes = await client.query(
       `SELECT COALESCE(SUM(records_written), 0) AS total_written,
               COALESCE(SUM(records_read), 0) AS total_read
@@ -628,11 +641,12 @@ async function recomputeMigrationRunProgress(runId: string): Promise<void> {
 
       if (nonTerminalCount > 0) {
         // Never mark a migration COMPLETED while any batch is in RETRY_WAIT or another non-terminal state.
-        // If a migration was previously marked terminal (e.g. FAILED) but now has a retry in flight, update back to RUNNING.
+        // If a migration was previously marked terminal FAILED but now has a retry in flight, update back to RUNNING.
+        // Crucially, never regress a COMPLETED run back to RUNNING if racing workers see a non-terminal batch.
         await client.query(
           `UPDATE migration_runs
            SET status = 'RUNNING', completed_at = NULL, updated_at = NOW()
-           WHERE id = $1 AND status NOT IN ('PAUSED', 'CANCELLED', 'RUNNING')`,
+           WHERE id = $1 AND status NOT IN ('PAUSED', 'CANCELLED', 'RUNNING', 'COMPLETED') AND status = 'FAILED'`,
           [runId],
         );
       } else {
@@ -731,10 +745,6 @@ async function reconcileStrandedRunsOnStartup(): Promise<void> {
         }
 
         planRow = planRes.rows[0];
-        const destConnId = planRow.destination_connection_id;
-        if (!destConnId && isStrict) {
-          throw new Error(`[Worker Recovery] No destination connection configured on plan version ${effectivePlanVersionId} for run ${runId}`);
-        }
 
         const mappingJson = typeof planRow.mapping_json === 'string'
           ? JSON.parse(planRow.mapping_json)
@@ -822,6 +832,8 @@ async function reconcileStrandedRunsOnStartup(): Promise<void> {
           srcObj,
           dstObj,
           objDestKey,
+          effectivePlanVersionId,
+          planRow?.mapping_version_id,
         );
 
         console.log(
@@ -1063,8 +1075,8 @@ async function startWorker() {
           if (Array.isArray(mappingJson.objects)) {
             const matches = mappingJson.objects.filter(
               (o: any) =>
-                (o.source?.collection || o.sourceObject || o.source) === job.data.sourceObject &&
-                (o.destination?.table || o.destinationObject || o.destination) === job.data.destinationObject,
+                (o.source?.collection || o.source?.object || o.sourceObject || o.source) === job.data.sourceObject &&
+                (o.destination?.table || o.destination?.object || o.destinationObject || o.destination) === job.data.destinationObject,
             );
             if (matches.length > 1) {
               throw new Error(
@@ -1073,8 +1085,8 @@ async function startWorker() {
             }
             matchedMapping = matches.length === 1 ? matches[0] : null;
           } else if (mappingJson.source && mappingJson.destination) {
-            const sMatch = (mappingJson.source?.collection || mappingJson.source) === job.data.sourceObject;
-            const dMatch = (mappingJson.destination?.table || mappingJson.destination) === job.data.destinationObject;
+            const sMatch = (mappingJson.source?.collection || mappingJson.source?.object || mappingJson.sourceObject || mappingJson.source) === job.data.sourceObject;
+            const dMatch = (mappingJson.destination?.table || mappingJson.destination?.object || mappingJson.destinationObject || mappingJson.destination) === job.data.destinationObject;
             if (sMatch && dMatch) {
               matchedMapping = mappingJson as ObjectMapping;
             }

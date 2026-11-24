@@ -81,15 +81,32 @@ export class RecoveryEngine {
     sourceObject: string,
     destinationObject: string,
     destinationKey = 'id',
+    planVersionId?: string,
+    mappingVersionId?: string,
   ): Promise<ResumePlan> {
     const batches = await this.manifestTracker.listBatches(migrationRunId);
-    const objectBatches = batches.filter((b) => b.sourceObject === sourceObject);
+    const objectBatches = batches.filter(
+      (b) => b.sourceObject === sourceObject && (!destinationObject || !b.destinationObject || b.destinationObject === destinationObject),
+    );
     let checkpoint = await this.checkpointManager.getCheckpoint(migrationRunId, sourceObject);
 
     const reconciliationResults: ReconciliationResult[] = [];
 
     // Examine each batch in sequence
     for (const batch of objectBatches) {
+      const effectivePlanVersionId =
+        batch.planVersionId ||
+        (batch.metadata?.planVersionId as string) ||
+        (batch.metadata?.plan_version_id as string) ||
+        planVersionId ||
+        'resumed_plan';
+      const effectiveMappingVersionId =
+        batch.mappingVersionId ||
+        (batch.metadata?.mappingVersionId as string) ||
+        (batch.metadata?.mapping_version_id as string) ||
+        mappingVersionId ||
+        'resumed_mapping';
+
       if (batch.status === 'COMMITTED') {
         const currentSeq = checkpoint?.lastCommittedSequenceNo ?? 0;
         if (batch.sequenceNo > currentSeq) {
@@ -99,8 +116,8 @@ export class RecoveryEngine {
             migrationRunId,
             sourceObject,
             batch,
-            planVersionId: 'resumed_plan',
-            mappingVersionId: 'resumed_mapping',
+            planVersionId: effectivePlanVersionId,
+            mappingVersionId: effectiveMappingVersionId,
             recordsCommittedCount: batch.recordsWritten ?? 0,
             cursorEnd: batch.sourceCursorEnd,
           });
@@ -117,7 +134,13 @@ export class RecoveryEngine {
       }
 
       // Check intermediate crash sub-stages
-      const reconciled = await this.reconcileBatch(batch, destinationObject, destinationKey);
+      const reconciled = await this.reconcileBatch(
+        batch,
+        destinationObject,
+        destinationKey,
+        effectivePlanVersionId,
+        effectiveMappingVersionId,
+      );
       if (reconciled) {
         reconciliationResults.push(reconciled);
       }
@@ -149,9 +172,24 @@ export class RecoveryEngine {
     batch: MigrationBatch,
     destinationObject: string,
     destinationKey = 'id',
+    planVersionId?: string,
+    mappingVersionId?: string,
   ): Promise<ReconciliationResult | null> {
     const subStage = batch.subStage;
     const status = batch.status;
+
+    const effectivePlanVersionId =
+      batch.planVersionId ||
+      (batch.metadata?.planVersionId as string) ||
+      (batch.metadata?.plan_version_id as string) ||
+      planVersionId ||
+      'resumed_plan';
+    const effectiveMappingVersionId =
+      batch.mappingVersionId ||
+      (batch.metadata?.mappingVersionId as string) ||
+      (batch.metadata?.mapping_version_id as string) ||
+      mappingVersionId ||
+      'resumed_mapping';
 
     // Batches in write-involved stages:
     // MANIFEST_COMMITTED, DESTINATION_WRITTEN, WRITE_STARTED, OUTCOME_UNKNOWN
@@ -176,8 +214,8 @@ export class RecoveryEngine {
             migrationRunId: batch.migrationRunId,
             sourceObject: batch.sourceObject,
             batch,
-            planVersionId: 'resumed_plan',
-            mappingVersionId: 'resumed_mapping',
+            planVersionId: effectivePlanVersionId,
+            mappingVersionId: effectiveMappingVersionId,
             recordsCommittedCount: 0,
             cursorEnd: batch.sourceCursorEnd,
           });
@@ -266,8 +304,8 @@ export class RecoveryEngine {
             migrationRunId: batch.migrationRunId,
             sourceObject: batch.sourceObject,
             batch,
-            planVersionId: 'resumed_plan',
-            mappingVersionId: 'resumed_mapping',
+            planVersionId: effectivePlanVersionId,
+            mappingVersionId: effectiveMappingVersionId,
             recordsCommittedCount: 0,
             cursorEnd: batch.sourceCursorEnd,
           });
@@ -393,8 +431,8 @@ export class RecoveryEngine {
           migrationRunId: batch.migrationRunId,
           sourceObject: batch.sourceObject,
           batch,
-          planVersionId: 'resumed_plan',
-          mappingVersionId: 'resumed_mapping',
+          planVersionId: effectivePlanVersionId,
+          mappingVersionId: effectiveMappingVersionId,
           recordsCommittedCount: destinationKeys.length,
           cursorEnd: batch.sourceCursorEnd,
         });

@@ -663,12 +663,46 @@ describe('Manifest Schema Upgrade & Historical Reconciliation (Run 005.20 Added-
             constraint_type: 'UNIQUE',
             definitionPattern: /UNIQUE \(id, migration_run_id, batch_key\)/,
           },
+          {
+            constraint_name: 'fk_migration_batches_source_connection',
+            constraint_type: 'FOREIGN KEY',
+            definitionPattern: /FOREIGN KEY \(source_connection_id\) REFERENCES connections\(id\)/,
+          },
+          {
+            constraint_name: 'fk_migration_batches_destination_connection',
+            constraint_type: 'FOREIGN KEY',
+            definitionPattern: /FOREIGN KEY \(destination_connection_id\) REFERENCES connections\(id\)/,
+          },
+          {
+            constraint_name: 'fk_migration_batches_plan_version',
+            constraint_type: 'FOREIGN KEY',
+            definitionPattern: /FOREIGN KEY \(plan_version_id\) REFERENCES migration_plan_versions\(id\)/,
+          },
         ],
         removedConstraints: [],
         addedIndexes: [
           {
             index_name: 'uq_migration_batches_identity',
             indexPattern: /CREATE UNIQUE INDEX uq_migration_batches_identity ON .* USING btree \(id, migration_run_id, batch_key\)/,
+          },
+        ],
+        removedIndexes: [],
+      } as ExpectedModifiedTableSpec,
+      id_mappings: {
+        nullabilityChanges: {},
+        addedColumns: [],
+        addedConstraints: [
+          {
+            constraint_name: 'uq_id_mapping_destination',
+            constraint_type: 'UNIQUE',
+            definitionPattern: /UNIQUE \(migration_run_id, destination_object, destination_key\)/,
+          },
+        ],
+        removedConstraints: [],
+        addedIndexes: [
+          {
+            index_name: 'uq_id_mapping_destination',
+            indexPattern: /CREATE UNIQUE INDEX uq_id_mapping_destination ON .* USING btree \(migration_run_id, destination_object, destination_key\)/,
           },
         ],
         removedIndexes: [],
@@ -1937,6 +1971,39 @@ describe('Manifest Schema Upgrade & Historical Reconciliation (Run 005.20 Added-
       index_name: 'uq_migration_batches_identity',
       index_definition: 'CREATE UNIQUE INDEX uq_migration_batches_identity ON migration_batches USING btree (id, migration_run_id, batch_key)',
     });
+
+    postUpgrade.uniqueConstraints.get('id_mappings')!.push({
+      table_name: 'id_mappings',
+      constraint_name: 'uq_id_mapping_destination',
+      constraint_type: 'UNIQUE',
+      definition: 'UNIQUE (migration_run_id, destination_object, destination_key)',
+    });
+    postUpgrade.indexes.get('id_mappings')!.push({
+      table_name: 'id_mappings',
+      index_name: 'uq_id_mapping_destination',
+      index_definition: 'CREATE UNIQUE INDEX uq_id_mapping_destination ON id_mappings USING btree (migration_run_id, destination_object, destination_key)',
+    });
+
+    postUpgrade.foreignKeys.set('migration_batches', [
+      {
+        table_name: 'migration_batches',
+        constraint_name: 'fk_migration_batches_source_connection',
+        constraint_type: 'FOREIGN KEY',
+        definition: 'FOREIGN KEY (source_connection_id) REFERENCES connections(id)',
+      },
+      {
+        table_name: 'migration_batches',
+        constraint_name: 'fk_migration_batches_destination_connection',
+        constraint_type: 'FOREIGN KEY',
+        definition: 'FOREIGN KEY (destination_connection_id) REFERENCES connections(id)',
+      },
+      {
+        table_name: 'migration_batches',
+        constraint_name: 'fk_migration_batches_plan_version',
+        constraint_type: 'FOREIGN KEY',
+        definition: 'FOREIGN KEY (plan_version_id) REFERENCES migration_plan_versions(id)',
+      },
+    ]);
 
     // Populate expected added columns on migration_batches
     const mbAddedCols = (EXPECTED_SCHEMA_DELTA.modifiedTables.migration_batches as any).addedColumns || [];

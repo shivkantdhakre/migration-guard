@@ -6,22 +6,69 @@ export class MappingPreviewService {
   /**
    * Applies mapping DSL to sample records without destination side-effects
    */
-  preview(mappingJson: any, sampleRecords: any[], targetObject?: string): any[] {
+  preview(
+    mappingJson: any,
+    sampleRecords: any[],
+    targetSourceOrObject?: string,
+    targetDestination?: string,
+  ): any[] {
     const defaultRecords = sampleRecords && sampleRecords.length > 0 ? sampleRecords : this.getDefaultSamples();
     let objectMapping = null;
+    const isStrict = process.env.NODE_ENV === 'production' || process.env.ALLOW_SYNTHETIC_SOURCE === 'false';
+
     if (Array.isArray(mappingJson?.objects)) {
-      if (targetObject) {
-        objectMapping = mappingJson.objects.find(
+      if (targetSourceOrObject && targetDestination) {
+        // Exact source AND destination matching (Finding 7)
+        const matches = mappingJson.objects.filter(
           (o: any) =>
-            ((o.source?.collection || o.source?.object || o.source) === targetObject) ||
-            ((o.destination?.table || o.destination?.object || o.destination) === targetObject),
+            ((o.source?.collection || o.source?.object || o.sourceObject || o.source) === targetSourceOrObject) &&
+            ((o.destination?.table || o.destination?.object || o.destinationObject || o.destination) === targetDestination),
         );
-      }
-      if (!objectMapping && mappingJson.objects.length === 1) {
-        objectMapping = mappingJson.objects[0];
+        if (matches.length > 1) {
+          throw new Error(
+            `Ambiguous mapping: multiple approved objects match source '${targetSourceOrObject}' and destination '${targetDestination}'.`,
+          );
+        }
+        objectMapping = matches.length === 1 ? matches[0] : null;
+      } else if (targetSourceOrObject) {
+        // Target specified: require exact match; do not silently fall back to unrelated single-mapping
+        const matches = mappingJson.objects.filter(
+          (o: any) =>
+            ((o.source?.collection || o.source?.object || o.sourceObject || o.source) === targetSourceOrObject) &&
+            ((o.destination?.table || o.destination?.object || o.destinationObject || o.destination) === targetSourceOrObject),
+        );
+        const candidateMatches = matches.length === 1 ? matches : mappingJson.objects.filter(
+          (o: any) =>
+            ((o.source?.collection || o.source?.object || o.sourceObject || o.source) === targetSourceOrObject) ||
+            ((o.destination?.table || o.destination?.object || o.destinationObject || o.destination) === targetSourceOrObject),
+        );
+        if (candidateMatches.length > 1 && isStrict) {
+          throw new Error(
+            `Ambiguous mapping: multiple approved objects match target '${targetSourceOrObject}'.`,
+          );
+        }
+        objectMapping = candidateMatches.length === 1 ? candidateMatches[0] : null;
+      } else if (!targetSourceOrObject && !targetDestination) {
+        if (mappingJson.objects.length === 1) {
+          objectMapping = mappingJson.objects[0];
+        }
       }
     } else if (mappingJson?.source && mappingJson?.destination) {
-      objectMapping = mappingJson;
+      if (targetSourceOrObject && targetDestination) {
+        const sMatch = (mappingJson.source?.collection || mappingJson.source?.object || mappingJson.sourceObject || mappingJson.source) === targetSourceOrObject;
+        const dMatch = (mappingJson.destination?.table || mappingJson.destination?.object || mappingJson.destinationObject || mappingJson.destination) === targetDestination;
+        if (sMatch && dMatch) {
+          objectMapping = mappingJson;
+        }
+      } else if (targetSourceOrObject) {
+        const sMatch = (mappingJson.source?.collection || mappingJson.source?.object || mappingJson.sourceObject || mappingJson.source) === targetSourceOrObject;
+        const dMatch = (mappingJson.destination?.table || mappingJson.destination?.object || mappingJson.destinationObject || mappingJson.destination) === targetSourceOrObject;
+        if (sMatch || dMatch) {
+          objectMapping = mappingJson;
+        }
+      } else {
+        objectMapping = mappingJson;
+      }
     }
 
     if (!objectMapping) return [];

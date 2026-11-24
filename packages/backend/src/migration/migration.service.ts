@@ -7,6 +7,7 @@ import {
   Optional,
   OnModuleInit,
   OnModuleDestroy,
+  Logger,
 } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
 import { WorkspaceService } from '../workspace/workspace.service';
@@ -14,9 +15,13 @@ import { QueueService, MigrationJobPayload } from '../queue/queue.service';
 
 @Injectable()
 export class MigrationService implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(MigrationService.name);
   private outboxTimer: NodeJS.Timeout | null = null;
   private isPublishing = false;
   private static activeOutboxLocks = new Set<string>();
+  private outboxPublisherFailureCount = 0;
+  private lastOutboxPublisherError: string | null = null;
+  private lastOutboxPublisherErrorTimestamp: Date | null = null;
 
   constructor(
     private db: DatabaseService,
@@ -38,9 +43,23 @@ export class MigrationService implements OnModuleInit, OnModuleDestroy {
       try {
         await this.dispatchPendingOutboxBatches();
       } catch (err: any) {
-        // Resilient autonomous background publisher
+        this.outboxPublisherFailureCount++;
+        this.lastOutboxPublisherError = err?.message || String(err);
+        this.lastOutboxPublisherErrorTimestamp = new Date();
+        this.logger.error(
+          `[OutboxPublisher] Autonomous outbox dispatch cycle failed (total failures: ${this.outboxPublisherFailureCount}): ${err?.message}`,
+          err?.stack,
+        );
       }
     }, intervalMs);
+  }
+
+  public getOutboxPublisherMetrics() {
+    return {
+      failureCount: this.outboxPublisherFailureCount,
+      lastError: this.lastOutboxPublisherError,
+      lastErrorTimestamp: this.lastOutboxPublisherErrorTimestamp,
+    };
   }
 
   public stopAutonomousOutboxPublisher() {

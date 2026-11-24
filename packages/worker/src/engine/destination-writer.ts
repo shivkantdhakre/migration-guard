@@ -68,22 +68,31 @@ export class DestinationWriter {
     // Detect collisions where different source records map to the same destination key
     const dedupedRecords = this.deduplicateRecords(batch.records);
 
-    // Cross-batch collision detection: detect if destinationKey was already mapped to a different sourceKey in this migration run
+    // Cross-batch collision detection & atomic reservation:
+    // Atomically claim destination keys before writing, preventing race conditions between concurrent workers.
     if (this.idTracker) {
-      for (const r of dedupedRecords) {
-        const existingSourceKey = await this.idTracker.getSourceKey(
-          options.migrationRunId,
-          batch.destinationObject,
-          r.destinationKey,
-        );
-        if (existingSourceKey && existingSourceKey !== r.sourceKey) {
-          throw Object.assign(
-            new Error(
-              `Collision detected: distinct source record '${r.sourceKey}' maps to destinationKey '${r.destinationKey}' ` +
-                `which was already written by source record '${existingSourceKey}' in migration run '${options.migrationRunId}'.`,
-            ),
-            { code: 'COLLISION_DETECTED' },
+      if (typeof this.idTracker.claimBatchMappings === 'function') {
+        const mappingsToClaim = dedupedRecords.map((r) => ({
+          migrationRunId: options.migrationRunId,
+          sourceObject: options.sourceObject,
+          sourceKey: r.sourceKey,
+          destinationObject: batch.destinationObject,
+          destinationKey: r.destinationKey,
+        }));
+        await this.idTracker.claimBatchMappings(mappingsToClaim);
+      } else {
+        // Fallback for mock/custom idTracker instances lacking claimBatchMappings
+        for (const record of dedupedRecords) {
+          const existingSourceKey = await this.idTracker.getSourceKey(
+            options.migrationRunId,
+            batch.destinationObject,
+            record.destinationKey,
           );
+          if (existingSourceKey && existingSourceKey !== record.sourceKey) {
+            throw new Error(
+              `Collision detected: distinct source record '${record.sourceKey}' maps to destinationKey '${record.destinationKey}' which was already written by source record '${existingSourceKey}' in migration run '${options.migrationRunId}'. Upsert rejected to prevent data loss.`,
+            );
+          }
         }
       }
     }

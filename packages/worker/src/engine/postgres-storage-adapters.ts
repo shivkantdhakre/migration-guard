@@ -453,16 +453,79 @@ export class PostgresStorageAdapters
 
   // --- IdMappingStorageAdapter ---
 
+  async claimMappings(
+    mappings: Array<{
+      migrationRunId: string;
+      sourceObject: string;
+      sourceKey: string;
+      destinationObject: string;
+      destinationKey: string;
+    }>,
+  ): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      for (const m of mappings) {
+        const check = await client.query(
+          `SELECT source_key FROM id_mappings
+           WHERE migration_run_id = $1 AND destination_object = $2 AND destination_key = $3
+           FOR UPDATE`,
+          [m.migrationRunId, m.destinationObject, m.destinationKey],
+        );
+        if (check.rows.length > 0 && check.rows[0].source_key !== m.sourceKey) {
+          throw Object.assign(
+            new Error(
+              `Collision detected: distinct source record '${m.sourceKey}' maps to destinationKey '${m.destinationKey}' ` +
+                `which was already claimed by source record '${check.rows[0].source_key}' in migration run '${m.migrationRunId}'.`,
+            ),
+            { code: 'COLLISION_DETECTED' },
+          );
+        }
+
+        await client.query(
+          `INSERT INTO id_mappings (
+             migration_run_id, source_object, source_key, destination_object, destination_key
+           ) VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT (migration_run_id, source_object, source_key)
+           DO UPDATE SET destination_key = EXCLUDED.destination_key`,
+          [m.migrationRunId, m.sourceObject, m.sourceKey, m.destinationObject, m.destinationKey],
+        );
+      }
+      await client.query('COMMIT');
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      if (err.code === '23505' && (err.constraint === 'uq_id_mapping_destination' || String(err.message).includes('uq_id_mapping_destination'))) {
+        throw Object.assign(
+          new Error(`Collision detected: concurrent batch claimed destinationKey in migration run.`),
+          { code: 'COLLISION_DETECTED' },
+        );
+      }
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
   async saveMappings(mappings: IdMappingRecord[]): Promise<void> {
     for (const m of mappings) {
-      await this.pool.query(
-        `INSERT INTO id_mappings (
-           migration_run_id, source_object, source_key, destination_object, destination_key
-         ) VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (migration_run_id, source_object, source_key)
-         DO UPDATE SET destination_key = EXCLUDED.destination_key`,
-        [m.migrationRunId, m.sourceObject, m.sourceKey, m.destinationObject, m.destinationKey],
-      );
+      try {
+        await this.pool.query(
+          `INSERT INTO id_mappings (
+             migration_run_id, source_object, source_key, destination_object, destination_key
+           ) VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT (migration_run_id, source_object, source_key)
+           DO UPDATE SET destination_key = EXCLUDED.destination_key`,
+          [m.migrationRunId, m.sourceObject, m.sourceKey, m.destinationObject, m.destinationKey],
+        );
+      } catch (err: any) {
+        if (err.code === '23505' && (err.constraint === 'uq_id_mapping_destination' || String(err.message).includes('uq_id_mapping_destination'))) {
+          throw Object.assign(
+            new Error(`Collision detected: concurrent batch claimed destinationKey in migration run.`),
+            { code: 'COLLISION_DETECTED' },
+          );
+        }
+        throw err;
+      }
     }
   }
 

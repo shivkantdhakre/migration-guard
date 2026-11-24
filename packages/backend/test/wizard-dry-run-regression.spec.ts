@@ -1,5 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { resolvePlanVersionId, evaluateDryRunResponse } from '../../frontend/lib/wizard-utils';
+import {
+  resolvePlanVersionId,
+  evaluateDryRunResponse,
+  canTransitionWizardStep,
+  WizardStepGateState,
+} from '../../frontend/lib/wizard-utils';
 import { DryRunService } from '../src/plan/dry-run.service';
 import { PlanService } from '../src/plan/plan.service';
 import { ApprovalService } from '../src/plan/approval.service';
@@ -418,26 +423,100 @@ describe('Priority 1: Wizard Dry-Run Integration & Fail-Closed Regression Suite'
     });
   });
 
-  describe('4. Step 10 Progression Gating Verification', () => {
-    it('blocks progression when currentStep is 10 and dry run has not passed', () => {
-      const currentStep = 10;
-      const dryRunSuccess = false;
+  describe('4. Centralized Wizard Stepper & Prerequisite Gating Verification', () => {
+    const readyGateState: WizardStepGateState = {
+      isDemo: false,
+      sourceConnId: 'conn-src-1',
+      targetConnId: 'conn-dst-1',
+      sourceHandshakeSuccess: true,
+      targetHandshakeSuccess: true,
+      dryRunSuccess: true,
+      isConfigModifiedSinceDryRun: false,
+      planStatus: 'APPROVED',
+      hasMigrationRun: true,
+      migrationRunStatus: 'COMPLETED',
+      hasValidationRun: true,
+    };
 
-      const canAdvance = currentStep !== 10 || dryRunSuccess === true;
-      expect(canAdvance).toBe(false);
+    it('blocks Step 1->2 and Step 2->3 when connections are unselected', () => {
+      expect(
+        canTransitionWizardStep(2, 1, { ...readyGateState, sourceConnId: '' }).allowed,
+      ).toBe(false);
+      expect(
+        canTransitionWizardStep(3, 2, { ...readyGateState, targetConnId: '' }).allowed,
+      ).toBe(false);
     });
 
-    it('allows progression when currentStep is 10 and dry run passed', () => {
-      const currentStep = 10;
-      const dryRunSuccess = true;
-
-      const canAdvance = currentStep !== 10 || dryRunSuccess === true;
-      expect(canAdvance).toBe(true);
+    it('blocks Step 3->4 and direct stepper jumps past Step 3 until dual handshake succeeds', () => {
+      const noHandshake = { ...readyGateState, targetHandshakeSuccess: false };
+      expect(canTransitionWizardStep(4, 3, noHandshake).allowed).toBe(false);
+      expect(canTransitionWizardStep(8, 1, noHandshake).allowed).toBe(false);
+      expect(canTransitionWizardStep(4, 3, readyGateState).allowed).toBe(true);
     });
 
-    it('allows progression on non-gated steps', () => {
-      expect(5 !== 10 || false).toBe(true);
-      expect(9 !== 10 || false).toBe(true);
+    it('blocks Step 10->11 and direct Step 9->11 jump unless dry run passed on unmodified config', () => {
+      expect(
+        canTransitionWizardStep(11, 10, { ...readyGateState, dryRunSuccess: false }).allowed,
+      ).toBe(false);
+      expect(
+        canTransitionWizardStep(11, 9, {
+          ...readyGateState,
+          dryRunSuccess: true,
+          isConfigModifiedSinceDryRun: true,
+        }).allowed,
+      ).toBe(false);
+      expect(canTransitionWizardStep(11, 10, readyGateState).allowed).toBe(true);
+    });
+
+    it('blocks direct jumps to Step 12 unless plan version is APPROVED in live mode', () => {
+      expect(
+        canTransitionWizardStep(12, 11, { ...readyGateState, planStatus: 'DRAFT' }).allowed,
+      ).toBe(false);
+      expect(
+        canTransitionWizardStep(12, 5, { ...readyGateState, planStatus: 'DRAFT' }).allowed,
+      ).toBe(false);
+      expect(canTransitionWizardStep(12, 11, readyGateState).allowed).toBe(true);
+    });
+
+    it('blocks Step 12->13 validation jump until live migration run reaches COMPLETED', () => {
+      for (const nonCompleted of ['QUEUED', 'RUNNING', 'PAUSED', 'FAILED']) {
+        expect(
+          canTransitionWizardStep(13, 12, {
+            ...readyGateState,
+            migrationRunStatus: nonCompleted,
+          }).allowed,
+        ).toBe(false);
+      }
+      expect(
+        canTransitionWizardStep(13, 12, { ...readyGateState, hasMigrationRun: false }).allowed,
+      ).toBe(false);
+      expect(canTransitionWizardStep(13, 12, readyGateState).allowed).toBe(true);
+    });
+
+    it('blocks Step 13->14 audit export jump until validation run exists in live mode', () => {
+      expect(
+        canTransitionWizardStep(14, 13, { ...readyGateState, hasValidationRun: false }).allowed,
+      ).toBe(false);
+      expect(canTransitionWizardStep(14, 13, readyGateState).allowed).toBe(true);
+    });
+
+    it('always permits backward navigation and non-gated intermediate steps', () => {
+      expect(
+        canTransitionWizardStep(3, 12, {
+          ...readyGateState,
+          dryRunSuccess: false,
+          planStatus: 'DRAFT',
+        }).allowed,
+      ).toBe(true);
+      expect(
+        canTransitionWizardStep(6, 5, {
+          ...readyGateState,
+          dryRunSuccess: false,
+          planStatus: 'DRAFT',
+          hasMigrationRun: false,
+          hasValidationRun: false,
+        }).allowed,
+      ).toBe(true);
     });
   });
 

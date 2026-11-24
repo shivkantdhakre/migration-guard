@@ -196,6 +196,7 @@ export type RunStatus =
   | 'PAUSING'
   | 'PAUSED'
   | 'MIGRATED'
+  | 'COMPLETED'
   | 'VALIDATING'
   | 'VALIDATED'
   | 'FAILED'

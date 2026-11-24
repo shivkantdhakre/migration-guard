@@ -50,7 +50,12 @@ import {
 } from '../../lib/types';
 import { formatNumber, truncateHash } from '../../lib/utils';
 import { apiClient, isDemoModeEnabled } from '../../lib/api-client';
-import { resolvePlanVersionId, evaluateDryRunResponse } from '../../lib/wizard-utils';
+import {
+  resolvePlanVersionId,
+  evaluateDryRunResponse,
+  canTransitionWizardStep,
+  WizardStepGateState,
+} from '../../lib/wizard-utils';
 
 const WIZARD_STEPS = [
   { id: 1, name: 'Source Select', desc: 'Select MongoDB database' },
@@ -179,7 +184,6 @@ export default function MigrationWizardPage() {
   const [reportError, setReportError] = useState<string | null>(null);
   const [reportSuccessMessage, setReportSuccessMessage] = useState<string | null>(null);
 
-  const nextStep = () => setCurrentStep((prev) => Math.min(prev + 1, 14));
   const prevStep = () => setCurrentStep((prev) => Math.max(prev - 1, 1));
 
   // Requirement 4: Invalidate plan version and dry run when execution configuration changes
@@ -774,13 +778,58 @@ export default function MigrationWizardPage() {
       configAtDryRun.batchSize !== batchSize ||
       configAtDryRun.concurrency !== concurrency ||
       configAtDryRun.writeMode !== writeMode ||
-      (plan?.planHash && configAtDryRun.planHash !== plan.planHash)
+      Boolean(plan?.planHash && configAtDryRun.planHash !== plan.planHash)
     );
   }, [configAtDryRun, sourceConnId, targetConnId, selectedMappingVersion, batchSize, concurrency, writeMode, plan?.planHash]);
 
+  const buildStepGateState = useCallback(
+    (overrides?: Partial<WizardStepGateState>): WizardStepGateState => ({
+      isDemo,
+      sourceConnId,
+      targetConnId,
+      sourceHandshakeSuccess: Boolean(sourceHandshake?.success),
+      targetHandshakeSuccess: Boolean(targetHandshake?.success),
+      dryRunSuccess,
+      isConfigModifiedSinceDryRun: Boolean(isConfigModifiedSinceDryRun),
+      planStatus: plan?.status ?? null,
+      hasMigrationRun: Boolean(migrationRun?.id),
+      migrationRunStatus: runProgress?.status || migrationRun?.status || null,
+      hasValidationRun: Boolean(validationRun?.id),
+      ...overrides,
+    }),
+    [
+      isDemo,
+      sourceConnId,
+      targetConnId,
+      sourceHandshake?.success,
+      targetHandshake?.success,
+      dryRunSuccess,
+      isConfigModifiedSinceDryRun,
+      plan?.status,
+      migrationRun?.id,
+      migrationRun?.status,
+      runProgress?.status,
+      validationRun?.id,
+    ],
+  );
+
+  const getStepGate = useCallback(
+    (targetStep: number, overrides?: Partial<WizardStepGateState>) =>
+      canTransitionWizardStep(targetStep, currentStep, buildStepGateState(overrides)),
+    [currentStep, buildStepGateState],
+  );
+
+  const nextStep = (overrides?: Partial<WizardStepGateState>) => {
+    setCurrentStep((prev) => {
+      const target = Math.min(prev + 1, 14);
+      const gate = canTransitionWizardStep(target, prev, buildStepGateState(overrides));
+      return gate.allowed ? target : prev;
+    });
+  };
+
   const handlePlanApproved = (approvedPlan: MigrationPlan) => {
     setPlan(approvedPlan);
-    nextStep();
+    nextStep({ planStatus: approvedPlan.status });
   };
 
   /**
@@ -849,8 +898,15 @@ export default function MigrationWizardPage() {
    */
   const handleTriggerValidation = async () => {
     const runId = migrationRun?.id;
+    const effectiveRunStatus = runProgress?.status || migrationRun?.status;
     if (!runId) {
       setValError('Cannot trigger validation: no completed migration run available.');
+      return;
+    }
+    if (!isDemo && effectiveRunStatus !== 'COMPLETED') {
+      setValError(
+        `Cannot trigger validation while migration run is '${effectiveRunStatus || 'UNKNOWN'}'. Execution must reach 'COMPLETED' first.`,
+      );
       return;
     }
 
@@ -970,17 +1026,27 @@ export default function MigrationWizardPage() {
           {WIZARD_STEPS.map((s) => {
             const isCompleted = s.id < currentStep;
             const isCurrent = s.id === currentStep;
+            const gate = getStepGate(s.id);
+            const isDisabled = !isCurrent && !gate.allowed;
 
             return (
               <button
                 key={s.id}
-                onClick={() => setCurrentStep(s.id)}
+                onClick={() => {
+                  if (gate.allowed) {
+                    setCurrentStep(s.id);
+                  }
+                }}
+                disabled={isDisabled}
+                title={gate.allowed ? s.desc : gate.reason || 'Complete prior required step before advancing'}
                 className={`flex flex-col items-center gap-1 group focus:outline-none transition-all ${
                   isCurrent
                     ? 'text-emerald-400 font-bold'
+                    : isDisabled
+                    ? 'text-infra-muted/35 opacity-50 cursor-not-allowed'
                     : isCompleted
-                    ? 'text-infra-text'
-                    : 'text-infra-muted/60'
+                    ? 'text-infra-text cursor-pointer'
+                    : 'text-infra-muted/60 cursor-pointer'
                 }`}
               >
                 <div
@@ -1783,15 +1849,17 @@ export default function MigrationWizardPage() {
 
             {(() => {
               const effectiveRunStatus = runProgress?.status || migrationRun?.status || 'NOT STARTED';
-              const hasRealProgress = runProgress && typeof runProgress.percentage === 'number';
+              const rawPercentage = runProgress?.percentageComplete ?? runProgress?.percentage;
+              const hasRealProgress = typeof rawPercentage === 'number';
               const displayPct = hasRealProgress
-                ? Number(runProgress.percentage)
+                ? Number(rawPercentage)
                 : isDemo && migrationRun
                 ? 85
                 : 0;
+              const rawThroughput = runProgress?.recordsPerSecond ?? runProgress?.throughputRecordsPerSec;
               const displayThroughput =
-                runProgress?.throughputRecordsPerSec !== undefined
-                  ? `${runProgress.throughputRecordsPerSec} records/sec`
+                rawThroughput !== undefined
+                  ? `${rawThroughput} records/sec`
                   : isDemo && migrationRun
                   ? '425 records/sec'
                   : migrationRun
@@ -1861,15 +1929,40 @@ export default function MigrationWizardPage() {
                 </p>
               </div>
 
-              <button
-                onClick={handleTriggerValidation}
-                disabled={isValidating || (!isDemo && !migrationRun?.id)}
-                className="flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-mono font-semibold bg-amber-500/20 hover:bg-amber-500/30 disabled:opacity-40 text-amber-300 border border-amber-500/40"
-              >
-                {isValidating ? <RefreshCw size={12} className="animate-spin" /> : <ShieldCheck size={12} />}
-                <span>Trigger Validation</span>
-              </button>
+              {(() => {
+                const effectiveRunStatus = runProgress?.status || migrationRun?.status;
+                const liveValidationBlocked =
+                  !isDemo && (!migrationRun?.id || effectiveRunStatus !== 'COMPLETED');
+
+                return (
+                  <button
+                    onClick={handleTriggerValidation}
+                    disabled={isValidating || liveValidationBlocked}
+                    title={
+                      liveValidationBlocked
+                        ? !migrationRun?.id
+                          ? 'Start and complete a migration run in Step 12 first'
+                          : `Validation requires migration run status 'COMPLETED' (current: ${effectiveRunStatus || 'UNKNOWN'})`
+                        : undefined
+                    }
+                    className="flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-mono font-semibold bg-amber-500/20 hover:bg-amber-500/30 disabled:opacity-40 disabled:cursor-not-allowed text-amber-300 border border-amber-500/40"
+                  >
+                    {isValidating ? <RefreshCw size={12} className="animate-spin" /> : <ShieldCheck size={12} />}
+                    <span>Trigger Validation</span>
+                  </button>
+                );
+              })()}
             </div>
+
+            {!isDemo && migrationRun?.id && (runProgress?.status || migrationRun?.status) !== 'COMPLETED' && (
+              <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/30 text-xs font-mono text-amber-300 flex items-center gap-2">
+                <AlertTriangle size={15} className="text-amber-400 shrink-0" />
+                <span>
+                  Validation locked: migration run must reach <code className="text-emerald-300">COMPLETED</code> (current status:{' '}
+                  <code>{runProgress?.status || migrationRun?.status || 'UNKNOWN'}</code>).
+                </span>
+              </div>
+            )}
 
             {valError && (
               <div className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/30 text-xs font-mono text-rose-300 flex items-center gap-2">
@@ -2026,40 +2119,31 @@ export default function MigrationWizardPage() {
             <span>Previous Step</span>
           </button>
 
-          <div className="flex items-center gap-3">
-            {currentStep === 3 && (!sourceHandshake?.success || !targetHandshake?.success) && (
-              <span className="text-[11px] font-mono text-amber-400 flex items-center gap-1.5 bg-amber-500/10 px-2.5 py-1 rounded border border-amber-500/20">
-                <AlertTriangle size={13} />
-                <span>Live connection handshake required before advancing</span>
-              </span>
-            )}
-            {currentStep === 10 && !dryRunSuccess && (
-              <span className="text-[11px] font-mono text-amber-400 flex items-center gap-1.5 bg-amber-500/10 px-2.5 py-1 rounded border border-amber-500/20">
-                <AlertTriangle size={13} />
-                <span>Dry run required before advancing</span>
-              </span>
-            )}
+          {(() => {
+            const nextGate = currentStep < 14 ? getStepGate(currentStep + 1) : { allowed: false, reason: null };
+            const isNextDisabled = currentStep === 14 || !nextGate.allowed;
 
-            <button
-              onClick={nextStep}
-              disabled={
-                currentStep === 14 ||
-                (currentStep === 3 && (!sourceHandshake?.success || !targetHandshake?.success)) ||
-                (currentStep === 10 && !dryRunSuccess)
-              }
-              className="flex items-center gap-1.5 px-5 py-2 rounded-lg text-xs font-mono font-semibold bg-emerald-500 hover:bg-emerald-400 disabled:opacity-30 disabled:cursor-not-allowed text-infra-base transition-colors shadow-lg shadow-emerald-500/20"
-              title={
-                currentStep === 3 && (!sourceHandshake?.success || !targetHandshake?.success)
-                  ? 'Verify connections in Step 3 before advancing'
-                  : currentStep === 10 && !dryRunSuccess
-                  ? 'Execute and pass dry run to advance'
-                  : undefined
-              }
-            >
-              <span>{currentStep === 14 ? 'Completed' : 'Next Step'}</span>
-              <ArrowRight size={14} />
-            </button>
-          </div>
+            return (
+              <div className="flex items-center gap-3">
+                {currentStep < 14 && !nextGate.allowed && nextGate.reason && (
+                  <span className="text-[11px] font-mono text-amber-400 flex items-center gap-1.5 bg-amber-500/10 px-2.5 py-1 rounded border border-amber-500/20">
+                    <AlertTriangle size={13} />
+                    <span>{nextGate.reason}</span>
+                  </span>
+                )}
+
+                <button
+                  onClick={() => nextStep()}
+                  disabled={isNextDisabled}
+                  className="flex items-center gap-1.5 px-5 py-2 rounded-lg text-xs font-mono font-semibold bg-emerald-500 hover:bg-emerald-400 disabled:opacity-30 disabled:cursor-not-allowed text-infra-base transition-colors shadow-lg shadow-emerald-500/20"
+                  title={!nextGate.allowed && nextGate.reason ? nextGate.reason : undefined}
+                >
+                  <span>{currentStep === 14 ? 'Completed' : 'Next Step'}</span>
+                  <ArrowRight size={14} />
+                </button>
+              </div>
+            );
+          })()}
         </div>
       </div>
 

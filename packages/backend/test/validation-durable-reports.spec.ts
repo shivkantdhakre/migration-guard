@@ -84,7 +84,7 @@ describe('Validation & Durable Reports Acceptance Suite (Section 9.4)', () => {
     );
     await db.query(
       `INSERT INTO migration_runs (id, workspace_id, project_id, plan_version_id, status, created_by)
-       VALUES ($1, $2, $3, $4, 'RUNNING', $5)`,
+       VALUES ($1, $2, $3, $4, 'COMPLETED', $5)`,
       [runId, wsId, proj.rows[0].id, ver.rows[0].id, user.user.id],
     );
   }
@@ -218,7 +218,7 @@ describe('Validation & Durable Reports Acceptance Suite (Section 9.4)', () => {
     );
     const runRes = await db.query(
       `INSERT INTO migration_runs (workspace_id, project_id, plan_version_id, status, created_by)
-       VALUES ($1, $2, $3, 'RUNNING', $4) RETURNING id`,
+       VALUES ($1, $2, $3, 'COMPLETED', $4) RETURNING id`,
       [wsId, projRes.rows[0].id, verRes.rows[0].id, user.user.id],
     );
 

@@ -174,6 +174,19 @@ describe('P0/P1 Regression: Fail-Closed Validation', () => {
     );
     const run = await services.migrationService.startMigrationRun(planVersion.id, reg.user.id);
 
+    // Validation must strictly reject non-COMPLETED runs across non-terminal/incomplete states
+    for (const nonCompletedStatus of ['QUEUED', 'RUNNING', 'PAUSED', 'FAILED'] as const) {
+      await services.db.query(`UPDATE migration_runs SET status = $1 WHERE id = $2`, [
+        nonCompletedStatus,
+        run.runId,
+      ]);
+      await expect(
+        services.validationService.triggerValidation(run.runId, reg.user.id),
+      ).rejects.toThrow(/must reach 'COMPLETED'/i);
+    }
+
+    await services.db.query(`UPDATE migration_runs SET status = 'COMPLETED' WHERE id = $1`, [run.runId]);
+
     // Validation must fail closed - should throw, not proceed with fake 'customers' mapping
     await expect(
       services.validationService.triggerValidation(run.runId, reg.user.id),
@@ -236,6 +249,7 @@ describe('P0/P1 Regression: Fail-Closed Validation', () => {
       );
       await svc.approvalService.submitApproval(planVersion.id, { decision: 'APPROVE', planHash: planVersion.plan_hash, comment: 'ok' }, reg.user.id);
       const run = await svc.migrationService.startMigrationRun(planVersion.id, reg.user.id);
+      await svc.db.query(`UPDATE migration_runs SET status = 'COMPLETED' WHERE id = $1`, [run.runId]);
 
       // Must throw when credentials fail - no silent fallback
       await expect(
@@ -311,6 +325,7 @@ describe('P0/P1 Regression: Source Count Completeness', () => {
 
     await services.approvalService.submitApproval(planVersion.id, { decision: 'APPROVE', planHash: planVersion.plan_hash, comment: 'ok' }, reg.user.id);
     const run = await services.migrationService.startMigrationRun(planVersion.id, reg.user.id);
+    await services.db.query(`UPDATE migration_runs SET status = 'COMPLETED' WHERE id = $1`, [run.runId]);
 
     // Insert some record manifests (simulating 2 written records)
     const batchRes = await services.db.query(

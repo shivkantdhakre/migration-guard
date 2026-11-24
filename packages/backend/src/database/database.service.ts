@@ -544,6 +544,82 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     'NOTIFY',
     'LISTEN',
     'UNLISTEN',
+    'OPERATOR',
+  ]);
+
+  private static readonly SAFE_BUILTIN_OPERATORS = new Set([
+    '=',
+    '<>',
+    '!=',
+    '<',
+    '>',
+    '<=',
+    '>=',
+    '+',
+    '-',
+    '*',
+    '/',
+    '%',
+    '||',
+    '::',
+  ]);
+
+  private static readonly SAFE_BUILTIN_CAST_TYPES = new Set([
+    'INT',
+    'INT2',
+    'INT4',
+    'INT8',
+    'INTEGER',
+    'SMALLINT',
+    'BIGINT',
+    'NUMERIC',
+    'DECIMAL',
+    'REAL',
+    'FLOAT',
+    'FLOAT4',
+    'FLOAT8',
+    'DOUBLE',
+    'PRECISION',
+    'TEXT',
+    'VARCHAR',
+    'CHAR',
+    'CHARACTER',
+    'VARYING',
+    'BPCHAR',
+    'BOOLEAN',
+    'BOOL',
+    'UUID',
+    'DATE',
+    'TIME',
+    'TIMETZ',
+    'TIMESTAMP',
+    'TIMESTAMPTZ',
+    'INTERVAL',
+    'JSON',
+    'JSONB',
+  ]);
+
+  private static readonly ALLOWED_WORDS_BEFORE_STRING = new Set([
+    'SELECT',
+    'FROM',
+    'WHERE',
+    'AND',
+    'OR',
+    'NOT',
+    'IN',
+    'ON',
+    'WHEN',
+    'THEN',
+    'ELSE',
+    'CASE',
+    'AS',
+    'VALUES',
+    'HAVING',
+    'DATE',
+    'TIME',
+    'TIMESTAMP',
+    'TIMESTAMPTZ',
+    'INTERVAL',
   ]);
 
   private static readonly ALLOWED_CLAUSE_KEYWORDS_BEFORE_PAREN = new Set([
@@ -830,18 +906,32 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         }
       }
 
-      // 10. Structural punctuation
-      if (ch === '(' || ch === ')' || ch === ',' || ch === ';' || ch === '.') {
+      // 10. Structural punctuation (including [] strictly for validated array type casts)
+      if (ch === '(' || ch === ')' || ch === ',' || ch === ';' || ch === '.' || ch === '[' || ch === ']') {
         tokens.push({ type: 'PUNCT', value: ch, upper: ch });
         i++;
         continue;
       }
 
-      // 11. Multi-char and single-char operators (::, <>, !=, <=, >=, ||, etc.)
-      const opMatch = /^(?:::|<>|!=|<=|>=|\|\||->>|->|#>>|#>|[=<>+\-*/%!~&|^@#?:])/.exec(sql.slice(i));
-      if (opMatch) {
-        tokens.push({ type: 'OP', value: opMatch[0], upper: opMatch[0] });
-        i += opMatch[0].length;
+      // 11. PostgreSQL-style contiguous operator scanning (stopping cleanly before -- or /* comments)
+      if (ch === ':') {
+        if (sql[i + 1] === ':') {
+          tokens.push({ type: 'OP', value: '::', upper: '::' });
+          i += 2;
+          continue;
+        }
+        return null; // Reject standalone ':' outside parameter/cast syntax
+      }
+
+      if (/[+\-*/<>=~!@#%^&|`?]/.test(ch)) {
+        const start = i;
+        while (i < n && /[+\-*/<>=~!@#%^&|`?]/.test(sql[i])) {
+          if (sql[i] === '-' && sql[i + 1] === '-') break;
+          if (sql[i] === '/' && sql[i + 1] === '*') break;
+          i++;
+        }
+        const opVal = sql.slice(start, i);
+        tokens.push({ type: 'OP', value: opVal, upper: opVal });
         continue;
       }
 
@@ -853,16 +943,85 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Evaluates whether a SQL statement passes our strict read-only SQL-lexer & pure-function
-   * allowlist policy, failing closed on any unrecognized constructs or potential side effects.
+   * Validates a built-in scalar PostgreSQL cast target type starting at tokens[startIdx]
+   * (e.g. INT, UUID[], VARCHAR(64), NUMERIC(10, 2), DOUBLE PRECISION, CHARACTER VARYING,
+   * TIMESTAMP [WITH|WITHOUT TIME ZONE]). Rejects any custom type, quoted type, or schema-qualified type.
+   */
+  private static validateSafeBuiltinTypeAt(
+    tokens: Array<{ type: string; value: string; upper: string }>,
+    startIdx: number,
+  ): { nextIdx: number; bracketIndexes: number[] } | null {
+    const first = tokens[startIdx];
+    if (!first || first.type !== 'WORD' || !DatabaseService.SAFE_BUILTIN_CAST_TYPES.has(first.upper)) {
+      return null;
+    }
+
+    let idx = startIdx + 1;
+    const w0 = first.upper;
+    const w1 = tokens[idx];
+
+    if (w0 === 'DOUBLE' && w1?.type === 'WORD' && w1.upper === 'PRECISION') {
+      idx++;
+    } else if (w0 === 'CHARACTER' && w1?.type === 'WORD' && w1.upper === 'VARYING') {
+      idx++;
+    } else if (
+      (w0 === 'TIMESTAMP' || w0 === 'TIME') &&
+      w1?.type === 'WORD' &&
+      (w1.upper === 'WITH' || w1.upper === 'WITHOUT') &&
+      tokens[idx + 1]?.type === 'WORD' &&
+      tokens[idx + 1]?.upper === 'TIME' &&
+      tokens[idx + 2]?.type === 'WORD' &&
+      tokens[idx + 2]?.upper === 'ZONE'
+    ) {
+      idx += 3;
+    }
+
+    // Optional precision/scale modifier: (N) or (N, M)
+    if (tokens[idx]?.type === 'PUNCT' && tokens[idx].value === '(') {
+      idx++;
+      if (tokens[idx]?.type !== 'NUMBER') return null;
+      idx++;
+      if (tokens[idx]?.type === 'PUNCT' && tokens[idx].value === ',') {
+        idx++;
+        if (tokens[idx]?.type !== 'NUMBER') return null;
+        idx++;
+      }
+      if (tokens[idx]?.type !== 'PUNCT' || tokens[idx].value !== ')') return null;
+      idx++;
+    }
+
+    // Optional array modifier: []
+    const bracketIndexes: number[] = [];
+    while (tokens[idx]?.type === 'PUNCT' && tokens[idx].value === '[') {
+      if (tokens[idx + 1]?.type !== 'PUNCT' || tokens[idx + 1].value !== ']') {
+        return null;
+      }
+      bracketIndexes.push(idx, idx + 1);
+      idx += 2;
+    }
+
+    // Disallow dotted schema qualifiers right after or inside type (e.g., pg_catalog.my_type)
+    if (tokens[idx]?.type === 'PUNCT' && tokens[idx].value === '.') {
+      return null;
+    }
+
+    return { nextIdx: idx, bracketIndexes };
+  }
+
+  /**
+   * Evaluates whether a SQL statement passes our strict read-only SQL-tokenizer & pure-function
+   * allowlist policy, failing closed on unrecognized constructs, custom casts, and custom operators.
    *
+   * Note: This is a lexical token/structural allowlist policy (not a full PostgreSQL grammar AST parser).
    * Policy (fail-closed):
    * - Single statement only (rejects multi-statement queries).
    * - Must begin with SELECT (rejects WITH CTEs, EXPLAIN/EXPLAIN ANALYZE, SET, SHOW, CALL, DO, DDL, DML).
-   * - Disallows mutating/locking keywords (INSERT, UPDATE, DELETE, INTO, FOR UPDATE/SHARE, etc.).
+   * - Disallows mutating/locking keywords (INSERT, UPDATE, DELETE, INTO, FOR UPDATE/SHARE, OPERATOR, etc.).
+   * - Allowlists only built-in pure operators (=, <>, !=, <, >, <=, >=, +, -, *, /, %, ||, ::).
+   * - Rejects custom casts ($1::custom_type, CAST($1 AS custom_type), custom_type 'str') and only allows built-in scalar types.
    * - Rejects quoted-identifier function calls ("fn"()) and schema-qualified calls (schema.fn()).
    * - Rejects ANY unrecognized function call not present in SAFE_PURE_SQL_FUNCTIONS
-   *   (blocking pg_notify, set_config, nextval, setval, pg_advisory_lock, and arbitrary custom functions).
+   *   (blocking pg_notify, set_config, nextval, setval, pg_advisory_lock, and arbitrary UDFs).
    */
   public static isSafeRetryableReadQuery(sql: string): boolean {
     if (!sql || typeof sql !== 'string' || !sql.trim()) return false;
@@ -886,10 +1045,36 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       return false;
     }
 
+    const allowedBracketIndexes = new Set<number>();
+
     for (let i = 0; i < tokens.length; i++) {
       const tok = tokens[i];
       const next = tokens[i + 1];
       const prev = tokens[i - 1];
+
+      // 1. Validate all operators strictly against built-in allowlist (rejects <->, @@, @>, ##, etc.)
+      if (tok.type === 'OP') {
+        if (!DatabaseService.SAFE_BUILTIN_OPERATORS.has(tok.value)) {
+          return false;
+        }
+        // Validate '::target_type' casts strictly against built-in scalar types
+        if (tok.value === '::') {
+          const typeCheck = DatabaseService.validateSafeBuiltinTypeAt(tokens, i + 1);
+          if (!typeCheck) {
+            return false;
+          }
+          for (const bi of typeCheck.bracketIndexes) {
+            allowedBracketIndexes.add(bi);
+          }
+        }
+      }
+
+      // 2. Reject '[' / ']' outside validated array casts
+      if (tok.type === 'PUNCT' && (tok.value === '[' || tok.value === ']')) {
+        if (!allowedBracketIndexes.has(i)) {
+          return false;
+        }
+      }
 
       if (tok.type === 'WORD') {
         if (DatabaseService.FORBIDDEN_READONLY_KEYWORDS.has(tok.upper)) {
@@ -907,9 +1092,45 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
             return false;
           }
         }
+
+        // Reject PostgreSQL prefix typed string literals like: my_custom_type 'payload'
+        if (next && next.type === 'STRING' && !DatabaseService.ALLOWED_WORDS_BEFORE_STRING.has(tok.upper)) {
+          return false;
+        }
+
+        // Validate CAST(expr AS type) target types strictly
+        if (tok.upper === 'CAST' && next?.type === 'PUNCT' && next.value === '(') {
+          let depth = 1;
+          let asIndex = -1;
+          let closeIndex = -1;
+          for (let j = i + 2; j < tokens.length; j++) {
+            const inner = tokens[j];
+            if (inner.type === 'PUNCT' && inner.value === '(') depth++;
+            else if (inner.type === 'PUNCT' && inner.value === ')') {
+              depth--;
+              if (depth === 0) {
+                closeIndex = j;
+                break;
+              }
+            } else if (depth === 1 && inner.type === 'WORD' && inner.upper === 'AS') {
+              asIndex = j;
+            }
+          }
+          if (asIndex === -1 || closeIndex === -1 || asIndex + 1 >= closeIndex) {
+            return false;
+          }
+          const typeSlice = tokens.slice(asIndex + 1, closeIndex);
+          const typeCheck = DatabaseService.validateSafeBuiltinTypeAt(typeSlice, 0);
+          if (!typeCheck || typeCheck.nextIdx !== typeSlice.length) {
+            return false;
+          }
+          for (const relIdx of typeCheck.bracketIndexes) {
+            allowedBracketIndexes.add(asIndex + 1 + relIdx);
+          }
+        }
       }
 
-      // Inspect any call-like construct followed by '('
+      // 3. Inspect any call-like construct followed by '('
       if (next && next.type === 'PUNCT' && next.value === '(') {
         if (tok.type === 'QUOTED_IDENT') {
           return false; // Reject quoted function calls like "pg_notify"(...)

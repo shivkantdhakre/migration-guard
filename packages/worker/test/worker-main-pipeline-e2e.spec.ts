@@ -222,19 +222,8 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.15)', { t
     try {
       adminPool = new pg.Pool({ connectionString: dbUrl, ssl, max: 3, connectionTimeoutMillis: 5000 });
       await adminPool.query('SELECT 1');
-      await adminPool.query(`CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`).catch(() => {});
       await adminPool.query(`CREATE SCHEMA IF NOT EXISTS "${testSchema}"`);
       schemaCreated = true;
-      await adminPool.query(
-        `CREATE OR REPLACE FUNCTION "${testSchema}".uuid_generate_v4()
-         RETURNS uuid AS $$
-         BEGIN
-           RETURN public.uuid_generate_v4();
-         EXCEPTION WHEN OTHERS THEN
-           RETURN gen_random_uuid();
-         END;
-         $$ LANGUAGE plpgsql;`
-      );
       testPool = new pg.Pool({
         connectionString: dbUrl,
         ssl,
@@ -243,6 +232,16 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.15)', { t
         options: `-c search_path="${testSchema}"`,
       });
       await testPool.query('SELECT 1');
+      // Provide schema-local uuid_generate_v4() via core PostgreSQL gen_random_uuid()
+      // so zero global extensions need to be installed outside the disposable schema.
+      await testPool.query(
+        `CREATE OR REPLACE FUNCTION "${testSchema}".uuid_generate_v4()
+         RETURNS uuid AS $$
+         BEGIN
+           RETURN gen_random_uuid();
+         END;
+         $$ LANGUAGE plpgsql;`
+      );
     } catch (err: any) {
       if (schemaCreated && adminPool) {
         await adminPool.query(`DROP SCHEMA IF EXISTS "${testSchema}" CASCADE`).catch(() => {});
@@ -321,8 +320,11 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.15)', { t
 
     try {
       // 4. Execute Canonical Production Schema strictly inside isolated testSchema
+      // Strip global CREATE EXTENSION from the in-memory SQL copy since uuid_generate_v4() is already scoped inside testSchema
       if (schemaSqlPath && fs.existsSync(schemaSqlPath)) {
-        const canonicalSchemaSql = fs.readFileSync(schemaSqlPath, 'utf8');
+        const canonicalSchemaSql = fs
+          .readFileSync(schemaSqlPath, 'utf8')
+          .replace(/CREATE\s+EXTENSION\s+IF\s+NOT\s+EXISTS\s+"uuid-ossp"\s*;/gi, '');
         await testPool.query(canonicalSchemaSql);
       }
 

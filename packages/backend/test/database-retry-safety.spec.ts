@@ -34,6 +34,12 @@ describe('DatabaseService Retry-Safety SQL Classifier & Query Policy', () => {
       ).toBe(true);
     });
 
+    it('allows safe built-in casts (e.g. ::uuid[], ::int, CAST(... AS VARCHAR(64)))', () => {
+      expect(DatabaseService.isSafeRetryableReadQuery('SELECT id FROM connections WHERE id = ANY($1::uuid[]) AND workspace_id = $2')).toBe(true);
+      expect(DatabaseService.isSafeRetryableReadQuery('SELECT COUNT(*)::int AS cnt FROM migration_batches')).toBe(true);
+      expect(DatabaseService.isSafeRetryableReadQuery('SELECT CAST($1 AS DOUBLE PRECISION), CAST($2 AS CHARACTER VARYING(100))')).toBe(true);
+    });
+
     it('does not falsely block mutating words inside string literals or quoted identifiers', () => {
       expect(
         DatabaseService.isSafeRetryableReadQuery(
@@ -98,6 +104,25 @@ describe('DatabaseService Retry-Safety SQL Classifier & Query Policy', () => {
       expect(DatabaseService.isSafeRetryableReadQuery('SELECT * INTO backup_users FROM users')).toBe(false);
       expect(DatabaseService.isSafeRetryableReadQuery('SELECT * FROM migration_runs WHERE id = $1 FOR UPDATE')).toBe(false);
       expect(DatabaseService.isSafeRetryableReadQuery('SELECT * FROM migration_runs WHERE id = $1 FOR SHARE')).toBe(false);
+    });
+
+    it('rejects custom casts and custom operators that could invoke user-defined functions', () => {
+      // PostgreSQL custom types & custom casts backed by functions
+      expect(DatabaseService.isSafeRetryableReadQuery('SELECT $1::my_custom_type')).toBe(false);
+      expect(DatabaseService.isSafeRetryableReadQuery('SELECT $1::public.my_custom_type')).toBe(false);
+      expect(DatabaseService.isSafeRetryableReadQuery('SELECT $1::"my_custom_type"')).toBe(false);
+      expect(DatabaseService.isSafeRetryableReadQuery('SELECT CAST($1 AS my_custom_type)')).toBe(false);
+      expect(DatabaseService.isSafeRetryableReadQuery('SELECT CAST($1 AS public.my_custom_type)')).toBe(false);
+      expect(DatabaseService.isSafeRetryableReadQuery("SELECT my_custom_type 'payload'")).toBe(false);
+      expect(DatabaseService.isSafeRetryableReadQuery("SELECT 'migration_batches'::regclass")).toBe(false);
+
+      // Custom / non-allowlisted operators and OPERATOR(schema.op) syntax
+      expect(DatabaseService.isSafeRetryableReadQuery('SELECT $1 <-> $2')).toBe(false);
+      expect(DatabaseService.isSafeRetryableReadQuery('SELECT $1 @> $2')).toBe(false);
+      expect(DatabaseService.isSafeRetryableReadQuery('SELECT $1 @@ $2')).toBe(false);
+      expect(DatabaseService.isSafeRetryableReadQuery('SELECT $1 ### $2')).toBe(false);
+      expect(DatabaseService.isSafeRetryableReadQuery('SELECT $1 OPERATOR(public.my_op) $2')).toBe(false);
+      expect(DatabaseService.isSafeRetryableReadQuery('SELECT $1=-1')).toBe(false);
     });
 
     it('fails closed on malformed, unclosed strings, comments, or dollar-quotes', () => {

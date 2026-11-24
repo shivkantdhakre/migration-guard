@@ -68,6 +68,12 @@ export class ValidationService {
     const run = runRes.rows[0];
     await this.workspaceService.assertWorkspaceAccess(run.workspace_id, userId, 'Engineer');
 
+    if (run.status !== 'COMPLETED') {
+      throw new BadRequestException(
+        `Cannot trigger validation for migration run in status '${run.status}'. Migration run must reach 'COMPLETED' before validation can run.`,
+      );
+    }
+
     // Fetch plan version to check connection validity
     let planVersion: any = null;
     if (run.plan_version_id) {

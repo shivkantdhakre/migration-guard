@@ -529,6 +529,14 @@ describe('Wizard Routes & Service/Controller Integration Suite', () => {
       const batches = await migrationService.listBatches(runId, 1, 10, userA.user.id);
       expect(batches).toBeDefined();
 
+      // Verification gate: validation must strictly reject runs that have not reached COMPLETED
+      await expect(
+        validationService.triggerValidation(runId, userA.user.id),
+      ).rejects.toThrow(/must reach 'COMPLETED'/i);
+
+      // Advance run to COMPLETED (simulating worker completion in service-level suite) before validation
+      await db.query(`UPDATE migration_runs SET status = 'COMPLETED', completed_at = NOW() WHERE id = $1`, [runId]);
+
       // Trigger Validation (calls POST /migration-runs/:runId/validations)
       const valRun = await validationService.triggerValidation(runId, userA.user.id);
       expect(valRun.id).toBeDefined();

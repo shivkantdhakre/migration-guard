@@ -18,7 +18,7 @@ import { Drawer } from '../common/Drawer';
 import { Badge } from '../common/Badge';
 import { CopilotMessage } from '../../lib/types';
 import { MOCK_COPILOT_MESSAGES } from '../../lib/mock-data';
-import { apiClient } from '../../lib/api-client';
+import { apiClient, isDemoModeEnabled } from '../../lib/api-client';
 
 export interface CopilotDrawerProps {
   isOpen: boolean;
@@ -26,9 +26,22 @@ export interface CopilotDrawerProps {
 }
 
 export function CopilotDrawer({ isOpen, onClose }: CopilotDrawerProps) {
-  const [messages, setMessages] = useState<CopilotMessage[]>(MOCK_COPILOT_MESSAGES);
+  const [messages, setMessages] = useState<CopilotMessage[]>(
+    isDemoModeEnabled()
+      ? MOCK_COPILOT_MESSAGES
+      : [
+          {
+            id: 'copilot-welcome',
+            sender: 'assistant',
+            content:
+              'Welcome to MigrationGuard Copilot. I can inspect deterministic migration evidence, explain schema mismatches, and formulate human-reviewed remediation proposals for operator sign-off.',
+            timestamp: new Date().toISOString(),
+          },
+        ]
+  );
   const [input, setInput] = useState('');
   const [isSending, setIsSending] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
   const [proposalStatus, setProposalStatus] = useState<Record<string, 'PENDING' | 'ACCEPTED' | 'REJECTED'>>({
     'prop-001': 'PENDING',
   });
@@ -53,12 +66,25 @@ export function CopilotDrawer({ isOpen, onClose }: CopilotDrawerProps) {
     setMessages((prev) => [...prev, userMsg]);
     setInput('');
     setIsSending(true);
+    setSendError(null);
 
     try {
       const response = await apiClient.sendCopilotMessage(text);
       setMessages((prev) => [...prev, response]);
-    } catch {
-      // Handled by apiClient fallback
+    } catch (err: any) {
+      // Surface the error inline rather than silently dropping the failed response
+      const errMsg = err?.message || 'Copilot request failed. Backend AI service may be unavailable.';
+      setSendError(errMsg);
+      // Append a system-level error message into the conversation so the user sees it
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `error-${Date.now()}`,
+          sender: 'assistant' as const,
+          content: `⚠ ${errMsg}`,
+          timestamp: new Date().toISOString(),
+        },
+      ]);
     } finally {
       setIsSending(false);
     }
@@ -222,6 +248,17 @@ export function CopilotDrawer({ isOpen, onClose }: CopilotDrawerProps) {
 
         {/* Input Box */}
         <div className="pt-2">
+          {sendError && (
+            <div className="mb-2 px-3 py-2 rounded-lg bg-rose-500/10 border border-rose-500/30 text-xs text-rose-300 font-mono flex items-center justify-between">
+              <span className="truncate">{sendError}</span>
+              <button
+                onClick={() => setSendError(null)}
+                className="ml-2 text-rose-400 hover:text-rose-300 shrink-0 text-[10px] font-semibold"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
           <form
             onSubmit={(e) => {
               e.preventDefault();

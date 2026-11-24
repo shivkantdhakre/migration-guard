@@ -18,25 +18,48 @@ import {
 } from 'lucide-react';
 import { Badge } from '../../components/common/Badge';
 import { DatabaseConnection } from '../../lib/types';
-import { apiClient } from '../../lib/api-client';
+import { apiClient, isDemoModeEnabled } from '../../lib/api-client';
 import { MOCK_CONNECTIONS } from '../../lib/mock-data';
 import { CredentialRotationModal } from '../../components/connections/CredentialRotationModal';
 import { ConnectionModal } from '../../components/connections/ConnectionModal';
 import { formatDate } from '../../lib/utils';
 
 export default function ConnectionsPage() {
-  const [connections, setConnections] = useState<DatabaseConnection[]>(MOCK_CONNECTIONS);
+  const [connections, setConnections] = useState<DatabaseConnection[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [selectedConnectionForRotation, setSelectedConnectionForRotation] = useState<DatabaseConnection | null>(null);
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [testingId, setTestingId] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<Record<string, { success: boolean; latencyMs: number; message: string }>>({});
+  const isDemo = isDemoModeEnabled();
+
+  const loadConnections = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await apiClient.getConnections();
+      if (Array.isArray(data) && data.length > 0) {
+        setConnections(data);
+      } else if (isDemo) {
+        setConnections(MOCK_CONNECTIONS);
+      } else {
+        setConnections([]);
+      }
+    } catch (err: any) {
+      if (isDemo) {
+        setConnections(MOCK_CONNECTIONS);
+      } else {
+        setError(err?.message || 'Failed to retrieve connection profiles from backend.');
+        setConnections([]);
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
-    async function load() {
-      const data = await apiClient.getConnections();
-      setConnections(data);
-    }
-    load();
+    loadConnections();
   }, []);
 
   const handleTestConnection = async (connId: string) => {
@@ -107,7 +130,49 @@ export default function ConnectionsPage() {
 
       {/* Connections List */}
       <div className="grid grid-cols-1 gap-4">
-        {connections.map((conn) => {
+        {loading && (
+          <div className="p-8 rounded-xl bg-infra-card border border-infra-border flex flex-col items-center justify-center space-y-3">
+            <RefreshCw size={24} className="animate-spin text-emerald-400" />
+            <span className="text-xs font-mono text-infra-muted">Loading database connection profiles...</span>
+          </div>
+        )}
+
+        {error && !loading && (
+          <div className="p-4 rounded-xl bg-red-500/10 border border-red-500/30 text-xs font-mono text-red-400 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <AlertTriangle size={16} className="text-red-400 shrink-0" />
+              <span>{error}</span>
+            </div>
+            <button
+              onClick={loadConnections}
+              className="flex items-center gap-1.5 px-3 py-1 rounded bg-red-500/20 hover:bg-red-500/30 text-red-200 border border-red-500/40 transition-colors"
+            >
+              <RefreshCw size={12} />
+              <span>Retry</span>
+            </button>
+          </div>
+        )}
+
+        {!loading && !error && connections.length === 0 && (
+          <div className="p-12 rounded-xl bg-infra-card border border-infra-border flex flex-col items-center justify-center text-center space-y-3">
+            <div className="w-12 h-12 rounded-xl bg-infra-surface border border-infra-border flex items-center justify-center text-infra-muted">
+              <Database size={24} />
+            </div>
+            <h3 className="text-sm font-bold text-infra-heading font-mono">No Connections Configured</h3>
+            <p className="text-xs text-infra-muted max-w-sm">
+              No source or target database connections found in this workspace. Register a MongoDB or PostgreSQL connection to begin migration planning.
+            </p>
+            <button
+              onClick={() => setIsAddModalOpen(true)}
+              className="mt-2 flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold bg-emerald-500 hover:bg-emerald-400 text-infra-base transition-colors"
+            >
+              <Plus size={14} />
+              <span>Add Connection</span>
+            </button>
+          </div>
+        )}
+
+        {!loading && connections.map((conn) => {
           const isTesting = testingId === conn.id;
           const testRes = testResults[conn.id];
 

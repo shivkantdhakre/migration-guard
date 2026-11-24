@@ -17,10 +17,11 @@ import {
   FileSpreadsheet,
   FileCheck,
   Sparkles,
+  RefreshCw,
 } from 'lucide-react';
 import { Badge } from '../components/common/Badge';
 import { formatNumber, formatDate, truncateHash } from '../lib/utils';
-import { apiClient } from '../lib/api-client';
+import { apiClient, isDemoModeEnabled } from '../lib/api-client';
 import { MigrationRun, ValidationRun, AuditEvent } from '../lib/types';
 import {
   MOCK_MIGRATION_RUNS,
@@ -30,38 +31,97 @@ import {
 } from '../lib/mock-data';
 
 export default function DashboardPage() {
-  const [runs, setRuns] = useState<MigrationRun[]>(MOCK_MIGRATION_RUNS);
-  const [valRun, setValRun] = useState<ValidationRun>(MOCK_VALIDATION_RUN);
-  const [audits, setAudits] = useState<AuditEvent[]>(MOCK_AUDIT_EVENTS);
+  const [runs, setRuns] = useState<MigrationRun[]>(
+    isDemoModeEnabled() ? MOCK_MIGRATION_RUNS : []
+  );
+  const [valRun, setValRun] = useState<ValidationRun | null>(
+    isDemoModeEnabled() ? MOCK_VALIDATION_RUN : null
+  );
+  const [audits, setAudits] = useState<AuditEvent[]>(
+    isDemoModeEnabled() ? MOCK_AUDIT_EVENTS : []
+  );
+  const [connectionCount, setConnectionCount] = useState<number>(
+    isDemoModeEnabled() ? MOCK_CONNECTIONS.length : 0
+  );
+  const [loading, setLoading] = useState<boolean>(!isDemoModeEnabled());
+  const [error, setError] = useState<string | null>(null);
+
+  const loadDashboardData = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const [runsRes, auditsRes, connsRes] = await Promise.allSettled([
+        apiClient.getMigrationRuns(),
+        apiClient.getAuditEvents(),
+        apiClient.getConnections(),
+      ]);
+
+      let loadedRuns: MigrationRun[] = [];
+      if (runsRes.status === 'fulfilled' && Array.isArray(runsRes.value)) {
+        loadedRuns = runsRes.value;
+        setRuns(loadedRuns);
+      } else if (isDemoModeEnabled()) {
+        loadedRuns = MOCK_MIGRATION_RUNS;
+        setRuns(loadedRuns);
+      } else {
+        setRuns([]);
+      }
+
+      if (auditsRes.status === 'fulfilled' && Array.isArray(auditsRes.value)) {
+        setAudits(auditsRes.value);
+      } else if (isDemoModeEnabled()) {
+        setAudits(MOCK_AUDIT_EVENTS);
+      } else {
+        setAudits([]);
+      }
+
+      if (connsRes.status === 'fulfilled' && Array.isArray(connsRes.value)) {
+        setConnectionCount(connsRes.value.length);
+      } else if (isDemoModeEnabled()) {
+        setConnectionCount(MOCK_CONNECTIONS.length);
+      } else {
+        setConnectionCount(0);
+      }
+
+      // If we have runs, load validation data for the first run
+      if (loadedRuns.length > 0) {
+        try {
+          const v = await apiClient.getValidationRun(loadedRuns[0].id);
+          setValRun(v);
+        } catch {
+          if (isDemoModeEnabled()) {
+            setValRun(MOCK_VALIDATION_RUN);
+          } else {
+            setValRun(null);
+          }
+        }
+      } else if (isDemoModeEnabled()) {
+        setValRun(MOCK_VALIDATION_RUN);
+      } else {
+        setValRun(null);
+      }
+    } catch (err: any) {
+      if (isDemoModeEnabled()) {
+        setRuns(MOCK_MIGRATION_RUNS);
+        setValRun(MOCK_VALIDATION_RUN);
+        setAudits(MOCK_AUDIT_EVENTS);
+        setConnectionCount(MOCK_CONNECTIONS.length);
+      } else {
+        setError(err?.message || 'Failed to load dashboard data.');
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
-    async function load() {
-      try {
-        const [r, v, a] = await Promise.allSettled([
-          apiClient.getMigrationRuns(),
-          apiClient.getValidationRun('run-7c1cda51-0001'),
-          apiClient.getAuditEvents(),
-        ]);
-        if (r.status === 'fulfilled' && r.value && Array.isArray(r.value) && r.value.length > 0) {
-          setRuns(r.value);
-        }
-        if (v.status === 'fulfilled' && v.value) {
-          setValRun(v.value);
-        }
-        if (a.status === 'fulfilled' && a.value && Array.isArray(a.value) && a.value.length > 0) {
-          setAudits(a.value);
-        }
-      } catch (err) {
-        console.warn('[DashboardPage] Notice loading live data:', err);
-      }
-    }
-    load();
+    loadDashboardData();
   }, []);
 
-  const activeRun = runs.find((r) => r.status === 'RUNNING') || runs[0] || MOCK_MIGRATION_RUNS[0];
-  const progressPercent = Math.round(
-    ((activeRun?.processedRecords || 0) / (activeRun?.totalRecords || 1)) * 100
-  );
+  const activeRun = runs.find((r) => r.status === 'RUNNING') || (runs.length > 0 ? runs[0] : null);
+  const progressPercent = activeRun
+    ? Math.round(((activeRun.processedRecords || 0) / (activeRun.totalRecords || 1)) * 100)
+    : 0;
 
   return (
     <div className="space-y-6">
@@ -80,6 +140,16 @@ export default function DashboardPage() {
         </div>
 
         <div className="flex items-center gap-3">
+          <button
+            onClick={loadDashboardData}
+            disabled={loading}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-mono font-medium text-infra-text bg-infra-card border border-infra-border hover:border-infra-borderHover transition-colors disabled:opacity-50"
+            title="Refresh dashboard"
+          >
+            <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
+            <span>Refresh</span>
+          </button>
+
           <Link
             href="/wizard"
             className="flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold bg-emerald-500 hover:bg-emerald-400 text-infra-base transition-colors shadow-lg shadow-emerald-500/20"
@@ -89,6 +159,22 @@ export default function DashboardPage() {
           </Link>
         </div>
       </div>
+
+      {/* Error state */}
+      {error && !isDemoModeEnabled() && (
+        <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 flex items-center justify-between text-xs font-mono">
+          <div className="flex items-center gap-2">
+            <AlertTriangle size={15} className="text-rose-400 shrink-0" />
+            <span>{error}</span>
+          </div>
+          <button
+            onClick={loadDashboardData}
+            className="px-2.5 py-1 rounded bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 text-[11px] text-rose-200 transition-colors"
+          >
+            Retry
+          </button>
+        </div>
+      )}
 
       {/* Top Metric Cards */}
       <div className="grid grid-cols-4 gap-4">
@@ -103,7 +189,7 @@ export default function DashboardPage() {
           </div>
           <div className="mt-1 flex items-center gap-1.5 text-[11px] text-emerald-400 font-mono">
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-            <span>1 Active • 1 Validated</span>
+            <span>{runs.filter((r) => r.status === 'RUNNING').length} Active • {runs.filter((r) => r.status === 'MIGRATED' || r.status === 'VALIDATED').length} Completed</span>
           </div>
         </div>
 
@@ -114,10 +200,10 @@ export default function DashboardPage() {
             <TrendingUp size={14} className="text-sky-400" />
           </div>
           <div className="mt-2 text-2xl font-bold text-infra-heading font-mono">
-            {formatNumber(activeRun.processedRecords)}
+            {activeRun ? formatNumber(activeRun.processedRecords) : '0'}
           </div>
           <div className="mt-1 text-[11px] text-infra-muted font-mono">
-            Target: {formatNumber(activeRun.totalRecords)} ({progressPercent}%)
+            {activeRun ? `Target: ${formatNumber(activeRun.totalRecords)} (${progressPercent}%)` : 'No active target'}
           </div>
         </div>
 
@@ -128,7 +214,7 @@ export default function DashboardPage() {
             <TrendingUp size={14} className="text-indigo-400" />
           </div>
           <div className="mt-2 text-2xl font-bold text-infra-heading font-mono">
-            {activeRun.throughputPerSecond} <span className="text-xs text-infra-muted font-normal">rec/sec</span>
+            {activeRun ? activeRun.throughputPerSecond : 0} <span className="text-xs text-infra-muted font-normal">rec/sec</span>
           </div>
           <div className="mt-1 text-[11px] text-emerald-400 font-mono">
             Bounded memory: 4 worker threads
@@ -142,87 +228,108 @@ export default function DashboardPage() {
             <AlertTriangle size={14} className="text-amber-400" />
           </div>
           <div className="mt-2 text-2xl font-bold text-amber-400 font-mono">
-            {valRun.totalDiscrepancies} Discrepancies
+            {valRun ? valRun.totalDiscrepancies : 0} Discrepancies
           </div>
           <div className="mt-1 text-[11px] text-amber-300 font-mono">
-            Exact 45-defect seeded test match
+            {valRun?.totalDiscrepancies === 45 ? 'Exact 45-defect seeded test match' : 'Validation status tracked'}
           </div>
         </div>
       </div>
 
       {/* Active Migration Run Spotlight */}
-      <div className="p-5 rounded-xl bg-infra-card border border-infra-border space-y-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
-            <div>
-              <div className="flex items-center gap-2">
-                <h3 className="text-sm font-bold text-infra-heading font-mono">
-                  Active Run: {activeRun.id}
-                </h3>
-                <Badge variant="emerald" dot size="sm">
-                  {activeRun.status}
-                </Badge>
+      {activeRun ? (
+        <div className="p-5 rounded-xl bg-infra-card border border-infra-border space-y-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <span className={`w-2.5 h-2.5 rounded-full ${activeRun.status === 'RUNNING' ? 'bg-emerald-400 animate-pulse' : 'bg-infra-muted'}`} />
+              <div>
+                <div className="flex items-center gap-2">
+                  <h3 className="text-sm font-bold text-infra-heading font-mono">
+                    Active Run: {activeRun.id}
+                  </h3>
+                  <Badge variant={activeRun.status === 'RUNNING' ? 'emerald' : 'slate'} dot size="sm">
+                    {activeRun.status}
+                  </Badge>
+                </div>
+                <p className="text-xs text-infra-muted font-mono mt-0.5">
+                  Plan Hash: {truncateHash(activeRun.planHash, 24)}
+                </p>
               </div>
-              <p className="text-xs text-infra-muted font-mono mt-0.5">
-                Plan Hash: {truncateHash(activeRun.planHash, 24)}
-              </p>
+            </div>
+
+            <Link
+              href="/migrations"
+              className="flex items-center gap-1.5 text-xs font-mono text-emerald-400 hover:text-emerald-300"
+            >
+              <span>Inspect Batches</span>
+              <ArrowRight size={13} />
+            </Link>
+          </div>
+
+          {/* Real-time Progress Bar */}
+          <div className="space-y-1.5">
+            <div className="flex justify-between text-xs font-mono">
+              <span className="text-infra-text">
+                Processed: {formatNumber(activeRun.processedRecords)} / {formatNumber(activeRun.totalRecords)} records
+              </span>
+              <span className="text-emerald-400 font-bold">{progressPercent}%</span>
+            </div>
+            <div className="w-full h-2 rounded-full bg-infra-surface overflow-hidden border border-infra-border">
+              <div
+                className="h-full bg-gradient-to-r from-emerald-500 to-teal-400 rounded-full transition-all duration-500"
+                style={{ width: `${progressPercent}%` }}
+              />
             </div>
           </div>
 
-          <Link
-            href="/migrations"
-            className="flex items-center gap-1.5 text-xs font-mono text-emerald-400 hover:text-emerald-300"
-          >
-            <span>Inspect Batches</span>
-            <ArrowRight size={13} />
-          </Link>
-        </div>
-
-        {/* Real-time Progress Bar */}
-        <div className="space-y-1.5">
-          <div className="flex justify-between text-xs font-mono">
-            <span className="text-infra-text">
-              Processed: {formatNumber(activeRun.processedRecords)} / {formatNumber(activeRun.totalRecords)} records
-            </span>
-            <span className="text-emerald-400 font-bold">{progressPercent}%</span>
-          </div>
-          <div className="w-full h-2 rounded-full bg-infra-surface overflow-hidden border border-infra-border">
-            <div
-              className="h-full bg-gradient-to-r from-emerald-500 to-teal-400 rounded-full transition-all duration-500"
-              style={{ width: `${progressPercent}%` }}
-            />
-          </div>
-        </div>
-
-        {/* Detailed Status Counters */}
-        <div className="grid grid-cols-4 gap-3 pt-2 text-center text-xs font-mono border-t border-infra-border/50">
-          <div className="p-2 rounded-lg bg-infra-surface border border-infra-border">
-            <span className="text-infra-muted block text-[10px] uppercase">Committed</span>
-            <span className="text-emerald-400 font-bold text-sm">
-              {formatNumber(activeRun.succeededRecords)}
-            </span>
-          </div>
-          <div className="p-2 rounded-lg bg-infra-surface border border-infra-border">
-            <span className="text-infra-muted block text-[10px] uppercase">Failed (Segregated)</span>
-            <span className="text-rose-400 font-bold text-sm">
-              {activeRun.failedRecords}
-            </span>
-          </div>
-          <div className="p-2 rounded-lg bg-infra-surface border border-infra-border">
-            <span className="text-infra-muted block text-[10px] uppercase">Skipped</span>
-            <span className="text-infra-muted font-bold text-sm">
-              {activeRun.skippedRecords}
-            </span>
-          </div>
-          <div className="p-2 rounded-lg bg-infra-surface border border-infra-border">
-            <span className="text-infra-muted block text-[10px] uppercase">Active Batch</span>
-            <span className="text-sky-400 font-bold text-sm">
-              {activeRun.activeBatchId || 'batch-017'}
-            </span>
+          {/* Detailed Status Counters */}
+          <div className="grid grid-cols-4 gap-3 pt-2 text-center text-xs font-mono border-t border-infra-border/50">
+            <div className="p-2 rounded-lg bg-infra-surface border border-infra-border">
+              <span className="text-infra-muted block text-[10px] uppercase">Committed</span>
+              <span className="text-emerald-400 font-bold text-sm">
+                {formatNumber(activeRun.succeededRecords)}
+              </span>
+            </div>
+            <div className="p-2 rounded-lg bg-infra-surface border border-infra-border">
+              <span className="text-infra-muted block text-[10px] uppercase">Failed (Segregated)</span>
+              <span className="text-rose-400 font-bold text-sm">
+                {activeRun.failedRecords}
+              </span>
+            </div>
+            <div className="p-2 rounded-lg bg-infra-surface border border-infra-border">
+              <span className="text-infra-muted block text-[10px] uppercase">Skipped</span>
+              <span className="text-infra-muted font-bold text-sm">
+                {activeRun.skippedRecords}
+              </span>
+            </div>
+            <div className="p-2 rounded-lg bg-infra-surface border border-infra-border">
+              <span className="text-infra-muted block text-[10px] uppercase">Active Batch</span>
+              <span className="text-sky-400 font-bold text-sm">
+                {activeRun.activeBatchId || 'None'}
+              </span>
+            </div>
           </div>
         </div>
-      </div>
+      ) : (
+        <div className="p-8 rounded-xl bg-infra-card border border-infra-border text-center space-y-3">
+          <div className="w-10 h-10 mx-auto rounded-full bg-infra-surface flex items-center justify-center border border-infra-border text-infra-muted">
+            <Activity size={20} />
+          </div>
+          <h3 className="text-sm font-bold text-infra-heading font-mono">No Active Migration Pipeline</h3>
+          <p className="text-xs text-infra-muted max-w-sm mx-auto">
+            Ready to transfer data? Use the guided 14-step wizard to create a plan, execute a dry-run, and stream records.
+          </p>
+          <div className="pt-2">
+            <Link
+              href="/wizard"
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold bg-emerald-500 hover:bg-emerald-400 text-infra-base transition-colors"
+            >
+              <Wand2 size={13} />
+              <span>Launch Wizard</span>
+            </Link>
+          </div>
+        </div>
+      )}
 
       {/* Two-Column Lower Section: Quick Operations & Recent Audit Stream */}
       <div className="grid grid-cols-3 gap-6">
@@ -248,7 +355,7 @@ export default function DashboardPage() {
                 Manage Mongo & Postgres profiles with vaulted passwords and credential rotation.
               </p>
               <div className="mt-3 text-[10px] text-emerald-400 font-mono">
-                {MOCK_CONNECTIONS.length} Active Connections
+                {connectionCount} Active Connections
               </div>
             </Link>
 
@@ -266,7 +373,7 @@ export default function DashboardPage() {
                 Inspect Mongo collections & fields vs Postgres tables, data types, and snapshot diffs.
               </p>
               <div className="mt-3 text-[10px] text-sky-400 font-mono">
-                2 Schema Snapshots Loaded
+                Real-time Inspection Available
               </div>
             </Link>
 
@@ -284,7 +391,7 @@ export default function DashboardPage() {
                 Visual side-by-side mapping, deterministic transformations, and sample preview.
               </p>
               <div className="mt-3 text-[10px] text-indigo-400 font-mono">
-                Version 1 Immutable DSL
+                Deterministic DSL Transformations
               </div>
             </Link>
 
@@ -299,10 +406,10 @@ export default function DashboardPage() {
               </div>
               <h3 className="text-xs font-bold text-infra-heading font-mono">Validation Center</h3>
               <p className="text-[11px] text-infra-muted mt-1 leading-normal">
-                Explore exactly 45 discrepancies across 9 checks with before/after evidence drawers.
+                Explore discrepancies across deterministic checks with before/after evidence drawers.
               </p>
               <div className="mt-3 text-[10px] text-rose-400 font-mono">
-                45 Seeded Defects Tracked
+                {valRun ? `${valRun.totalDiscrepancies} Discrepancies Logged` : 'Ready to Validate'}
               </div>
             </Link>
           </div>
@@ -324,24 +431,30 @@ export default function DashboardPage() {
           </div>
 
           <div className="p-4 rounded-xl bg-infra-card border border-infra-border space-y-3">
-            {audits.slice(0, 4).map((audit) => (
-              <div
-                key={audit.id}
-                className="p-2.5 rounded-lg bg-infra-surface border border-infra-border space-y-1 text-xs font-mono"
-              >
-                <div className="flex items-center justify-between">
-                  <span className="text-emerald-400 font-semibold text-[11px]">{audit.action}</span>
-                  <span className="text-[10px] text-infra-muted">
-                    {formatDate(audit.timestamp).split(',')[1]}
-                  </span>
+            {audits.length === 0 ? (
+              <p className="text-xs font-mono text-infra-muted py-6 text-center">
+                No recent audit events.
+              </p>
+            ) : (
+              audits.slice(0, 4).map((audit) => (
+                <div
+                  key={audit.id}
+                  className="p-2.5 rounded-lg bg-infra-surface border border-infra-border space-y-1 text-xs font-mono"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-emerald-400 font-semibold text-[11px]">{audit.action}</span>
+                    <span className="text-[10px] text-infra-muted">
+                      {formatDate(audit.timestamp).split(',')[1] || formatDate(audit.timestamp)}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-infra-text font-sans line-clamp-1">{audit.details}</p>
+                  <div className="text-[10px] text-infra-muted flex items-center justify-between pt-0.5">
+                    <span>Actor: {audit.actor}</span>
+                    <span>{truncateHash(audit.immutableHash, 10)}</span>
+                  </div>
                 </div>
-                <p className="text-[11px] text-infra-text font-sans line-clamp-1">{audit.details}</p>
-                <div className="text-[10px] text-infra-muted flex items-center justify-between pt-0.5">
-                  <span>Actor: {audit.actor}</span>
-                  <span>{truncateHash(audit.immutableHash, 10)}</span>
-                </div>
-              </div>
-            ))}
+              ))
+            )}
           </div>
         </div>
       </div>

@@ -20,64 +20,93 @@ import {
 import { Badge } from '../../components/common/Badge';
 import { MigrationRun, MigrationBatch, BatchStatus } from '../../lib/types';
 import { MOCK_MIGRATION_RUNS, MOCK_BATCHES } from '../../lib/mock-data';
-import { apiClient } from '../../lib/api-client';
+import { apiClient, isDemoModeEnabled } from '../../lib/api-client';
 import { formatNumber, formatDate, truncateHash } from '../../lib/utils';
 
 export default function MigrationExecutionPage() {
-  const [runs, setRuns] = useState<MigrationRun[]>(MOCK_MIGRATION_RUNS);
-  const [selectedRun, setSelectedRun] = useState<MigrationRun>(MOCK_MIGRATION_RUNS[0]);
-  const [batches, setBatches] = useState<MigrationBatch[]>(MOCK_BATCHES);
+  const [runs, setRuns] = useState<MigrationRun[]>([]);
+  const [selectedRun, setSelectedRun] = useState<MigrationRun | null>(null);
+  const [batches, setBatches] = useState<MigrationBatch[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<string>('ALL');
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
+  const isDemo = isDemoModeEnabled();
+
+  const loadRuns = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await apiClient.getMigrationRuns();
+      if (Array.isArray(data) && data.length > 0) {
+        setRuns(data);
+        setSelectedRun(data[0]);
+        const b = await apiClient.getMigrationBatches(data[0].id);
+        if (Array.isArray(b)) {
+          setBatches(b);
+        }
+      } else if (isDemo) {
+        setRuns(MOCK_MIGRATION_RUNS);
+        setSelectedRun(MOCK_MIGRATION_RUNS[0]);
+        setBatches(MOCK_BATCHES);
+      } else {
+        setRuns([]);
+        setSelectedRun(null);
+        setBatches([]);
+      }
+    } catch (err: any) {
+      if (isDemo) {
+        setRuns(MOCK_MIGRATION_RUNS);
+        setSelectedRun(MOCK_MIGRATION_RUNS[0]);
+        setBatches(MOCK_BATCHES);
+      } else {
+        setError(err?.message || 'Failed to retrieve migration runs from backend.');
+        setRuns([]);
+        setSelectedRun(null);
+        setBatches([]);
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
-    async function load() {
-      try {
-        const data = await apiClient.getMigrationRuns();
-        if (data && Array.isArray(data) && data.length > 0) {
-          setRuns(data);
-          setSelectedRun(data[0]);
-          const b = await apiClient.getMigrationBatches(data[0].id);
-          if (b && Array.isArray(b)) {
-            setBatches(b);
-          }
-        }
-      } catch (err) {
-        console.warn('[MigrationExecutionPage] Notice loading runs:', err);
-      }
-    }
-    load();
+    loadRuns();
   }, []);
 
   const handlePause = async () => {
+    if (!selectedRun) return;
     setActionLoading(true);
     await apiClient.pauseRun(selectedRun.id);
-    setSelectedRun((prev) => ({ ...prev, status: 'PAUSED' }));
+    setSelectedRun((prev) => (prev ? { ...prev, status: 'PAUSED' } : null));
     setActionMessage('Migration run pause requested. Current batches completing.');
     setActionLoading(false);
     setTimeout(() => setActionMessage(null), 3000);
   };
 
   const handleResume = async () => {
+    if (!selectedRun) return;
     setActionLoading(true);
     await apiClient.resumeRun(selectedRun.id);
-    setSelectedRun((prev) => ({ ...prev, status: 'RUNNING' }));
+    setSelectedRun((prev) => (prev ? { ...prev, status: 'RUNNING' } : null));
     setActionMessage('Migration run resumed from last committed checkpoint.');
     setActionLoading(false);
     setTimeout(() => setActionMessage(null), 3000);
   };
 
   const handleCancel = async () => {
+    if (!selectedRun) return;
     setActionLoading(true);
     await apiClient.cancelRun(selectedRun.id);
-    setSelectedRun((prev) => ({ ...prev, status: 'CANCELLED' }));
+    setSelectedRun((prev) => (prev ? { ...prev, status: 'CANCELLED' } : null));
     setActionMessage('Migration run cancelled. State durably accounted for in manifest.');
     setActionLoading(false);
     setTimeout(() => setActionMessage(null), 3000);
   };
 
   const handleRetry = async () => {
+    if (!selectedRun) return;
     setActionLoading(true);
     await apiClient.retryFailedBatches(selectedRun.id);
     setActionMessage('Transient failure retried. Segregated dead-letter queue records queued.');
@@ -130,8 +159,9 @@ export default function MigrationExecutionPage() {
         </div>
 
         {/* Lifecycle Actions */}
-        <div className="flex items-center gap-2">
-          {selectedRun.status === 'RUNNING' ? (
+        {selectedRun && (
+          <div className="flex items-center gap-2">
+            {selectedRun.status === 'RUNNING' ? (
             <button
               onClick={handlePause}
               disabled={actionLoading}
@@ -169,6 +199,7 @@ export default function MigrationExecutionPage() {
             <span>Cancel Run</span>
           </button>
         </div>
+        )}
       </div>
 
       {actionMessage && (
@@ -178,8 +209,53 @@ export default function MigrationExecutionPage() {
         </div>
       )}
 
-      {/* Primary Execution Progress Card */}
-      <div className="p-6 rounded-xl bg-infra-card border border-infra-border space-y-5">
+      {/* Loading & Error & Empty States */}
+      {loading && (
+        <div className="p-12 rounded-xl bg-infra-card border border-infra-border flex flex-col items-center justify-center space-y-3">
+          <RefreshCw size={24} className="animate-spin text-emerald-400" />
+          <span className="text-xs font-mono text-infra-muted">Loading migration runs and batch telemetry...</span>
+        </div>
+      )}
+
+      {error && !loading && (
+        <div className="p-4 rounded-xl bg-red-500/10 border border-red-500/30 text-xs font-mono text-red-400 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <AlertTriangle size={16} className="text-red-400 shrink-0" />
+            <span>{error}</span>
+          </div>
+          <button
+            onClick={loadRuns}
+            className="flex items-center gap-1.5 px-3 py-1 rounded bg-red-500/20 hover:bg-red-500/30 text-red-200 border border-red-500/40 transition-colors"
+          >
+            <RefreshCw size={12} />
+            <span>Retry</span>
+          </button>
+        </div>
+      )}
+
+      {!loading && !error && runs.length === 0 && (
+        <div className="p-12 rounded-xl bg-infra-card border border-infra-border flex flex-col items-center justify-center text-center space-y-3">
+          <div className="w-12 h-12 rounded-xl bg-infra-surface border border-infra-border flex items-center justify-center text-infra-muted">
+            <Activity size={24} />
+          </div>
+          <h3 className="text-sm font-bold text-infra-heading font-mono">No Migration Runs Recorded</h3>
+          <p className="text-xs text-infra-muted max-w-sm">
+            No active or historical migration executions exist in this workspace. Use the guided wizard to launch your first migration run.
+          </p>
+          <Link
+            href="/wizard"
+            className="mt-2 flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold bg-emerald-500 hover:bg-emerald-400 text-infra-base transition-colors"
+          >
+            <Play size={14} />
+            <span>Launch Migration Wizard</span>
+          </Link>
+        </div>
+      )}
+
+      {selectedRun && (
+        <>
+        {/* Primary Execution Progress Card */}
+        <div className="p-6 rounded-xl bg-infra-card border border-infra-border space-y-5">
         <div className="flex items-start justify-between">
           <div>
             <div className="flex items-center gap-2.5">
@@ -194,7 +270,7 @@ export default function MigrationExecutionPage() {
               </span>
             </div>
             <p className="text-xs text-infra-muted font-mono mt-1">
-              Started: {selectedRun.startedAt ? formatDate(selectedRun.startedAt) : 'N/A'} • Active Target: public.customers
+              Started: {selectedRun.startedAt ? formatDate(selectedRun.startedAt) : 'N/A'} â€¢ Active Target: public.customers
             </p>
           </div>
 
@@ -304,7 +380,7 @@ export default function MigrationExecutionPage() {
                     {batch.collectionName}
                   </td>
                   <td className="py-3 px-3 text-infra-muted text-[11px]">
-                    {batch.cursorStart} → {batch.cursorEnd}
+                    {batch.cursorStart} â†’ {batch.cursorEnd}
                   </td>
                   <td className="py-3 px-3 text-infra-text font-medium">
                     {batch.recordsCount}
@@ -329,6 +405,8 @@ export default function MigrationExecutionPage() {
           </table>
         </div>
       </div>
+      </>
+      )}
     </div>
   );
 }

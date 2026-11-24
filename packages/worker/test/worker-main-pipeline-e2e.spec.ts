@@ -8,6 +8,11 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  validateSafeTestDatabaseEndpoint,
+  validateSafeTestMongoEndpoint,
+  validateSafeTestRedisEndpoint,
+} from './helpers/postgres-test-utils.js';
 
 /**
  * Independent RFC 8785 JSON Canonicalization Oracle (Test-Only).
@@ -116,22 +121,18 @@ const candidateSchemaPaths = [
 const schemaSqlPath = candidateSchemaPaths.find((p) => fs.existsSync(p));
 
 describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.15)', { timeout: 180000 }, () => {
+  // Strictly require designated test environment variables; NEVER fall back to generic application URLs.
   const dbUrl =
     process.env.MIGRATIONGUARD_TEST_DATABASE_URL ||
-    process.env.TEST_DATABASE_URL ||
-    process.env.DATABASE_URL;
+    process.env.TEST_DATABASE_URL;
 
   const redisUrl =
     process.env.MIGRATIONGUARD_TEST_REDIS_URL ||
-    process.env.REDIS_URL ||
-    (process.env.REDIS_HOST
-      ? `redis://${process.env.REDIS_HOST}:${process.env.REDIS_PORT || 6379}`
-      : 'redis://localhost:6379');
+    process.env.TEST_REDIS_URL;
 
   const mongoUrl =
     process.env.MIGRATIONGUARD_TEST_MONGO_URL ||
-    process.env.MONGO_URL ||
-    'mongodb://localhost:27017/migrationguard_e2e_source';
+    process.env.TEST_MONGO_URL;
 
   const encryptionKeyHex =
     process.env.ENCRYPTION_KEY ||
@@ -152,11 +153,11 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.15)', { t
   }
 
   it('fails worker startup with non-zero exit code when dependencies are unreachable', async () => {
-    // Spawns worker with an unreachable Redis port to verify fail-closed exit code 1
+    // Spawns worker with unreachable PostgreSQL/Redis ports to verify fail-closed exit code 1 without touching live endpoints
     const child = spawn(process.execPath, [workerMainPath], {
       env: {
         ...process.env,
-        DATABASE_URL: dbUrl || 'postgresql://localhost:5432/migrationguard_test',
+        DATABASE_URL: 'postgresql://postgres:test@127.0.0.1:59998/migrationguard_test_unreachable',
         REDIS_URL: 'redis://127.0.0.1:59999', // Closed port
         RUN_STANDALONE_WORKER: 'true',
         NODE_ENV: 'test',
@@ -176,22 +177,79 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.15)', { t
   });
 
   it('executes full MongoDB-to-PostgreSQL pipeline, verifies schema contract, handles fault injection mid-flight, and guarantees zero duplicate records on recovery', async (ctx) => {
-    if (!dbUrl) {
-      if (process.env.CI === 'true') {
-        throw new Error('[CI Mandatory Failure] MIGRATIONGUARD_TEST_DATABASE_URL is required in CI.');
+    const isCi = process.env.CI === 'true';
+
+    if (!dbUrl || !redisUrl || !mongoUrl) {
+      const missing = [
+        !dbUrl && 'MIGRATIONGUARD_TEST_DATABASE_URL / TEST_DATABASE_URL',
+        !redisUrl && 'MIGRATIONGUARD_TEST_REDIS_URL / TEST_REDIS_URL',
+        !mongoUrl && 'MIGRATIONGUARD_TEST_MONGO_URL / TEST_MONGO_URL',
+      ].filter(Boolean);
+      if (isCi) {
+        throw new Error(`[CI Mandatory Failure] Designated test URLs missing in CI: ${missing.join(', ')}`);
       }
-      console.warn('[Notice] Test database URL not configured, skipping worker-main pipeline E2E.');
+      console.warn(`[Safety Guard] Designated test URLs not configured (${missing.join(', ')}). Skipping worker-main pipeline E2E.`);
       ctx.skip();
       return;
     }
 
-    // 1. Probe PostgreSQL connectivity
-    let testPool: pg.Pool;
+    // Enforce fail-closed safety guards for PostgreSQL, Redis, and MongoDB test endpoints
+    let parsedDbTarget: ReturnType<typeof validateSafeTestDatabaseEndpoint>;
     try {
-      testPool = new pg.Pool({ connectionString: dbUrl, max: 5, connectionTimeoutMillis: 5000 });
+      parsedDbTarget = validateSafeTestDatabaseEndpoint(dbUrl);
+      validateSafeTestRedisEndpoint(redisUrl);
+      validateSafeTestMongoEndpoint(mongoUrl);
+    } catch (err: any) {
+      if (isCi) {
+        throw new Error(`[CI Mandatory Failure] ${err.message}`);
+      }
+      console.warn(`[Safety Guard] Test endpoint rejected: ${err.message}`);
+      ctx.skip();
+      return;
+    }
+
+    const testSuffix = `${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const testSchema = `test_worker_e2e_${testSuffix}`;
+    const testQueue = `test-e2e-worker-${testSuffix}`;
+    const testPrefix = `bull_e2e_${testSuffix}`;
+    const mongoDbName = `migrationguard_test_e2e_${testSuffix}`;
+    const ssl = parsedDbTarget.isLoopback && process.env.NODE_ENV !== 'production' ? false : { rejectUnauthorized: true };
+
+    // 1. Probe PostgreSQL connectivity and provision isolated test schema
+    let adminPool: pg.Pool | null = null;
+    let testPool: pg.Pool | null = null;
+    let schemaCreated = false;
+    try {
+      adminPool = new pg.Pool({ connectionString: dbUrl, ssl, max: 3, connectionTimeoutMillis: 5000 });
+      await adminPool.query('SELECT 1');
+      await adminPool.query(`CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`).catch(() => {});
+      await adminPool.query(`CREATE SCHEMA IF NOT EXISTS "${testSchema}"`);
+      schemaCreated = true;
+      await adminPool.query(
+        `CREATE OR REPLACE FUNCTION "${testSchema}".uuid_generate_v4()
+         RETURNS uuid AS $$
+         BEGIN
+           RETURN public.uuid_generate_v4();
+         EXCEPTION WHEN OTHERS THEN
+           RETURN gen_random_uuid();
+         END;
+         $$ LANGUAGE plpgsql;`
+      );
+      testPool = new pg.Pool({
+        connectionString: dbUrl,
+        ssl,
+        max: 5,
+        connectionTimeoutMillis: 5000,
+        options: `-c search_path="${testSchema}"`,
+      });
       await testPool.query('SELECT 1');
     } catch (err: any) {
-      if (process.env.CI === 'true') {
+      if (schemaCreated && adminPool) {
+        await adminPool.query(`DROP SCHEMA IF EXISTS "${testSchema}" CASCADE`).catch(() => {});
+      }
+      await testPool?.end().catch(() => {});
+      await adminPool?.end().catch(() => {});
+      if (isCi) {
         throw new Error(`[CI Mandatory Failure] PostgreSQL unreachable in CI: ${err.message}`);
       }
       console.warn(`[Notice] PostgreSQL unreachable in local environment (${err.message}), skipping worker-main E2E.`);
@@ -213,7 +271,9 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.15)', { t
       await redisProbe.ping();
     } catch (err: any) {
       await testPool.end().catch(() => {});
-      if (process.env.CI === 'true') {
+      await adminPool.query(`DROP SCHEMA IF EXISTS "${testSchema}" CASCADE`).catch(() => {});
+      await adminPool.end().catch(() => {});
+      if (isCi) {
         throw new Error(`[CI Mandatory Failure] Redis unreachable in CI: ${err.message}`);
       }
       console.warn(`[Notice] Redis unreachable in local environment (${err.message}), skipping worker-main E2E.`);
@@ -230,7 +290,9 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.15)', { t
     } catch (err: any) {
       redisProbe.disconnect();
       await testPool.end().catch(() => {});
-      if (process.env.CI === 'true') {
+      await adminPool.query(`DROP SCHEMA IF EXISTS "${testSchema}" CASCADE`).catch(() => {});
+      await adminPool.end().catch(() => {});
+      if (isCi) {
         throw new Error(`[CI Mandatory Failure] MongoDB unreachable in CI: ${err.message}`);
       }
       console.warn(`[Notice] MongoDB unreachable in local environment (${err.message}), skipping worker-main E2E.`);
@@ -238,8 +300,6 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.15)', { t
       return;
     }
 
-    const testSuffix = `${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-    const testQueue = `test-e2e-worker-${testSuffix}`;
     const workspaceId = crypto.randomUUID();
     const projectId = crypto.randomUUID();
     const planId = crypto.randomUUID();
@@ -249,7 +309,6 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.15)', { t
     const destConnId = crypto.randomUUID();
     const sourceCollection = `customers_src_${testSuffix}`;
     const destTable = `customers_dest_${testSuffix}`;
-    const mongoDbName = mongoClient.db().databaseName || 'migrationguard_e2e_source';
 
     let workerChild1: ChildProcess | null = null;
     let workerChild2: ChildProcess | null = null;
@@ -261,19 +320,19 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.15)', { t
     let mappingVersionId: string | null = null;
 
     try {
-      // 4. Align and Execute Canonical Production Schema (Section 6)
+      // 4. Execute Canonical Production Schema strictly inside isolated testSchema
       if (schemaSqlPath && fs.existsSync(schemaSqlPath)) {
         const canonicalSchemaSql = fs.readFileSync(schemaSqlPath, 'utf8');
         await testPool.query(canonicalSchemaSql);
       }
 
-      // Explicit schema contract verification for required tables, constraints, and columns
+      // Explicit schema contract verification scoped strictly to testSchema
       const tablesCheck = await testPool.query(`
         SELECT table_name 
         FROM information_schema.tables 
-        WHERE table_schema = 'public' 
+        WHERE table_schema = $1 
           AND table_name IN ('workspaces', 'connections', 'connection_secrets', 'migration_runs', 'migration_batches', 'record_manifests', 'id_mappings')
-      `);
+      `, [testSchema]);
       const existingTables = new Set(tablesCheck.rows.map((r) => r.table_name));
       expect(existingTables.has('workspaces')).toBe(true);
       expect(existingTables.has('connections')).toBe(true);
@@ -286,8 +345,8 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.15)', { t
       const manifestColsCheck = await testPool.query(`
         SELECT column_name, is_nullable 
         FROM information_schema.columns 
-        WHERE table_name = 'record_manifests'
-      `);
+        WHERE table_schema = $1 AND table_name = 'record_manifests'
+      `, [testSchema]);
       const manifestColMap = new Map(manifestColsCheck.rows.map((r) => [r.column_name, r.is_nullable]));
       expect(manifestColMap.has('migration_run_id')).toBe(true);
       expect(manifestColMap.has('migration_batch_id')).toBe(true);
@@ -363,11 +422,11 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.15)', { t
         [sourceConnId, 1, mongoSecret.encryptedPayload, mongoSecret.iv, mongoSecret.authTag],
       );
 
-      // PostgreSQL Destination Connection Vault Record
+      // PostgreSQL Destination Connection Vault Record scoped explicitly to isolated testSchema
       await testPool.query(
         `INSERT INTO connections (id, workspace_id, name, engine, connection_role, config_json, credential_version, status)
-         VALUES ($1, $2, 'Test Destination PostgreSQL', 'POSTGRESQL', 'DESTINATION', '{}'::jsonb, 1, 'HEALTHY')`,
-        [destConnId, workspaceId],
+         VALUES ($1, $2, 'Test Destination PostgreSQL', 'POSTGRESQL', 'DESTINATION', $3, 1, 'HEALTHY')`,
+        [destConnId, workspaceId, JSON.stringify({ schema: testSchema })],
       );
 
       const pgSecret = encryptVaultSecret({ connectionString: dbUrl }, encryptionKeyHex);
@@ -427,8 +486,9 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.15)', { t
         [runId, workspaceId, projectId, planVersionId],
       );
 
-      // 7. Create BullMQ Queue Producer
+      // 7. Create isolated BullMQ Queue Producer
       queue = new Queue(testQueue, {
+        prefix: testPrefix,
         connection: {
           host: redisProbe.options.host || 'localhost',
           port: redisProbe.options.port || 6379,
@@ -438,15 +498,17 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.15)', { t
         },
       });
 
-      // 8. Robust Standalone Worker Process Launcher with Confirmed Readiness
+      // 8. Robust Standalone Worker Process Launcher scoped to isolated Postgres schema & Redis prefix
       const startWorkerProcess = (extraEnv: Record<string, string> = {}): Promise<{ child: ChildProcess }> => {
         return new Promise((resolve, reject) => {
           const child = spawn(process.execPath, [workerMainPath], {
             env: {
               ...process.env,
               DATABASE_URL: dbUrl,
+              POSTGRES_SCHEMA: testSchema,
               REDIS_URL: redisUrl,
               BULLMQ_QUEUE_NAME: testQueue,
+              BULLMQ_PREFIX: testPrefix,
               ENCRYPTION_KEY: encryptionKeyHex,
               BULLMQ_LOCK_DURATION: '3500',
               BULLMQ_STALLED_INTERVAL: '1500',
@@ -1009,30 +1071,20 @@ describe('Worker-Main Pipeline E2E & Crash/Recovery Lifecycle (Run 005.15)', { t
         await queue.close().catch(() => {});
       }
       if (redisProbe) {
-        redisProbe.disconnect();
+        await redisProbe.quit().catch(() => redisProbe.disconnect());
       }
       if (mongoClient) {
         try {
-          await mongoClient.db(mongoDbName).collection(sourceCollection).drop();
+          await mongoClient.db(mongoDbName).dropDatabase();
         } catch {}
         await mongoClient.close().catch(() => {});
       }
       if (testPool) {
-        await testPool.query(`DROP TABLE IF EXISTS "${destTable}" CASCADE`).catch(() => {});
-        await testPool.query(`DELETE FROM record_manifests WHERE migration_run_id = $1`, [runId]).catch(() => {});
-        await testPool.query(`DELETE FROM migration_batches WHERE migration_run_id = $1`, [runId]).catch(() => {});
-        await testPool.query(`DELETE FROM id_mappings WHERE migration_run_id = $1`, [runId]).catch(() => {});
-        await testPool.query(`DELETE FROM migration_runs WHERE id = $1`, [runId]).catch(() => {});
-        await testPool.query(`DELETE FROM migration_plan_versions WHERE id = $1`, [planVersionId]).catch(() => {});
-        if (mappingVersionId) {
-          await testPool.query(`DELETE FROM mapping_versions WHERE id = $1`, [mappingVersionId]).catch(() => {});
-        }
-        await testPool.query(`DELETE FROM migration_plans WHERE id = $1`, [planId]).catch(() => {});
-        await testPool.query(`DELETE FROM connection_secrets WHERE connection_id IN ($1, $2)`, [sourceConnId, destConnId]).catch(() => {});
-        await testPool.query(`DELETE FROM connections WHERE id IN ($1, $2)`, [sourceConnId, destConnId]).catch(() => {});
-        await testPool.query(`DELETE FROM projects WHERE id = $1`, [projectId]).catch(() => {});
-        await testPool.query(`DELETE FROM workspaces WHERE id = $1`, [workspaceId]).catch(() => {});
         await testPool.end().catch(() => {});
+      }
+      if (adminPool) {
+        await adminPool.query(`DROP SCHEMA IF EXISTS "${testSchema}" CASCADE`).catch(() => {});
+        await adminPool.end().catch(() => {});
       }
     }
   });

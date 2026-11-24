@@ -1,14 +1,32 @@
 import { describe, expect, it } from 'vitest';
 import { Queue, Worker, Job } from 'bullmq';
 import { Redis } from 'ioredis';
+import { validateSafeTestRedisEndpoint } from './helpers/postgres-test-utils.js';
 
 describe('BullMQ Redis Live Integration (Run 005.1)', () => {
-  it('enqueues a BullMQ job, consumes it with an actual worker, and verifies completion on live Redis', async () => {
+  it('enqueues a BullMQ job, consumes it with an actual worker, and verifies completion on live Redis', async (ctx) => {
     const redisUrl =
-      process.env.REDIS_URL ||
-      (process.env.REDIS_HOST
-        ? `redis://${process.env.REDIS_HOST}:${process.env.REDIS_PORT || 6379}`
-        : 'redis://localhost:6379');
+      process.env.MIGRATIONGUARD_TEST_REDIS_URL || process.env.TEST_REDIS_URL;
+
+    if (!redisUrl) {
+      if (process.env.CI === 'true') {
+        throw new Error('[CI Mandatory Failure] MIGRATIONGUARD_TEST_REDIS_URL or TEST_REDIS_URL is required in CI.');
+      }
+      console.warn('[Safety Guard] MIGRATIONGUARD_TEST_REDIS_URL or TEST_REDIS_URL not set. Skipping live Redis test.');
+      ctx.skip();
+      return;
+    }
+
+    try {
+      validateSafeTestRedisEndpoint(redisUrl);
+    } catch (err: any) {
+      if (process.env.CI === 'true') {
+        throw new Error(`[CI Mandatory Failure] ${err.message}`);
+      }
+      console.warn(`[Safety Guard] Redis test endpoint rejected: ${err.message}`);
+      ctx.skip();
+      return;
+    }
 
     // Test connectivity first with ioredis
     let testClient: Redis | null = null;

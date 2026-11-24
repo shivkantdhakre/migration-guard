@@ -4,7 +4,11 @@ import { promisify } from 'node:util';
 import path from 'node:path';
 import { validateDestinationConnectionString } from '../src/worker-main.js';
 import { resolvePostgresSsl } from '../src/connectors/connector-factory.js';
-import { validateSafeTestDatabaseEndpoint } from './helpers/postgres-test-utils.js';
+import {
+  validateSafeTestDatabaseEndpoint,
+  validateSafeTestMongoEndpoint,
+  validateSafeTestRedisEndpoint,
+} from './helpers/postgres-test-utils.js';
 
 const execAsync = promisify(exec);
 
@@ -304,6 +308,35 @@ describe('Worker Configuration Fail-Closed Security (P1 & Run 005.1)', { timeout
       expect(target.host).toBe('remote.net');
       expect(target.port).toBe('5432');
       expect(target.dbName).toBe('test_db');
+    });
+
+    it('enforces safe test endpoint validation for MongoDB and Redis test targets', () => {
+      process.env.NODE_ENV = 'test';
+      delete process.env.ALLOW_REMOTE_TEST_MONGO;
+      delete process.env.ALLOW_REMOTE_TEST_REDIS;
+
+      // Reject /prod/i in Mongo and Redis
+      expect(() => validateSafeTestMongoEndpoint('mongodb://user:pass@localhost:27017/prod_app')).toThrow(/matches production naming patterns/);
+      expect(() => validateSafeTestRedisEndpoint('redis://prod-cache.internal:6379')).toThrow(/matches production naming patterns/);
+
+      // Reject remote Mongo/Redis without explicit allowlist approval
+      expect(() => validateSafeTestMongoEndpoint('mongodb+srv://user:pass@cluster0.test.mongodb.net/test_db')).toThrow(/without explicit ALLOW_REMOTE_TEST_MONGO=true/);
+      expect(() => validateSafeTestRedisEndpoint('rediss://cache.staging.example.com:6380')).toThrow(/without explicit ALLOW_REMOTE_TEST_REDIS=true/);
+
+      // Reject non-allowlisted remote hosts even when ALLOW_REMOTE_TEST_* is true
+      process.env.ALLOW_REMOTE_TEST_MONGO = 'true';
+      process.env.MIGRATIONGUARD_ALLOWED_TEST_MONGO_HOSTS = 'approved-mongo.test.net';
+      expect(() => validateSafeTestMongoEndpoint('mongodb+srv://user:pass@other.test.net/test_db')).toThrow(/not present in MIGRATIONGUARD_ALLOWED_TEST_MONGO_HOSTS/);
+
+      process.env.ALLOW_REMOTE_TEST_REDIS = 'true';
+      process.env.MIGRATIONGUARD_ALLOWED_TEST_REDIS_HOSTS = 'approved-redis.test.net';
+      expect(() => validateSafeTestRedisEndpoint('rediss://other-redis.test.net:6380')).toThrow(/not present in MIGRATIONGUARD_ALLOWED_TEST_REDIS_HOSTS/);
+
+      // Accept localhost and allowlisted remote test endpoints
+      const localMongo = validateSafeTestMongoEndpoint('mongodb://localhost:27017/migrationguard_e2e_source');
+      expect(localMongo.isLoopback).toBe(true);
+      const localRedis = validateSafeTestRedisEndpoint('redis://127.0.0.1:6379');
+      expect(localRedis.isLoopback).toBe(true);
     });
   });
 });

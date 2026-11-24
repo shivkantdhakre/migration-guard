@@ -212,3 +212,155 @@ export function validateSafeTestDatabaseEndpoint(targetDbUrl: string): ResolvedD
     isLoopback,
   };
 }
+
+export interface ResolvedMongoTarget {
+  host: string;
+  dbName: string;
+  url: string;
+  isLoopback: boolean;
+}
+
+/**
+ * Validates that a target MongoDB URL is safe for worker test execution.
+ * Rejects production environments, /prod/i patterns, and remote endpoints without explicit allowlisting.
+ */
+export function validateSafeTestMongoEndpoint(targetMongoUrl: string): ResolvedMongoTarget {
+  const isProduction =
+    process.env.NODE_ENV === 'production' ||
+    process.env.MONGO_ENV === 'production';
+
+  if (isProduction) {
+    throw new Error('[Safety Guard] Live MongoDB integration tests must never run in production environment.');
+  }
+
+  if (!targetMongoUrl || !targetMongoUrl.trim()) {
+    throw new Error('[Safety Guard] Designated test MongoDB URL is missing or empty.');
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(targetMongoUrl);
+  } catch {
+    throw new Error(`[Safety Guard] Invalid designated test MongoDB URL format: '${targetMongoUrl}'.`);
+  }
+
+  if (parsed.protocol !== 'mongodb:' && parsed.protocol !== 'mongodb+srv:') {
+    throw new Error(`[Safety Guard] Unsupported MongoDB protocol '${parsed.protocol}'.`);
+  }
+
+  const host = parsed.hostname;
+  if (!host) {
+    throw new Error(`[Safety Guard] Missing hostname in designated test MongoDB URL.`);
+  }
+
+  const dbName = (parsed.pathname || '').replace(/^\//, '').split('?')[0].trim();
+
+  if (/prod/i.test(host) || /prod/i.test(targetMongoUrl) || (dbName && /prod/i.test(dbName))) {
+    throw new Error(
+      `[Safety Guard] Designated test MongoDB endpoint (${host}/${dbName || 'default'}) matches production naming patterns (/prod/i). Testing refused.`,
+    );
+  }
+
+  const isLoopback = isLoopbackHost(host);
+  if (!isLoopback) {
+    if (process.env.ALLOW_REMOTE_TEST_MONGO !== 'true') {
+      throw new Error(
+        `[Safety Guard] Refusing to connect to remote test MongoDB (${host}) without explicit ALLOW_REMOTE_TEST_MONGO=true.`,
+      );
+    }
+
+    const allowedHosts = (process.env.MIGRATIONGUARD_ALLOWED_TEST_MONGO_HOSTS || '')
+      .split(',')
+      .map((h) => h.trim().toLowerCase())
+      .filter(Boolean);
+
+    if (allowedHosts.length === 0 || !allowedHosts.includes(host.toLowerCase())) {
+      throw new Error(
+        `[Safety Guard] Remote MongoDB host '${host}' is not present in MIGRATIONGUARD_ALLOWED_TEST_MONGO_HOSTS allowlist. Execution refused.`,
+      );
+    }
+  }
+
+  return {
+    host,
+    dbName,
+    url: targetMongoUrl,
+    isLoopback,
+  };
+}
+
+export interface ResolvedRedisTarget {
+  host: string;
+  port: string;
+  url: string;
+  isLoopback: boolean;
+}
+
+/**
+ * Validates that a target Redis URL is safe for worker test execution.
+ * Rejects production environments, /prod/i patterns, and remote endpoints without explicit allowlisting.
+ */
+export function validateSafeTestRedisEndpoint(targetRedisUrl: string): ResolvedRedisTarget {
+  const isProduction =
+    process.env.NODE_ENV === 'production' ||
+    process.env.REDIS_ENV === 'production';
+
+  if (isProduction) {
+    throw new Error('[Safety Guard] Live Redis integration tests must never run in production environment.');
+  }
+
+  if (!targetRedisUrl || !targetRedisUrl.trim()) {
+    throw new Error('[Safety Guard] Designated test Redis URL is missing or empty.');
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(targetRedisUrl);
+  } catch {
+    throw new Error(`[Safety Guard] Invalid designated test Redis URL format: '${targetRedisUrl}'.`);
+  }
+
+  if (parsed.protocol !== 'redis:' && parsed.protocol !== 'rediss:') {
+    throw new Error(`[Safety Guard] Unsupported Redis protocol '${parsed.protocol}'.`);
+  }
+
+  const host = parsed.hostname;
+  if (!host) {
+    throw new Error(`[Safety Guard] Missing hostname in designated test Redis URL.`);
+  }
+
+  const port = parsed.port || (parsed.protocol === 'rediss:' ? '6380' : '6379');
+
+  if (/prod/i.test(host) || /prod/i.test(targetRedisUrl)) {
+    throw new Error(
+      `[Safety Guard] Designated test Redis endpoint (${host}) matches production naming patterns (/prod/i). Testing refused.`,
+    );
+  }
+
+  const isLoopback = isLoopbackHost(host);
+  if (!isLoopback) {
+    if (process.env.ALLOW_REMOTE_TEST_REDIS !== 'true') {
+      throw new Error(
+        `[Safety Guard] Refusing to connect to remote test Redis (${host}) without explicit ALLOW_REMOTE_TEST_REDIS=true.`,
+      );
+    }
+
+    const allowedHosts = (process.env.MIGRATIONGUARD_ALLOWED_TEST_REDIS_HOSTS || '')
+      .split(',')
+      .map((h) => h.trim().toLowerCase())
+      .filter(Boolean);
+
+    if (allowedHosts.length === 0 || !allowedHosts.includes(host.toLowerCase())) {
+      throw new Error(
+        `[Safety Guard] Remote Redis host '${host}' is not present in MIGRATIONGUARD_ALLOWED_TEST_REDIS_HOSTS allowlist. Execution refused.`,
+      );
+    }
+  }
+
+  return {
+    host,
+    port,
+    url: targetRedisUrl,
+    isLoopback,
+  };
+}

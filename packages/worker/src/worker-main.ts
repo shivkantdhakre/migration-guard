@@ -253,11 +253,23 @@ const isLocalDb = (() => {
 
 const isProduction = process.env.NODE_ENV === 'production';
 
+function validateSafeSchemaIdentifier(rawSchema?: string): string | undefined {
+  if (!rawSchema) return undefined;
+  const clean = rawSchema.trim();
+  if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(clean)) {
+    throw new Error(`[Worker Config] Invalid PostgreSQL schema identifier: '${rawSchema}'.`);
+  }
+  return clean;
+}
+
+const POSTGRES_SCHEMA = validateSafeSchemaIdentifier(process.env.POSTGRES_SCHEMA);
+
 dbPool = new pg.Pool({
   connectionString: DATABASE_URL,
   connectionTimeoutMillis: 10000,
   max: 20,
   ssl: resolvePostgresSsl(DATABASE_URL),
+  ...(POSTGRES_SCHEMA ? { options: `-c search_path="${POSTGRES_SCHEMA}"` } : {}),
 });
 
 const postgresAdapters = new PostgresStorageAdapters(dbPool);
@@ -548,11 +560,13 @@ async function getDestinationConnector(payload: MigrationJobPayload): Promise<De
   }
 
   console.log(`[Worker] ✔ Creating dedicated PostgreSQL destination pool for connection ${connectionId} v${credVer}`);
+  const destSchema = validateSafeSchemaIdentifier(vault.config?.schema || process.env.POSTGRES_SCHEMA);
   const pool = new pg.Pool({
     connectionString: connStr,
     connectionTimeoutMillis: 10000,
     max: 10,
     ssl: resolvePostgresSsl(connStr),
+    ...(destSchema ? { options: `-c search_path="${destSchema}"` } : {}),
   });
 
   const connector = ConnectorFactory.createPostgresDestination(pool);
@@ -905,10 +919,12 @@ async function startWorker() {
     }
 
     const QUEUE_NAME = process.env.BULLMQ_QUEUE_NAME || 'migration-execution';
+    const BULLMQ_PREFIX = process.env.BULLMQ_PREFIX;
 
     // Initialize execution queue for scheduling subsequent batches
     executionQueue = new Queue(QUEUE_NAME, {
       connection: redisClient,
+      ...(BULLMQ_PREFIX ? { prefix: BULLMQ_PREFIX } : {}),
     });
 
     executionWorker = new Worker(
@@ -1398,6 +1414,7 @@ async function startWorker() {
       },
       {
         connection: redisClient,
+        ...(BULLMQ_PREFIX ? { prefix: BULLMQ_PREFIX } : {}),
         concurrency: 2,
         stalledInterval: parseInt(process.env.BULLMQ_STALLED_INTERVAL || '2000', 10),
         lockDuration: parseInt(process.env.BULLMQ_LOCK_DURATION || '4000', 10),

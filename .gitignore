@@ -4,11 +4,12 @@ node_modules/
 .pnpm-cache/
 .pnpm-state/
 
-# Builds
+# Builds & TypeScript caches
 dist/
 build/
 .next/
 out/
+*.tsbuildinfo
 
 # Environment
 .env
@@ -42,46 +43,3 @@ postgres-data/
 # Coverage
 coverage/
 .nyc_output/
-# Dependencies
-node_modules/
-.pnpm-store/
-
-# Builds
-dist/
-build/
-.next/
-out/
-
-# Environment
-.env
-.env.*
-!.env.example
-.env.local
-.env.e2e.local
-.env.development.local
-.env.test.local
-.env.production.local
-
-# Logs
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-*.log
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Database / Storage data
-docker-data/
-data/
-storage/
-minio-data/
-mongo-data/
-postgres-data/
-
-# Coverage
-coverage/
-.nyc_output/
-

@@ -556,8 +556,8 @@ export default function MigrationWizardPage() {
     setAiError(null);
     try {
       const res: any = await apiClient.getAiMappingSuggestions(mappingId, {
-        sourceSnapshotId: sourceSnapshots[0]?.id || 'snap-mongo-001',
-        targetSnapshotId: destSnapshots[0]?.id || 'snap-pg-001',
+        sourceSnapshotId: sourceSnapshots[0]?.id || (isDemo ? 'snap-mongo-001' : undefined),
+        targetSnapshotId: destSnapshots[0]?.id || (isDemo ? 'snap-pg-001' : undefined),
         sourceObject: 'customers',
         destinationObject: 'customers',
       });
@@ -823,7 +823,17 @@ export default function MigrationWizardPage() {
         const batches = await apiClient.getMigrationBatches(migrationRun.id);
         setRunBatches(Array.isArray(batches) ? batches : []);
 
-        if (progress.status === 'COMPLETED' || progress.status === 'FAILED') {
+        if (progress?.status) {
+          setMigrationRun((prev) => (prev ? { ...prev, status: progress.status as MigrationRun['status'] } : prev));
+        }
+
+        if (
+          progress.status === 'COMPLETED' ||
+          progress.status === 'MIGRATED' ||
+          progress.status === 'VALIDATED' ||
+          progress.status === 'FAILED' ||
+          progress.status === 'CANCELLED'
+        ) {
           clearInterval(interval);
         }
       } catch {
@@ -867,7 +877,11 @@ export default function MigrationWizardPage() {
    * Step 14: Generate and download HTML/CSV reports
    */
   const handleDownloadReport = async (format: 'HTML' | 'CSV') => {
-    const valId = validationRun?.id || 'val-default';
+    const valId = validationRun?.id || (isDemo ? 'val-default' : '');
+    if (!valId) {
+      setReportError('Cannot generate report: no completed validation run available in this session.');
+      return;
+    }
     if (format === 'HTML') setIsGeneratingHtml(true);
     if (format === 'CSV') setIsGeneratingCsv(true);
     setReportError(null);
@@ -1328,19 +1342,27 @@ export default function MigrationWizardPage() {
 
             <div className="p-4 rounded-xl bg-infra-surface border border-emerald-500/30 text-xs font-mono space-y-2">
               <p className="text-emerald-300 font-bold">
-                {aiSuggestions ? 'Synthesized Proposal (Live AI Agent):' : 'Default Mapping Recommendations:'}
+                {aiSuggestions
+                  ? 'Synthesized Proposal (Live AI Agent):'
+                  : isDemo
+                  ? 'Demo Mode Sample Recommendations:'
+                  : 'Schema Mapping AI Agent'}
               </p>
               {aiSuggestions ? (
                 <pre className="p-3 rounded bg-black/40 text-[11px] text-infra-text overflow-x-auto max-h-48 font-mono">
                   {JSON.stringify(aiSuggestions, null, 2)}
                 </pre>
-              ) : (
+              ) : isDemo ? (
                 <ul className="list-disc pl-5 space-y-1 text-infra-text font-sans">
                   <li>Map <code>customers.createdAt</code> to <code>created_at</code> using <code>PARSE_TIMESTAMP</code>.</li>
                   <li>Convert <code>customers.email</code> using <code>LOWERCASE</code> to satisfy unique constraint.</li>
                   <li>Serialize complex <code>customers.address</code> object using <code>TO_JSONB</code>.</li>
                   <li>Normalize array <code>customers.orders[]</code> into relational child table <code>public.orders</code>.</li>
                 </ul>
+              ) : (
+                <p className="text-infra-muted font-sans">
+                  No AI mapping proposals fetched yet. Click <span className="text-emerald-300 font-semibold">Synthesize AI Mappings</span> above to query the backend Schema Mapping AI Agent.
+                </p>
               )}
             </div>
           </div>
@@ -1652,7 +1674,9 @@ export default function MigrationWizardPage() {
                     </div>
                     <div className="bg-black/30 p-2 rounded border border-emerald-500/20">
                       <span className="text-infra-muted block text-[10px]">Errors / Conflicts</span>
-                      <span className="font-bold text-emerald-400">0 / 0</span>
+                      <span className="font-bold text-emerald-400">
+                        {dryRunDetails.transformationErrors ?? 0} / {Array.isArray(dryRunDetails.potentialTypeConflicts) ? dryRunDetails.potentialTypeConflicts.length : 0}
+                      </span>
                     </div>
                     <div className="bg-black/30 p-2 rounded border border-emerald-500/20">
                       <span className="text-infra-muted block text-[10px]">Duration</span>
@@ -1757,41 +1781,69 @@ export default function MigrationWizardPage() {
               </div>
             )}
 
-            <div className="p-4 rounded-xl bg-infra-surface border border-infra-border space-y-3 font-mono text-xs">
-              <div className="flex justify-between items-center">
-                <span>Run ID: <code className="text-emerald-400">{migrationRun?.id || 'Not Started'}</code></span>
-                <Badge variant={migrationRun?.status === 'MIGRATED' || migrationRun?.status === 'VALIDATED' ? 'emerald' : 'sky'}>
-                  {runProgress?.status || migrationRun?.status || 'READY'}
-                </Badge>
-              </div>
+            {(() => {
+              const effectiveRunStatus = runProgress?.status || migrationRun?.status || 'NOT STARTED';
+              const hasRealProgress = runProgress && typeof runProgress.percentage === 'number';
+              const displayPct = hasRealProgress
+                ? Number(runProgress.percentage)
+                : isDemo && migrationRun
+                ? 85
+                : 0;
+              const displayThroughput =
+                runProgress?.throughputRecordsPerSec !== undefined
+                  ? `${runProgress.throughputRecordsPerSec} records/sec`
+                  : isDemo && migrationRun
+                  ? '425 records/sec'
+                  : migrationRun
+                  ? '0 records/sec (awaiting batches)'
+                  : '—';
+              const runBadgeVariant =
+                effectiveRunStatus === 'COMPLETED' || effectiveRunStatus === 'MIGRATED' || effectiveRunStatus === 'VALIDATED'
+                  ? 'emerald'
+                  : effectiveRunStatus === 'FAILED' || effectiveRunStatus === 'CANCELLED'
+                  ? 'rose'
+                  : migrationRun
+                  ? 'sky'
+                  : 'slate';
 
-              <div className="space-y-1.5">
-                <div className="flex justify-between text-infra-muted text-[11px]">
-                  <span>Throughput: {runProgress?.throughputRecordsPerSec || 425} records/sec</span>
-                  <span className="text-emerald-400 font-bold">{runProgress?.percentage || 85}% Complete</span>
-                </div>
-                <div className="w-full h-2 rounded-full bg-black/60 overflow-hidden">
-                  <div
-                    className="h-full bg-emerald-400 transition-all duration-500"
-                    style={{ width: `${runProgress?.percentage || 85}%` }}
-                  />
-                </div>
-              </div>
-
-              {runBatches.length > 0 && (
-                <div className="pt-2">
-                  <span className="text-[11px] text-infra-muted block mb-1">Batches Processed ({runBatches.length}):</span>
-                  <div className="grid grid-cols-4 gap-2 max-h-32 overflow-y-auto">
-                    {runBatches.slice(0, 8).map((b) => (
-                      <div key={b.id} className="p-1.5 rounded bg-black/40 border border-infra-border text-[10px]">
-                        <span className="text-infra-heading font-semibold">#{b.batchIndex ?? (b as any).batchNumber ?? 1}</span> •{' '}
-                        <span className="text-emerald-400">{b.recordsCount ?? (b as any).recordsProcessed ?? 0} docs</span>
-                      </div>
-                    ))}
+              return (
+                <div className="p-4 rounded-xl bg-infra-surface border border-infra-border space-y-3 font-mono text-xs">
+                  <div className="flex justify-between items-center">
+                    <span>Run ID: <code className="text-emerald-400">{migrationRun?.id || 'Not Started'}</code></span>
+                    <Badge variant={runBadgeVariant}>{effectiveRunStatus}</Badge>
                   </div>
+
+                  <div className="space-y-1.5">
+                    <div className="flex justify-between text-infra-muted text-[11px]">
+                      <span>Throughput: {displayThroughput}</span>
+                      <span className={displayPct > 0 ? 'text-emerald-400 font-bold' : 'text-infra-muted font-bold'}>
+                        {migrationRun || (isDemo && displayPct > 0) ? `${displayPct}% Complete` : 'Not Started (0%)'}
+                      </span>
+                    </div>
+                    <div className="w-full h-2 rounded-full bg-black/60 overflow-hidden">
+                      <div
+                        className="h-full bg-emerald-400 transition-all duration-500"
+                        style={{ width: `${displayPct}%` }}
+                      />
+                    </div>
+                  </div>
+
+                  {runBatches.length > 0 && (
+                    <div className="pt-2">
+                      <span className="text-[11px] text-infra-muted block mb-1">Batches Processed ({runBatches.length}):</span>
+                      <div className="grid grid-cols-4 gap-2 max-h-32 overflow-y-auto">
+                        {runBatches.slice(0, 8).map((b) => (
+                          <div key={b.id} className="p-1.5 rounded bg-black/40 border border-infra-border text-[10px]">
+                            <span className="text-infra-heading font-semibold">#{b.batchIndex ?? (b as any).batchNumber ?? 1}</span> •{' '}
+                            <span className="text-emerald-400">{b.recordsCount ?? (b as any).recordsProcessed ?? 0} docs</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
+              );
+            })()}
           </div>
         )}
 
@@ -1805,14 +1857,14 @@ export default function MigrationWizardPage() {
                   <span>Step 13: Deterministic Validation & Discrepancy Reconciliation</span>
                 </h3>
                 <p className="text-xs text-infra-muted mt-0.5">
-                  Execute post-migration dual-engine verification to detect seeded anomalies.
+                  Execute post-migration dual-engine verification to reconcile source and destination records.
                 </p>
               </div>
 
               <button
                 onClick={handleTriggerValidation}
-                disabled={isValidating}
-                className="flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-mono font-semibold bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40"
+                disabled={isValidating || (!isDemo && !migrationRun?.id)}
+                className="flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-mono font-semibold bg-amber-500/20 hover:bg-amber-500/30 disabled:opacity-40 text-amber-300 border border-amber-500/40"
               >
                 {isValidating ? <RefreshCw size={12} className="animate-spin" /> : <ShieldCheck size={12} />}
                 <span>Trigger Validation</span>
@@ -1826,39 +1878,87 @@ export default function MigrationWizardPage() {
               </div>
             )}
 
-            <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs font-mono space-y-3 text-amber-300">
-              <div className="flex justify-between items-center">
-                <span className="font-bold">Validation Run Status:</span>
-                <Badge variant="amber">{validationRun?.status || 'VERIFIED'}</Badge>
-              </div>
+            {(() => {
+              const hasValidation = Boolean(validationRun);
+              const valStatus = validationRun?.status || (isDemo ? 'VERIFIED' : 'NOT STARTED');
+              const valBadgeVariant =
+                valStatus === 'PASSED' || valStatus === 'VERIFIED'
+                  ? 'emerald'
+                  : valStatus === 'FAILED'
+                  ? 'rose'
+                  : hasValidation
+                  ? 'amber'
+                  : 'slate';
 
-              <div className="grid grid-cols-4 gap-2 text-center text-[11px]">
-                <div className="p-2 rounded bg-black/40 border border-amber-500/20">
-                  <span className="block text-amber-400 font-bold text-sm">
-                    {discrepancies.filter((d) => d.category === 'ATTACHMENT_MISSING' || d.category === 'ATTACHMENT_CHECKSUM_MISMATCH').length || 15}
-                  </span>
-                  <span>Missing Attachments</span>
+              const attachCount = hasValidation
+                ? discrepancies.filter((d) => d.category === 'ATTACHMENT_MISSING' || d.category === 'ATTACHMENT_CHECKSUM_MISMATCH').length
+                : isDemo
+                ? 15
+                : null;
+              const dupCount = hasValidation
+                ? discrepancies.filter((d) => d.category === 'DUPLICATE_RECORD').length
+                : isDemo
+                ? 10
+                : null;
+              const brokenRefCount = hasValidation
+                ? discrepancies.filter((d) => d.category === 'BROKEN_REFERENCE').length
+                : isDemo
+                ? 8
+                : null;
+              const metaMismatchCount = hasValidation
+                ? discrepancies.filter((d) => d.category === 'METADATA_MISMATCH').length
+                : isDemo
+                ? 12
+                : null;
+
+              return (
+                <div
+                  className={`p-4 rounded-xl border text-xs font-mono space-y-3 ${
+                    hasValidation || isDemo
+                      ? 'bg-amber-500/10 border-amber-500/30 text-amber-300'
+                      : 'bg-infra-surface border-infra-border text-infra-muted'
+                  }`}
+                >
+                  <div className="flex justify-between items-center">
+                    <span className="font-bold">Validation Run Status:</span>
+                    <Badge variant={valBadgeVariant}>{valStatus}</Badge>
+                  </div>
+
+                  {!hasValidation && !isDemo && (
+                    <p className="text-[11px] text-infra-muted font-sans">
+                      NO DATA — Validation has not been executed for this migration run yet. Start a run in Step 12 and click <span className="text-amber-300 font-semibold">Trigger Validation</span> to obtain live discrepancy metrics.
+                    </p>
+                  )}
+
+                  <div className="grid grid-cols-4 gap-2 text-center text-[11px]">
+                    <div className="p-2 rounded bg-black/40 border border-infra-border">
+                      <span className="block text-amber-400 font-bold text-sm">
+                        {attachCount !== null ? attachCount : '—'}
+                      </span>
+                      <span>Missing Attachments</span>
+                    </div>
+                    <div className="p-2 rounded bg-black/40 border border-infra-border">
+                      <span className="block text-amber-400 font-bold text-sm">
+                        {dupCount !== null ? dupCount : '—'}
+                      </span>
+                      <span>Duplicate Records</span>
+                    </div>
+                    <div className="p-2 rounded bg-black/40 border border-infra-border">
+                      <span className="block text-amber-400 font-bold text-sm">
+                        {brokenRefCount !== null ? brokenRefCount : '—'}
+                      </span>
+                      <span>Broken References</span>
+                    </div>
+                    <div className="p-2 rounded bg-black/40 border border-infra-border">
+                      <span className="block text-amber-400 font-bold text-sm">
+                        {metaMismatchCount !== null ? metaMismatchCount : '—'}
+                      </span>
+                      <span>Metadata Mismatches</span>
+                    </div>
+                  </div>
                 </div>
-                <div className="p-2 rounded bg-black/40 border border-amber-500/20">
-                  <span className="block text-amber-400 font-bold text-sm">
-                    {discrepancies.filter((d) => d.category === 'DUPLICATE_RECORD').length || 10}
-                  </span>
-                  <span>Duplicate Records</span>
-                </div>
-                <div className="p-2 rounded bg-black/40 border border-amber-500/20">
-                  <span className="block text-amber-400 font-bold text-sm">
-                    {discrepancies.filter((d) => d.category === 'BROKEN_REFERENCE').length || 8}
-                  </span>
-                  <span>Broken References</span>
-                </div>
-                <div className="p-2 rounded bg-black/40 border border-amber-500/20">
-                  <span className="block text-amber-400 font-bold text-sm">
-                    {discrepancies.filter((d) => d.category === 'METADATA_MISMATCH').length || 12}
-                  </span>
-                  <span>Metadata Mismatches</span>
-                </div>
-              </div>
-            </div>
+              );
+            })()}
           </div>
         )}
 
@@ -1872,6 +1972,13 @@ export default function MigrationWizardPage() {
             <p className="text-xs text-infra-muted">
               Download certified audit reports and CSV evidence logs for corporate compliance.
             </p>
+
+            {!isDemo && !validationRun?.id && (
+              <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/30 text-xs font-mono text-amber-300 flex items-center gap-2">
+                <AlertTriangle size={15} className="text-amber-400 shrink-0" />
+                <span>Complete Step 13 validation first before generating compliance reports.</span>
+              </div>
+            )}
 
             {reportError && (
               <div className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/30 text-xs font-mono text-rose-300 flex items-center gap-2">
@@ -1890,16 +1997,16 @@ export default function MigrationWizardPage() {
             <div className="flex gap-3 pt-2">
               <button
                 onClick={() => handleDownloadReport('HTML')}
-                disabled={isGeneratingHtml}
-                className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-xs font-mono font-semibold bg-emerald-500 hover:bg-emerald-400 text-infra-base transition-colors shadow-md shadow-emerald-500/20"
+                disabled={isGeneratingHtml || (!isDemo && !validationRun?.id)}
+                className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-xs font-mono font-semibold bg-emerald-500 hover:bg-emerald-400 disabled:opacity-40 text-infra-base transition-colors shadow-md shadow-emerald-500/20"
               >
                 {isGeneratingHtml ? <RefreshCw size={14} className="animate-spin" /> : <Download size={14} />}
                 <span>Download Executive HTML Report</span>
               </button>
               <button
                 onClick={() => handleDownloadReport('CSV')}
-                disabled={isGeneratingCsv}
-                className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-xs font-mono font-semibold bg-infra-surface border border-infra-border hover:bg-infra-cardHover text-infra-text transition-colors"
+                disabled={isGeneratingCsv || (!isDemo && !validationRun?.id)}
+                className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-xs font-mono font-semibold bg-infra-surface border border-infra-border hover:bg-infra-cardHover disabled:opacity-40 text-infra-text transition-colors"
               >
                 {isGeneratingCsv ? <RefreshCw size={14} className="animate-spin" /> : <Download size={14} />}
                 <span>Export Detailed Discrepancies CSV</span>

@@ -53,6 +53,7 @@ jobs:
       REDIS_HOST: "localhost"
       REDIS_PORT: 6379
       REDIS_URL: "redis://localhost:6379"
+      MIGRATIONGUARD_TEST_REDIS_URL: "redis://localhost:6379"
       MONGO_URL: "mongodb://localhost:27017/migrationguard_e2e_source"
       MIGRATIONGUARD_TEST_MONGO_URL: "mongodb://localhost:27017/migrationguard_e2e_source"
 

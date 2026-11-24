@@ -518,56 +518,424 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
+  private static readonly FORBIDDEN_READONLY_KEYWORDS = new Set([
+    'INSERT',
+    'UPDATE',
+    'DELETE',
+    'MERGE',
+    'DROP',
+    'CREATE',
+    'ALTER',
+    'TRUNCATE',
+    'GRANT',
+    'REVOKE',
+    'VACUUM',
+    'ANALYZE',
+    'ANALYSE',
+    'CALL',
+    'DO',
+    'EXECUTE',
+    'PREPARE',
+    'DEALLOCATE',
+    'COPY',
+    'LOCK',
+    'INTO',
+    'RETURNING',
+    'NOTIFY',
+    'LISTEN',
+    'UNLISTEN',
+  ]);
+
+  private static readonly ALLOWED_CLAUSE_KEYWORDS_BEFORE_PAREN = new Set([
+    'SELECT',
+    'FROM',
+    'JOIN',
+    'WHERE',
+    'HAVING',
+    'ON',
+    'USING',
+    'IN',
+    'NOT',
+    'AND',
+    'OR',
+    'EXISTS',
+    'ANY',
+    'ALL',
+    'SOME',
+    'VALUES',
+    'CASE',
+    'WHEN',
+    'THEN',
+    'ELSE',
+    'AS',
+    'OVER',
+    'FILTER',
+    'WITHIN',
+    'PARTITION',
+    'ORDER',
+    'GROUP',
+    'BY',
+    'ROW',
+    'ARRAY',
+    'UNION',
+    'INTERSECT',
+    'EXCEPT',
+    'DISTINCT',
+    'CROSS',
+    'LEFT',
+    'RIGHT',
+    'INNER',
+    'OUTER',
+    'FULL',
+    'NATURAL',
+    'LATERAL',
+    'GROUPING',
+    'ROLLUP',
+    'CUBE',
+    'SETS',
+    // SQL data type precision keywords (e.g. CAST(x AS VARCHAR(255)), x::NUMERIC(10, 2))
+    'VARCHAR',
+    'CHAR',
+    'CHARACTER',
+    'VARYING',
+    'NUMERIC',
+    'DECIMAL',
+    'BIT',
+    'VARBIT',
+    'TIME',
+    'TIMESTAMP',
+    'TIMESTAMPTZ',
+    'INTERVAL',
+  ]);
+
+  private static readonly SAFE_PURE_SQL_FUNCTIONS = new Set([
+    'COUNT',
+    'SUM',
+    'AVG',
+    'MIN',
+    'MAX',
+    'COALESCE',
+    'NULLIF',
+    'GREATEST',
+    'LEAST',
+    'LOWER',
+    'UPPER',
+    'TRIM',
+    'BTRIM',
+    'LTRIM',
+    'RTRIM',
+    'LENGTH',
+    'CHAR_LENGTH',
+    'CHARACTER_LENGTH',
+    'SUBSTRING',
+    'SUBSTR',
+    'CONCAT',
+    'CONCAT_WS',
+    'SPLIT_PART',
+    'REPLACE',
+    'NOW',
+    'CURRENT_TIMESTAMP',
+    'CURRENT_DATE',
+    'CURRENT_TIME',
+    'VERSION',
+    'CURRENT_DATABASE',
+    'CURRENT_SCHEMA',
+    'CAST',
+    'EXTRACT',
+    'DATE_TRUNC',
+    'TO_CHAR',
+    'TO_TIMESTAMP',
+    'JSON_BUILD_OBJECT',
+    'JSONB_BUILD_OBJECT',
+    'JSON_AGG',
+    'JSONB_AGG',
+    'JSON_TYPEOF',
+    'JSONB_TYPEOF',
+    'ARRAY_AGG',
+    'ROW_NUMBER',
+    'RANK',
+    'DENSE_RANK',
+    'ABS',
+    'ROUND',
+    'FLOOR',
+    'CEIL',
+    'CEILING',
+  ]);
+
   /**
-   * Only strictly read-only, non-mutating statements without side-effects are safe to retry on transient socket drops.
-   * Mutating queries (INSERT, UPDATE, DELETE, DDL), EXPLAIN ANALYZE, row-locking queries (FOR UPDATE/SHARE),
-   * sequence mutations (nextval/setval), and advisory locks are never retried.
+   * Minimal PostgreSQL-aware SQL tokenizer for retry-safety evaluation.
+   * Strips line comments and nested block comments; handles single-quoted,
+   * backslash-escaped (E'...'), dollar-quoted ($tag$...$tag$), and double-quoted tokens.
+   * Returns null (fail-closed) on any unclosed string, identifier, or block comment.
    */
-  private isIdempotentQuery(sql: string): boolean {
-    if (!sql || typeof sql !== 'string') return false;
-    const clean = sql.trim();
-    if (!clean) return false;
+  private static tokenizeSql(
+    sql: string,
+  ): Array<{ type: 'WORD' | 'QUOTED_IDENT' | 'STRING' | 'NUMBER' | 'PARAM' | 'PUNCT' | 'OP'; value: string; upper: string }> | null {
+    const tokens: Array<{
+      type: 'WORD' | 'QUOTED_IDENT' | 'STRING' | 'NUMBER' | 'PARAM' | 'PUNCT' | 'OP';
+      value: string;
+      upper: string;
+    }> = [];
+    const n = sql.length;
+    let i = 0;
 
-    // Reject multi-statement queries to prevent injection of mutating commands after a read
-    const statements = clean.split(';').map((s) => s.trim()).filter(Boolean);
-    if (statements.length > 1) return false;
+    while (i < n) {
+      const ch = sql[i];
 
-    const normalized = clean.toUpperCase();
+      // 1. Skip whitespace
+      if (/\s/.test(ch)) {
+        i++;
+        continue;
+      }
 
-    // Must strictly start with safe read-only commands
-    const isAllowedStart =
-      normalized.startsWith('SELECT') ||
-      normalized.startsWith('SHOW') ||
-      normalized.startsWith('SET') ||
-      (normalized.startsWith('EXPLAIN') && !normalized.includes('ANALYZE') && !normalized.includes('ANALYSE'));
+      // 2. Skip line comments (-- ...)
+      if (ch === '-' && sql[i + 1] === '-') {
+        i += 2;
+        while (i < n && sql[i] !== '\n') i++;
+        continue;
+      }
 
-    if (!isAllowedStart) return false;
+      // 3. Skip nested block comments (/* ... */)
+      if (ch === '/' && sql[i + 1] === '*') {
+        let depth = 1;
+        i += 2;
+        while (i < n && depth > 0) {
+          if (sql[i] === '/' && sql[i + 1] === '*') {
+            depth++;
+            i += 2;
+          } else if (sql[i] === '*' && sql[i + 1] === '/') {
+            depth--;
+            i += 2;
+          } else {
+            i++;
+          }
+        }
+        if (depth > 0) return null; // Unclosed comment
+        continue;
+      }
 
-    // Reject any mutating keywords, DDL, side-effecting functions, locking, or advisory locks
-    const forbiddenPatterns = [
-      /\bINSERT\b/i,
-      /\bUPDATE\b/i,
-      /\bDELETE\b/i,
-      /\bDROP\b/i,
-      /\bCREATE\b/i,
-      /\bALTER\b/i,
-      /\bTRUNCATE\b/i,
-      /\bGRANT\b/i,
-      /\bREVOKE\b/i,
-      /\bVACUUM\b/i,
-      /\bREFRESH\s+MATERIALIZED\b/i,
-      /\bFOR\s+(?:UPDATE|SHARE|KEY\s+SHARE|NO\s+KEY\s+UPDATE)\b/i,
-      /\b(?:NEXTVAL|SETVAL)\s*\(/i,
-      /\bPG_(?:TRY_)?ADVISORY_(?:XACT_)?LOCK\b/i,
-    ];
+      // 4. Escaped / Prefixed string literals (E'...', B'...', X'...', N'...')
+      if ((ch === 'E' || ch === 'e' || ch === 'N' || ch === 'n' || ch === 'B' || ch === 'b' || ch === 'X' || ch === 'x') && sql[i + 1] === "'") {
+        const allowBackslash = ch === 'E' || ch === 'e';
+        let start = i;
+        i += 2;
+        let closed = false;
+        while (i < n) {
+          if (allowBackslash && sql[i] === '\\') {
+            i += 2;
+            continue;
+          }
+          if (sql[i] === "'") {
+            if (sql[i + 1] === "'") {
+              i += 2;
+              continue;
+            }
+            i++;
+            closed = true;
+            break;
+          }
+          i++;
+        }
+        if (!closed) return null;
+        const val = sql.slice(start, i);
+        tokens.push({ type: 'STRING', value: val, upper: val.toUpperCase() });
+        continue;
+      }
 
-    for (const pattern of forbiddenPatterns) {
-      if (pattern.test(clean)) {
-        return false;
+      // 5. Standard single-quoted string literal ('...')
+      if (ch === "'") {
+        let start = i;
+        i++;
+        let closed = false;
+        while (i < n) {
+          if (sql[i] === "'") {
+            if (sql[i + 1] === "'") {
+              i += 2;
+              continue;
+            }
+            i++;
+            closed = true;
+            break;
+          }
+          i++;
+        }
+        if (!closed) return null;
+        const val = sql.slice(start, i);
+        tokens.push({ type: 'STRING', value: val, upper: val.toUpperCase() });
+        continue;
+      }
+
+      // 6. Double-quoted identifier ("...")
+      if (ch === '"') {
+        let start = i;
+        i++;
+        let closed = false;
+        while (i < n) {
+          if (sql[i] === '"') {
+            if (sql[i + 1] === '"') {
+              i += 2;
+              continue;
+            }
+            i++;
+            closed = true;
+            break;
+          }
+          i++;
+        }
+        if (!closed) return null;
+        const val = sql.slice(start, i);
+        tokens.push({ type: 'QUOTED_IDENT', value: val, upper: val.toUpperCase() });
+        continue;
+      }
+
+      // 7. Dollar-quoted string ($tag$...$tag$) OR positional param ($1)
+      if (ch === '$') {
+        const paramMatch = /^\$[0-9]+/.exec(sql.slice(i));
+        if (paramMatch) {
+          tokens.push({ type: 'PARAM', value: paramMatch[0], upper: paramMatch[0] });
+          i += paramMatch[0].length;
+          continue;
+        }
+        const tagMatch = /^\$([a-zA-Z_][a-zA-Z0-9_]*)?\$/.exec(sql.slice(i));
+        if (tagMatch) {
+          const delimiter = tagMatch[0];
+          const closeIdx = sql.indexOf(delimiter, i + delimiter.length);
+          if (closeIdx === -1) return null; // Unclosed dollar-quoted string
+          const endIdx = closeIdx + delimiter.length;
+          const val = sql.slice(i, endIdx);
+          tokens.push({ type: 'STRING', value: val, upper: val.toUpperCase() });
+          i = endIdx;
+          continue;
+        }
+      }
+
+      // 8. Numbers
+      if (/[0-9]/.test(ch)) {
+        const numMatch = /^[0-9]+(?:\.[0-9]+)?/.exec(sql.slice(i));
+        if (numMatch) {
+          tokens.push({ type: 'NUMBER', value: numMatch[0], upper: numMatch[0] });
+          i += numMatch[0].length;
+          continue;
+        }
+      }
+
+      // 9. Words (unquoted keywords or identifiers)
+      if (/[a-zA-Z_]/.test(ch)) {
+        const wordMatch = /^[a-zA-Z_][a-zA-Z0-9_$]*/.exec(sql.slice(i));
+        if (wordMatch) {
+          const val = wordMatch[0];
+          tokens.push({ type: 'WORD', value: val, upper: val.toUpperCase() });
+          i += val.length;
+          continue;
+        }
+      }
+
+      // 10. Structural punctuation
+      if (ch === '(' || ch === ')' || ch === ',' || ch === ';' || ch === '.') {
+        tokens.push({ type: 'PUNCT', value: ch, upper: ch });
+        i++;
+        continue;
+      }
+
+      // 11. Multi-char and single-char operators (::, <>, !=, <=, >=, ||, etc.)
+      const opMatch = /^(?:::|<>|!=|<=|>=|\|\||->>|->|#>>|#>|[=<>+\-*/%!~&|^@#?:])/.exec(sql.slice(i));
+      if (opMatch) {
+        tokens.push({ type: 'OP', value: opMatch[0], upper: opMatch[0] });
+        i += opMatch[0].length;
+        continue;
+      }
+
+      // Fail closed on unrecognized character
+      return null;
+    }
+
+    return tokens;
+  }
+
+  /**
+   * Evaluates whether a SQL statement passes our strict read-only SQL-lexer & pure-function
+   * allowlist policy, failing closed on any unrecognized constructs or potential side effects.
+   *
+   * Policy (fail-closed):
+   * - Single statement only (rejects multi-statement queries).
+   * - Must begin with SELECT (rejects WITH CTEs, EXPLAIN/EXPLAIN ANALYZE, SET, SHOW, CALL, DO, DDL, DML).
+   * - Disallows mutating/locking keywords (INSERT, UPDATE, DELETE, INTO, FOR UPDATE/SHARE, etc.).
+   * - Rejects quoted-identifier function calls ("fn"()) and schema-qualified calls (schema.fn()).
+   * - Rejects ANY unrecognized function call not present in SAFE_PURE_SQL_FUNCTIONS
+   *   (blocking pg_notify, set_config, nextval, setval, pg_advisory_lock, and arbitrary custom functions).
+   */
+  public static isSafeRetryableReadQuery(sql: string): boolean {
+    if (!sql || typeof sql !== 'string' || !sql.trim()) return false;
+
+    const tokens = DatabaseService.tokenizeSql(sql);
+    if (!tokens || tokens.length === 0) return false;
+
+    // Strip a single optional trailing semicolon
+    if (tokens[tokens.length - 1].type === 'PUNCT' && tokens[tokens.length - 1].value === ';') {
+      tokens.pop();
+    }
+    if (tokens.length === 0) return false;
+
+    // Reject any internal semicolons (multi-statement queries)
+    if (tokens.some((t) => t.type === 'PUNCT' && t.value === ';')) {
+      return false;
+    }
+
+    // Must start with unquoted SELECT
+    if (tokens[0].type !== 'WORD' || tokens[0].upper !== 'SELECT') {
+      return false;
+    }
+
+    for (let i = 0; i < tokens.length; i++) {
+      const tok = tokens[i];
+      const next = tokens[i + 1];
+      const prev = tokens[i - 1];
+
+      if (tok.type === 'WORD') {
+        if (DatabaseService.FORBIDDEN_READONLY_KEYWORDS.has(tok.upper)) {
+          return false;
+        }
+
+        // Reject FOR UPDATE / FOR SHARE / FOR NO KEY UPDATE / FOR KEY SHARE
+        if (tok.upper === 'FOR' && next?.type === 'WORD') {
+          if (
+            next.upper === 'UPDATE' ||
+            next.upper === 'SHARE' ||
+            next.upper === 'KEY' ||
+            next.upper === 'NO'
+          ) {
+            return false;
+          }
+        }
+      }
+
+      // Inspect any call-like construct followed by '('
+      if (next && next.type === 'PUNCT' && next.value === '(') {
+        if (tok.type === 'QUOTED_IDENT') {
+          return false; // Reject quoted function calls like "pg_notify"(...)
+        }
+
+        if (tok.type === 'WORD') {
+          // Reject any schema-qualified function call like public.fn(...) or pg_catalog.set_config(...)
+          if (prev && prev.type === 'PUNCT' && prev.value === '.') {
+            return false;
+          }
+
+          if (
+            !DatabaseService.ALLOWED_CLAUSE_KEYWORDS_BEFORE_PAREN.has(tok.upper) &&
+            !DatabaseService.SAFE_PURE_SQL_FUNCTIONS.has(tok.upper)
+          ) {
+            return false;
+          }
+        }
       }
     }
 
     return true;
+  }
+
+  private isIdempotentQuery(sql: string): boolean {
+    return DatabaseService.isSafeRetryableReadQuery(sql);
   }
 
   /**

@@ -13,7 +13,7 @@ export interface QueryResult<T = any> {
 @Injectable()
 export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   private pool: pg.Pool | null = null;
-  private isConnected = false;
+  public isConnected = false;
   private customDatabaseUrl?: string;
   private customSearchPath?: string;
 

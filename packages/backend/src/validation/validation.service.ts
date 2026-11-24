@@ -443,7 +443,7 @@ export class ValidationService {
               connStr === process.env.TEST_DATABASE_URL ||
               connStr === process.env.DATABASE_URL;
 
-            const queryRunner = (isControlPlane && this.db.isConnected)
+            const queryRunner = (isControlPlane && (this.db.isDbConnected || this.db.isConnected))
               ? this.db
               : new (require('pg').Pool)({ connectionString: connStr, connectionTimeoutMillis: 5000 });
             try {

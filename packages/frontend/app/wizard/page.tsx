@@ -224,9 +224,9 @@ export default function MigrationWizardPage() {
         setSourceHandshake({
           loading: false,
           tested: true,
-          success: sRes.value.success,
+          success: Boolean(sRes.value.success ?? (sRes.value as any).reachable ?? (sRes.value as any).status === 'HEALTHY'),
           latencyMs: sRes.value.latencyMs,
-          message: sRes.value.message,
+          message: sRes.value.message ?? (sRes.value as any).error,
         });
       } else {
         setSourceHandshake({
@@ -240,9 +240,9 @@ export default function MigrationWizardPage() {
         setTargetHandshake({
           loading: false,
           tested: true,
-          success: tRes.value.success,
+          success: Boolean(tRes.value.success ?? (tRes.value as any).reachable ?? (tRes.value as any).status === 'HEALTHY'),
           latencyMs: tRes.value.latencyMs,
-          message: tRes.value.message,
+          message: tRes.value.message ?? (tRes.value as any).error,
         });
       } else {
         setTargetHandshake({
@@ -1142,7 +1142,7 @@ export default function MigrationWizardPage() {
                       <Badge variant="emerald" size="sm">v{c.credentialVersion || 1}</Badge>
                     </div>
                     <p className="text-xs font-mono text-infra-muted">
-                      {c.config.host || 'cluster.internal'}:{c.config.port || 27017}/{c.config.database || 'appdb'}
+                      {(c.config || (c as any).config_json || {}).host || 'cluster.internal'}:{(c.config || (c as any).config_json || {}).port || 27017}/{(c.config || (c as any).config_json || {}).database || 'appdb'}
                     </p>
                   </div>
                 ))}
@@ -1194,7 +1194,7 @@ export default function MigrationWizardPage() {
                       <Badge variant="sky" size="sm">v{c.credentialVersion || 1}</Badge>
                     </div>
                     <p className="text-xs font-mono text-infra-muted">
-                      {c.config.host || 'postgres.internal'}:{c.config.port || 5432}/{c.config.database || 'migrationguard_dest'} (schema: {c.config.schema || 'public'})
+                      {(c.config || (c as any).config_json || {}).host || 'postgres.internal'}:{(c.config || (c as any).config_json || {}).port || 5432}/{(c.config || (c as any).config_json || {}).database || 'migrationguard_dest'} (schema: {(c.config || (c as any).config_json || {}).schema || 'public'})
                     </p>
                   </div>
                 ))}

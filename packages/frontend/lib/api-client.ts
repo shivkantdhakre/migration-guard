@@ -211,6 +211,19 @@ async function request<T>(url: string, options: RequestInit = {}, fallbackData?:
   }
 }
 
+function normalizeConnection(raw: any): DatabaseConnection {
+  if (!raw || typeof raw !== 'object') return raw;
+  return {
+    ...raw,
+    config: raw.config ?? raw.config_json ?? {},
+    credentialVersion: raw.credentialVersion ?? raw.credential_version ?? 1,
+    connectionRole: raw.connectionRole ?? raw.connection_role,
+    workspaceId: raw.workspaceId ?? raw.workspace_id,
+    createdAt: raw.createdAt ?? raw.created_at,
+    updatedAt: raw.updatedAt ?? raw.updated_at,
+  };
+}
+
 export const apiClient = {
   // Authentication
   async login(email: string, password: string): Promise<{ access_token: string; user: any }> {
@@ -261,26 +274,38 @@ export const apiClient = {
 
   // Connections
   async getConnections(workspaceId = 'default'): Promise<DatabaseConnection[]> {
-    return request<DatabaseConnection[]>(
+    const list = await request<any[]>(
       `/workspaces/${workspaceId}/connections`,
       {},
       MOCK_CONNECTIONS
     );
+    return Array.isArray(list) ? list.map(normalizeConnection) : [];
   },
 
   async createConnection(workspaceId = 'default', payload: any): Promise<DatabaseConnection> {
-    return request<DatabaseConnection>(`/workspaces/${workspaceId}/connections`, {
+    const created = await request<any>(`/workspaces/${workspaceId}/connections`, {
       method: 'POST',
       body: JSON.stringify(payload),
     });
+    return normalizeConnection(created);
   },
 
   async testConnection(connectionId: string): Promise<{ success: boolean; latencyMs: number; message: string }> {
-    return request(
+    const res = await request<any>(
       `/connections/${connectionId}/test`,
       { method: 'POST' },
       { success: true, latencyMs: 14, message: 'Connection established with read/write capability verified.' }
     );
+    const success = Boolean(res?.success ?? res?.reachable ?? res?.status === 'HEALTHY');
+    return {
+      success,
+      latencyMs: Number(res?.latencyMs ?? 0),
+      message: String(
+        res?.message ??
+          res?.error ??
+          (success ? `${res?.engineVersion || 'Connected'} verified` : 'Connection probe failed')
+      ),
+    };
   },
 
   async rotateCredentials(connectionId: string, payload: { username?: string; password?: string }): Promise<{ success: boolean; newVersion: number }> {

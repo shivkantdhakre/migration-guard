@@ -214,10 +214,10 @@ export default function ConnectionsPage() {
                     <p className="text-xs text-infra-muted font-mono mt-1 flex items-center gap-2">
                       <span>ID: {conn.id}</span>
                       <span>•</span>
-                      <span>Host: {conn.config.host}:{conn.config.port}</span>
+                      <span>Host: {(conn.config || (conn as any).config_json || {}).host || 'localhost'}:{(conn.config || (conn as any).config_json || {}).port || (conn.engine === 'MONGODB' ? 27017 : 5432)}</span>
                       <span>•</span>
-                      <span>Database: {conn.config.database}</span>
-                      {conn.config.schema && <span>• Schema: {conn.config.schema}</span>}
+                      <span>Database: {(conn.config || (conn as any).config_json || {}).database || 'default'}</span>
+                      {(conn.config || (conn as any).config_json || {}).schema && <span>• Schema: {(conn.config || (conn as any).config_json || {}).schema}</span>}
                     </p>
                   </div>
                 </div>
@@ -254,13 +254,13 @@ export default function ConnectionsPage() {
                   </span>
                   <span>
                     TLS Encryption:{' '}
-                    <strong className={conn.config.tls ? 'text-emerald-400' : 'text-amber-400'}>
-                      {conn.config.tls ? 'TLS Enabled (Mandatory)' : 'Disabled'}
+                    <strong className={(conn.config || (conn as any).config_json || {}).tls ? 'text-emerald-400' : 'text-amber-400'}>
+                      {(conn.config || (conn as any).config_json || {}).tls ? 'TLS Enabled (Mandatory)' : 'Disabled'}
                     </strong>
                   </span>
                   <span>
                     Vault Credential Version:{' '}
-                    <strong className="text-infra-text">v{conn.credentialVersion}</strong>
+                    <strong className="text-infra-text">v{conn.credentialVersion ?? (conn as any).credential_version ?? 1}</strong>
                   </span>
                 </div>
 

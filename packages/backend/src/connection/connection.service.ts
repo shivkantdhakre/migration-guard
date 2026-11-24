@@ -236,11 +236,13 @@ export class ConnectionService {
       engine: conn.engine,
       status: newStatus,
       reachable,
+      success: reachable,
       latencyMs: reachable ? latencyMs : undefined,
       engineVersion: reachable ? engineVersion : undefined,
       capabilities,
       testedAt: new Date().toISOString(),
       credentialVersion: conn.credential_version,
+      message: errorMessage || `${conn.engine} ${engineVersion} reachable (${latencyMs}ms)`,
       error: errorMessage || undefined,
     };
   }
@@ -272,7 +274,24 @@ export class ConnectionService {
   private redactConnection(conn: any) {
     const copy = { ...conn };
     // Redact password or secret from config_json if any sneaked in
-    copy.config_json = CryptoUtil.redactSecrets(copy.config_json);
+    const redactedConfig = CryptoUtil.redactSecrets(copy.config_json ?? copy.config ?? {});
+    copy.config_json = redactedConfig;
+    copy.config = redactedConfig;
+    if (copy.credential_version !== undefined && copy.credentialVersion === undefined) {
+      copy.credentialVersion = copy.credential_version;
+    }
+    if (copy.connection_role !== undefined && copy.connectionRole === undefined) {
+      copy.connectionRole = copy.connection_role;
+    }
+    if (copy.workspace_id !== undefined && copy.workspaceId === undefined) {
+      copy.workspaceId = copy.workspace_id;
+    }
+    if (copy.created_at !== undefined && copy.createdAt === undefined) {
+      copy.createdAt = copy.created_at;
+    }
+    if (copy.updated_at !== undefined && copy.updatedAt === undefined) {
+      copy.updatedAt = copy.updated_at;
+    }
     delete copy.password;
     delete copy.credentials;
     delete copy.connectionString;

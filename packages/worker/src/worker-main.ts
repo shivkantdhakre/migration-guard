@@ -1125,7 +1125,7 @@ async function startWorker() {
 
             // Execute real mapping DSL via TransformationEngine when available
             if (transformationEngine) {
-              const transformed = transformationEngine.transform((envelope.payload || envelope) as any);
+              const transformed = transformationEngine.transform(envelope as any);
               return {
                 destinationKey: transformed.destinationKey,
                 sourceKey: transformed.sourceKey,

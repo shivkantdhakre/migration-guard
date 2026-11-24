@@ -106,19 +106,22 @@ export class TransformationEngine {
       ? `${this.mapping.destination.schema}.${this.mapping.destination.table}`
       : this.mapping.destination.table;
 
+    // Derive clean business ID from mapped source value, stripping any internal type prefix if fallback is needed
+    const businessKeyStr =
+      normalizedIdVal !== undefined && normalizedIdVal !== null
+        ? String(normalizedIdVal)
+        : (rawSourceKey.includes(':')
+            ? rawSourceKey.substring(rawSourceKey.indexOf(':') + 1)
+            : rawSourceKey);
+
     const destinationKey = resolveDestinationKey(
-      rawSourceKey,
+      businessKeyStr,
       this.mapping.identity.strategy
     );
 
     const warnings: string[] = [];
     const childRows: ChildRow[] = [];
     const destinationPayload: Record<string, unknown> = {};
-
-    // Always map the destination identity key if mapped
-    if (this.mapping.identity.destinationKey) {
-      destinationPayload[this.mapping.identity.destinationKey] = destinationKey;
-    }
 
     // Process each field mapping
     for (const field of this.mapping.fields) {
@@ -167,6 +170,11 @@ export class TransformationEngine {
           destinationPayload[field.destinationPath] = currentVal;
         }
       }
+    }
+
+    // Always enforce the resolved destination identity key
+    if (this.mapping.identity.destinationKey) {
+      destinationPayload[this.mapping.identity.destinationKey] = destinationKey;
     }
 
     // Compute canonical hash of the transformed payload

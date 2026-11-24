@@ -1,10 +1,13 @@
 import { describe, it, expect, vi } from 'vitest';
-import { calculateCanonicalHash } from '@migrationguard/core';
+import { calculateCanonicalHash, TransformationEngine, ObjectMapping } from '@migrationguard/core';
 import { ObjectId, Long, Decimal128 } from 'mongodb';
 import { DestinationWriter } from '../src/engine/destination-writer.js';
 import { ErrorClassifier } from '../src/engine/error-classifier.js';
 import { ConnectorFactory, detectBsonId, reconstructBsonId } from '../src/connectors/connector-factory.js';
-import { DestinationConnector, TransformedBatch } from '../src/types.js';
+import { DestinationConnector, TransformedBatch, SourceRecordEnvelope } from '../src/types.js';
+import { PostgresStorageAdapters } from '../src/engine/postgres-storage-adapters.js';
+import { IdTracker } from '../src/engine/id-tracker.js';
+import crypto from 'node:crypto';
 
 describe('Production Readiness Regression - Worker Areas (6, 7, 8, 9, 10, 11)', () => {
   describe('Area 6: Destination Write Integrity & Collision Detection', () => {
@@ -847,6 +850,187 @@ describe('Production Readiness Regression - Worker Areas (6, 7, 8, 9, 10, 11)', 
       const reconstructedLong = reconstructBsonId('Long:9007199254740993');
       expect(reconstructedLong).toBeInstanceOf(Long);
       expect(reconstructedLong.toString()).toBe('9007199254740993');
+    });
+
+    it('integrates real UUID mapping version with TransformationEngine and PostgreSQL persistence, rejecting duplicate destination keys from mixed-type BSON source IDs', async () => {
+      const runId = 'run_prod_mapping_mixed_bson_' + Date.now();
+
+      // Real approved UUID mapping definition
+      const approvedMapping: ObjectMapping = {
+        source: { collection: 'customers' },
+        destination: { table: 'customers' },
+        identity: {
+          sourceKey: '_id',
+          destinationKey: 'id',
+          strategy: 'PRESERVE_AS_TEXT',
+        },
+        fields: [
+          { sourcePath: '_id', destinationPath: 'id' },
+          { sourcePath: 'name', destinationPath: 'name' },
+          { sourcePath: 'email', destinationPath: 'email' },
+        ],
+      };
+
+      const engine = new TransformationEngine(approvedMapping);
+
+      // Mixed-type MongoDB IDs: numeric 42 vs string "42"
+      const rawNumDoc = { _id: 42, name: 'Num Customer 42', email: 'num42@test.com' };
+      const rawStrDoc = { _id: '42', name: 'Str Customer 42', email: 'str42@test.com' };
+
+      const numBson = detectBsonId(rawNumDoc._id);
+      const strBson = detectBsonId(rawStrDoc._id);
+
+      expect(numBson.typedKey).toBe('number:42');
+      expect(strBson.typedKey).toBe('string:42');
+
+      const envNum: SourceRecordEnvelope = {
+        sourceObject: 'customers',
+        sourceKey: numBson.typedKey,
+        payload: rawNumDoc,
+        extractedAt: new Date().toISOString(),
+      };
+
+      const envStr: SourceRecordEnvelope = {
+        sourceObject: 'customers',
+        sourceKey: strBson.typedKey,
+        payload: rawStrDoc,
+        extractedAt: new Date().toISOString(),
+      };
+
+      // 1. Production TransformationEngine transformation with complete envelope
+      const tNum = engine.transform(envNum);
+      const tStr = engine.transform(envStr);
+
+      // Source keys preserve distinct internal typed identities
+      expect(tNum.sourceKey).toBe('number:42');
+      expect(tStr.sourceKey).toBe('string:42');
+      expect(tNum.sourceKey).not.toBe(tStr.sourceKey);
+
+      // Destination keys and payloads derive clean business IDs (unprefixed)
+      expect(tNum.destinationKey).toBe('42');
+      expect(tStr.destinationKey).toBe('42');
+      expect((tNum.payload as any).id).toBe('42');
+      expect((tStr.payload as any).id).toBe('42');
+      expect(typeof (tNum.payload as any).id).toBe('string');
+      expect(String((tNum.payload as any).id).includes(':')).toBe(false);
+
+      // 2. PostgreSQL persistence & atomic collision rejection
+      const idMappingsTable: Array<{
+        migration_run_id: string;
+        source_object: string;
+        source_key: string;
+        destination_object: string;
+        destination_key: string;
+      }> = [];
+
+      const mockClient = {
+        query: vi.fn(async (sql: string, params?: any[]) => {
+          if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rows: [] };
+          if (sql.includes('SELECT source_key FROM id_mappings')) {
+            const [rId, dObj, dKey] = params!;
+            const match = idMappingsTable.find(
+              (r) => r.migration_run_id === rId && r.destination_object === dObj && r.destination_key === dKey,
+            );
+            return { rows: match ? [{ source_key: match.source_key }] : [] };
+          }
+          if (sql.includes('INSERT INTO id_mappings')) {
+            const [rId, sObj, sKey, dObj, dKey] = params!;
+            const destConflict = idMappingsTable.find(
+              (r) => r.migration_run_id === rId && r.destination_object === dObj && r.destination_key === dKey && r.source_key !== sKey,
+            );
+            if (destConflict) {
+              const err: any = new Error('duplicate key value violates unique constraint "uq_id_mapping_destination"');
+              err.code = '23505';
+              throw err;
+            }
+            const srcConflict = idMappingsTable.find(
+              (r) => r.migration_run_id === rId && r.source_object === sObj && r.source_key === sKey,
+            );
+            if (!srcConflict) {
+              idMappingsTable.push({
+                migration_run_id: rId,
+                source_object: sObj,
+                source_key: sKey,
+                destination_object: dObj,
+                destination_key: dKey,
+              });
+            }
+            return { rows: [] };
+          }
+          return { rows: [] };
+        }),
+        release: vi.fn(),
+      };
+      const mockPool: any = {
+        connect: vi.fn(async () => mockClient),
+        query: vi.fn(async (sql, params) => mockClient.query(sql, params)),
+      };
+
+      const pgAdapters = new PostgresStorageAdapters(mockPool);
+      const tracker = new IdTracker(pgAdapters);
+
+      // Record 1 (number:42) claims destination key '42'
+      await tracker.claimBatchMappings([
+        {
+          migrationRunId: runId,
+          sourceObject: tNum.sourceObject,
+          sourceKey: tNum.sourceKey, // 'number:42'
+          destinationObject: tNum.destinationObject,
+          destinationKey: tNum.destinationKey, // '42'
+        },
+      ]);
+      expect(idMappingsTable).toHaveLength(1);
+      expect(idMappingsTable[0].source_key).toBe('number:42');
+      expect(idMappingsTable[0].destination_key).toBe('42');
+
+      // Record 2 (string:42) attempting to claim the same destination key '42' must be rejected
+      await expect(
+        tracker.claimBatchMappings([
+          {
+            migrationRunId: runId,
+            sourceObject: tStr.sourceObject,
+            sourceKey: tStr.sourceKey, // 'string:42'
+            destinationObject: tStr.destinationObject,
+            destinationKey: tStr.destinationKey, // '42'
+          },
+        ]),
+      ).rejects.toThrow(/Collision detected: distinct source record 'string:42' maps to destinationKey '42'/);
+
+      // Verify DestinationWriter integrates with tracker and aborts writeBatch on collision
+      const mockDestinationConnector: any = {
+        writeBatch: vi.fn(),
+        readByKeys: vi.fn(),
+      };
+      const destinationWriter = new DestinationWriter({
+        connector: mockDestinationConnector,
+        idTracker: tracker,
+      });
+
+      const batchToAttempt: TransformedBatch = {
+        batchKey: 'batch_collision_test',
+        destinationObject: 'customers',
+        records: [
+          {
+            destinationKey: tStr.destinationKey,
+            sourceKey: tStr.sourceKey,
+            sourceObject: tStr.sourceObject,
+            destinationObject: tStr.destinationObject,
+            data: tStr.payload as Record<string, unknown>,
+          },
+        ],
+      };
+
+      await expect(
+        destinationWriter.write(batchToAttempt, {
+          migrationRunId: runId,
+          batchKey: 'batch_collision_test',
+          sourceObject: 'customers',
+          writeMode: 'upsert',
+        }),
+      ).rejects.toThrow(/Collision detected/);
+
+      // Confirm destination connector was NEVER called due to early collision rejection
+      expect(mockDestinationConnector.writeBatch).not.toHaveBeenCalled();
     });
   });
 

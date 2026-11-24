@@ -6,6 +6,7 @@ import { Modal } from '../common/Modal';
 import { Badge } from '../common/Badge';
 import { MigrationPlan } from '../../lib/types';
 import { apiClient } from '../../lib/api-client';
+import { resolvePlanVersionId } from '../../lib/wizard-utils';
 
 export interface PlanApprovalModalProps {
   isOpen: boolean;
@@ -24,6 +25,7 @@ export function PlanApprovalModal({
   const [confirmed, setConfirmed] = useState(false);
   const [approving, setApproving] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [approvalError, setApprovalError] = useState<string | null>(null);
 
   if (!plan) return null;
 
@@ -37,12 +39,19 @@ export function PlanApprovalModal({
     e.preventDefault();
     if (!confirmed || approving) return;
 
+    setApprovalError(null);
+    const versionId = resolvePlanVersionId(plan);
+    if (!versionId) {
+      setApprovalError('Cannot approve plan: no valid plan version ID resolved. A plan version must be created before approval.');
+      return;
+    }
+
     setApproving(true);
     try {
-      const versionId = plan.versionId || (Array.isArray(plan.versions) && plan.versions[0]?.id) || plan.id;
       await apiClient.approvePlan(versionId, plan.planHash, comment);
       const updated: MigrationPlan = {
         ...plan,
+        versionId,
         status: 'APPROVED',
         approvalComment: comment,
         approvedBy: 'current-user@acme.corp',
@@ -50,8 +59,8 @@ export function PlanApprovalModal({
       };
       onApproved(updated);
       onClose();
-    } catch {
-      // Handled
+    } catch (err: any) {
+      setApprovalError(err?.message || 'Plan approval failed: backend approval service rejected the request.');
     } finally {
       setApproving(false);
     }
@@ -66,6 +75,14 @@ export function PlanApprovalModal({
       maxWidth="lg"
     >
       <form onSubmit={handleApprove} className="space-y-4">
+        {/* Error banner */}
+        {approvalError && (
+          <div className="p-3.5 rounded-lg bg-rose-500/10 border border-rose-500/30 text-xs font-mono text-rose-300 flex items-center gap-2">
+            <AlertCircle size={16} className="text-rose-400 shrink-0" />
+            <span>{approvalError}</span>
+          </div>
+        )}
+
         {/* Governance banner */}
         <div className="p-3.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-300 space-y-1.5">
           <div className="flex items-center gap-2 font-semibold">

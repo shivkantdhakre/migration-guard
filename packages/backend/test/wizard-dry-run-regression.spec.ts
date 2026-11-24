@@ -1,12 +1,16 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { resolvePlanVersionId, evaluateDryRunResponse } from '../../frontend/lib/wizard-utils';
 import { DryRunService } from '../src/plan/dry-run.service';
 import { PlanService } from '../src/plan/plan.service';
+import { ApprovalService } from '../src/plan/approval.service';
 import { DatabaseService } from '../src/database/database.service';
 import { WorkspaceService } from '../src/workspace/workspace.service';
 import { ProjectService } from '../src/project/project.service';
 import { CredentialsService } from '../src/connection/credentials.service';
 import { ConnectionService } from '../src/connection/connection.service';
+import { AuthService } from '../src/auth/auth.service';
+import { JwtService } from '@nestjs/jwt';
+import { appConfig } from '../src/config/configuration';
 
 vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
 
@@ -15,7 +19,10 @@ describe('Priority 1: Wizard Dry-Run Integration & Fail-Closed Regression Suite'
   let workspaceService: WorkspaceService;
   let projectService: ProjectService;
   let planService: PlanService;
+  let approvalService: ApprovalService;
   let dryRunService: DryRunService;
+  let connectionService: ConnectionService;
+  let authService: AuthService;
 
   beforeEach(async () => {
     db = new DatabaseService();
@@ -25,9 +32,17 @@ describe('Priority 1: Wizard Dry-Run Integration & Fail-Closed Regression Suite'
     workspaceService = new WorkspaceService(db);
     projectService = new ProjectService(db, workspaceService);
     const credentialsService = new CredentialsService(db);
-    const connectionService = new ConnectionService(db, workspaceService, credentialsService);
+    connectionService = new ConnectionService(db, workspaceService, credentialsService);
     dryRunService = new DryRunService(db, workspaceService, credentialsService);
     planService = new PlanService(db, workspaceService, projectService);
+    approvalService = new ApprovalService(db, workspaceService);
+
+    const jwt = new JwtService({ secret: appConfig.jwtSecret });
+    authService = new AuthService(db, jwt);
+  });
+
+  afterEach(async () => {
+    await db?.onModuleDestroy();
   });
 
   describe('1. Version ID Resolution (Preventing plan.id and versionId conflation)', () => {
@@ -76,24 +91,27 @@ describe('Priority 1: Wizard Dry-Run Integration & Fail-Closed Regression Suite'
     });
   });
 
-  describe('2. Elimination of False-Success Paths (evaluateDryRunResponse)', () => {
-    it('Case 1: Successful Dry-Run evaluates to true with zero errors', () => {
+  describe('2. Elimination of False-Success Paths & Metrics Validation (evaluateDryRunResponse)', () => {
+    const validFacts = {
+      sampleRecordsTested: 500,
+      recordsTransformed: 500,
+      transformationErrors: 0,
+      measuredDurationMs: 45,
+      measuredRatePerSec: 11111,
+    };
+
+    it('Case 1: Successful Dry-Run with valid metrics evaluates to true', () => {
       const mockSuccess = {
         id: 'dry_123',
         planVersionId: 'plan-version-uuid-001',
+        planHash: 'sha256:canonicalplanhash123',
         status: 'COMPLETED',
         readyForApproval: true,
         sampleRecordsTested: 500,
         recordsTransformed: 500,
         transformationErrors: 0,
         potentialTypeConflicts: [],
-        measuredFacts: {
-          sampleRecordsTested: 500,
-          recordsTransformed: 500,
-          transformationErrors: 0,
-          measuredDurationMs: 45,
-          measuredRatePerSec: 11111,
-        },
+        measuredFacts: validFacts,
       };
 
       const result = evaluateDryRunResponse(mockSuccess);
@@ -104,80 +122,180 @@ describe('Priority 1: Wizard Dry-Run Integration & Fail-Closed Regression Suite'
     it('Case 2: Failed Validation with Transformation Errors rejects success', () => {
       const mockFailure = {
         id: 'dry_124',
+        planVersionId: 'ver-001',
+        planHash: 'sha256:abc',
         status: 'FAILED',
         readyForApproval: false,
         transformationErrors: 5,
         potentialTypeConflicts: [],
+        measuredFacts: { ...validFacts, transformationErrors: 5 },
       };
 
       const result = evaluateDryRunResponse(mockFailure);
       expect(result.success).toBe(false);
-      expect(result.error).toContain('5 transformation errors');
+      expect(result.error).toContain('status is \'FAILED\'');
     });
 
     it('Case 3: Failed Validation with Destination Schema Conflicts rejects success', () => {
       const mockFailure = {
         id: 'dry_125',
-        status: 'FAILED',
+        planVersionId: 'ver-001',
+        planHash: 'sha256:abc',
+        status: 'COMPLETED',
         readyForApproval: false,
         transformationErrors: 0,
         potentialTypeConflicts: [{ destinationColumn: 'email', reason: 'Type mismatch' }],
+        measuredFacts: validFacts,
       };
 
       const result = evaluateDryRunResponse(mockFailure);
       expect(result.success).toBe(false);
-      expect(result.error).toContain('1 schema conflicts');
+      expect(result.error).toContain('readyForApproval is false');
     });
 
-    it('Case 4: Failed status rejects even if transformationErrors is 0', () => {
-      const mockFailure = {
-        id: 'dry_126',
-        status: 'FAILED',
-        readyForApproval: false,
-        transformationErrors: 0,
-        potentialTypeConflicts: [],
-      };
-
-      const result = evaluateDryRunResponse(mockFailure);
-      expect(result.success).toBe(false);
-      expect(result.error).toContain('Readiness check rejected approval');
-    });
-
-    it('Case 5: Unexpected Response Shape (null, undefined, non-object) fails closed', () => {
+    it('Case 4: Unexpected Response Shape (null, undefined, non-object) fails closed', () => {
       expect(evaluateDryRunResponse(null).success).toBe(false);
       expect(evaluateDryRunResponse(undefined).success).toBe(false);
       expect(evaluateDryRunResponse('Internal Server Error').success).toBe(false);
+      expect(evaluateDryRunResponse([]).success).toBe(false);
       expect(evaluateDryRunResponse(null).error).toContain('response was empty or malformed');
     });
 
-    it('Case 6: Missing readyForApproval property (Old False-Success Bug) strictly rejects', () => {
-      // In the old buggy implementation: if (res.readyForApproval === undefined) dryRunSuccess = true
+    it('Case 5: Missing readyForApproval property strictly rejects', () => {
       const buggyPayload = {
         status: 'COMPLETED',
+        planHash: 'sha256:abc',
         recordsTransformed: 500,
+        measuredFacts: validFacts,
       };
 
       const result = evaluateDryRunResponse(buggyPayload);
       expect(result.success).toBe(false);
-      expect(result.error).toBeDefined();
+      expect(result.error).toContain('readyForApproval is false');
     });
 
-    it('Case 7: readyForApproval=false strictly rejects even with COMPLETED status', () => {
-      const response = {
+    it('Case 6: Missing or empty planHash strictly rejects', () => {
+      const payload = {
         status: 'COMPLETED',
-        readyForApproval: false,
+        readyForApproval: true,
+        sampleRecordsTested: 500,
+        recordsTransformed: 500,
         transformationErrors: 0,
+        potentialTypeConflicts: [],
+        measuredFacts: validFacts,
       };
 
-      const result = evaluateDryRunResponse(response);
+      const result = evaluateDryRunResponse(payload);
       expect(result.success).toBe(false);
-      expect(result.error).toBeDefined();
+      expect(result.error).toContain('missing or malformed planHash');
+    });
+
+    it('Case 7: Missing or non-object measuredFacts strictly rejects', () => {
+      const payload = {
+        status: 'COMPLETED',
+        readyForApproval: true,
+        planHash: 'sha256:abc',
+        sampleRecordsTested: 500,
+        recordsTransformed: 500,
+        transformationErrors: 0,
+        potentialTypeConflicts: [],
+      };
+
+      const result = evaluateDryRunResponse(payload);
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('missing or malformed measuredFacts');
+    });
+
+    it('Case 8: Malformed or non-numeric sampleRecordsTested metric strictly rejects', () => {
+      const payload = {
+        status: 'COMPLETED',
+        readyForApproval: true,
+        planHash: 'sha256:abc',
+        transformationErrors: 0,
+        potentialTypeConflicts: [],
+        measuredFacts: {
+          ...validFacts,
+          sampleRecordsTested: '500' as any, // String instead of number
+        },
+      };
+
+      const result = evaluateDryRunResponse(payload);
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('sampleRecordsTested metric is missing, invalid, or non-numeric');
+    });
+
+    it('Case 9: Malformed or non-numeric recordsTransformed metric strictly rejects', () => {
+      const payload = {
+        status: 'COMPLETED',
+        readyForApproval: true,
+        planHash: 'sha256:abc',
+        transformationErrors: 0,
+        potentialTypeConflicts: [],
+        measuredFacts: {
+          ...validFacts,
+          recordsTransformed: NaN,
+        },
+      };
+
+      const result = evaluateDryRunResponse(payload);
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('recordsTransformed metric is missing, invalid, or non-numeric');
+    });
+
+    it('Case 10: Non-positive or invalid measuredDurationMs strictly rejects', () => {
+      const payload = {
+        status: 'COMPLETED',
+        readyForApproval: true,
+        planHash: 'sha256:abc',
+        transformationErrors: 0,
+        potentialTypeConflicts: [],
+        measuredFacts: {
+          ...validFacts,
+          measuredDurationMs: 0,
+        },
+      };
+
+      const result = evaluateDryRunResponse(payload);
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('measuredDurationMs metric is missing, invalid, or non-numeric');
+    });
+
+    it('Case 11: Non-array potentialTypeConflicts strictly rejects', () => {
+      const payload = {
+        status: 'COMPLETED',
+        readyForApproval: true,
+        planHash: 'sha256:abc',
+        transformationErrors: 0,
+        potentialTypeConflicts: null as any,
+        measuredFacts: validFacts,
+      };
+
+      const result = evaluateDryRunResponse(payload);
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('potentialTypeConflicts is missing or not an array');
+    });
+
+    it('Case 12: Transformation errors in measuredFacts strictly rejects approval', () => {
+      const payload = {
+        status: 'COMPLETED',
+        readyForApproval: true,
+        planHash: 'sha256:abc',
+        transformationErrors: 3,
+        potentialTypeConflicts: [],
+        measuredFacts: {
+          ...validFacts,
+          transformationErrors: 3,
+        },
+      };
+
+      const result = evaluateDryRunResponse(payload);
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('3 transformation errors');
     });
   });
 
   describe('3. Backend Route & Version Contract Verification', () => {
     it('backend startDryRun throws NotFoundException when plan container ID is used instead of planVersionId', async () => {
-      // Create a plan with versions
       const userRes = await db.query(
         "INSERT INTO users (email, name, password_hash) VALUES ('test-eng@acme.com', 'Test Eng', 'hash') RETURNING id",
       );
@@ -209,7 +327,7 @@ describe('Priority 1: Wizard Dry-Run Integration & Fail-Closed Regression Suite'
       await expect(dryRunService.startDryRun(planId, userId)).rejects.toThrow('Plan version not found.');
     });
 
-    it('backend startDryRun succeeds and returns readyForApproval=true when valid planVersionId is used', async () => {
+    it('backend startDryRun succeeds and returns measured facts & readyForApproval=true when valid planVersionId is used', async () => {
       const userRes = await db.query(
         "INSERT INTO users (email, name, password_hash) VALUES ('test-eng2@acme.com', 'Test Eng 2', 'hash') RETURNING id",
       );
@@ -240,7 +358,7 @@ describe('Priority 1: Wizard Dry-Run Integration & Fail-Closed Regression Suite'
       const versionRes = await db.query(
         `INSERT INTO migration_plan_versions (
            plan_id, version, plan_hash, status, created_by
-         ) VALUES ($1, 1, 'sha256:dummyhash', 'DRAFT', $2) RETURNING id`,
+         ) VALUES ($1, 1, 'sha256:durableplanhash456', 'DRAFT', $2) RETURNING id`,
         [planId, userId],
       );
       const versionId = versionRes.rows[0].id;
@@ -251,6 +369,11 @@ describe('Priority 1: Wizard Dry-Run Integration & Fail-Closed Regression Suite'
       expect(dryRunResult.status).toBe('COMPLETED');
       expect(dryRunResult.readyForApproval).toBe(true);
       expect(dryRunResult.transformationErrors).toBe(0);
+      expect(dryRunResult.measuredFacts).toBeDefined();
+      expect(dryRunResult.measuredFacts.sampleRecordsTested).toBeGreaterThanOrEqual(0);
+      expect(dryRunResult.measuredFacts.recordsTransformed).toBeGreaterThanOrEqual(0);
+      expect(dryRunResult.measuredFacts.transformationErrors).toBe(0);
+      expect(dryRunResult.measuredFacts.measuredDurationMs).toBeGreaterThan(0);
 
       // Verify that evaluateDryRunResponse passes this result
       const evaluation = evaluateDryRunResponse(dryRunResult);
@@ -279,6 +402,133 @@ describe('Priority 1: Wizard Dry-Run Integration & Fail-Closed Regression Suite'
     it('allows progression on non-gated steps', () => {
       expect(5 !== 10 || false).toBe(true);
       expect(9 !== 10 || false).toBe(true);
+    });
+  });
+
+  describe('5. Real Database Integration: End-to-End Wizard Lifecycle', () => {
+    it('executes full flow: registration -> connection -> plan -> plan-version -> dry-run -> metrics validation -> approval', async () => {
+      // 1. Authenticate user
+      const user = await authService.register('wizard-lead@acme.corp', 'Lead Wizard Engineer', 'StrongPassword123!');
+      const userId = user.user.id;
+      const workspaceId = user.workspace.id;
+
+      // 2. Create Project
+      const project = await projectService.createProject(
+        workspaceId,
+        'Wizard E2E Project',
+        'End-to-end integration test',
+        userId,
+      );
+      expect(project.id).toBeDefined();
+
+      // 3. Register Connections
+      const sourceConn = await connectionService.createConnection(
+        workspaceId,
+        {
+          name: 'MongoDB Source',
+          engine: 'MONGODB',
+          connectionRole: 'SOURCE',
+          config: { database: 'appdb' },
+          credentials: { uri: 'mongodb://localhost:27017' },
+        },
+        userId,
+      );
+
+      const destConn = await connectionService.createConnection(
+        workspaceId,
+        {
+          name: 'Postgres Target',
+          engine: 'POSTGRESQL',
+          connectionRole: 'DESTINATION',
+          config: { database: 'migrationguard_target', schema: 'public' },
+          credentials: { connectionString: 'postgresql://postgres:postgres@localhost:5432/migrationguard_target' },
+        },
+        userId,
+      );
+
+      // 4. Create Plan Container
+      const planContainer = await planService.createPlan(project.id, 'E2E Modernization Plan', userId);
+      expect(planContainer.id).toBeDefined();
+
+      // 5. Create Executable Plan Version with Canonical Hashing
+      const planVersion = await planService.createPlanVersion(
+        planContainer.id,
+        {
+          sourceConnectionId: sourceConn.id,
+          destinationConnectionId: destConn.id,
+          scope: { tables: ['customers'] },
+          executionConfig: { batchSize: 500, concurrency: 4, writeMode: 'UPSERT' },
+          validationProfile: {
+            countCheck: true,
+            missingRecordCheck: true,
+            extraRecordCheck: true,
+            duplicateCheck: true,
+            contentHashCheck: true,
+            fieldValidation: true,
+            attachmentCheck: true,
+            relationshipCheck: true,
+            metadataCheck: true,
+          },
+        },
+        userId,
+      );
+      expect(planVersion.id).toBeDefined();
+      expect(planVersion.plan_hash).toMatch(/^sha256:[a-f0-9]{64}$/);
+
+      // Verify that resolvePlanVersionId correctly resolves versionId and never falls back to plan.id
+      const resolved = resolvePlanVersionId({
+        ...planContainer,
+        versionId: planVersion.id,
+        versions: [{ id: planVersion.id, version: 1, planHash: planVersion.plan_hash }],
+      } as any);
+      expect(resolved).toBe(planVersion.id);
+      expect(resolved).not.toBe(planContainer.id);
+
+      // 6. Execute Genuine Dry Run through DryRunService
+      const dryRun = await dryRunService.startDryRun(planVersion.id, userId);
+      expect(dryRun.status).toBe('COMPLETED');
+      expect(dryRun.readyForApproval).toBe(true);
+      expect(dryRun.planHash).toBe(planVersion.plan_hash);
+      expect(dryRun.transformationErrors).toBe(0);
+      expect(dryRun.measuredFacts.sampleRecordsTested).toBeGreaterThan(0);
+      expect(dryRun.measuredFacts.recordsTransformed).toBeGreaterThan(0);
+      expect(dryRun.measuredFacts.transformationErrors).toBe(0);
+      expect(dryRun.measuredFacts.measuredDurationMs).toBeGreaterThan(0);
+
+      // 7. Verify evaluateDryRunResponse strictly accepts this live dry run
+      const evaluation = evaluateDryRunResponse(dryRun);
+      expect(evaluation.success).toBe(true);
+      expect(evaluation.error).toBeNull();
+
+      // 8. Verify failure handling: attempting dry run with plan container ID throws NotFoundException
+      await expect(dryRunService.startDryRun(planContainer.id, userId)).rejects.toThrow('Plan version not found.');
+
+      // 9. Execute Plan Approval using exact versionId and planHash
+      const approval = await approvalService.submitApproval(
+        planVersion.id,
+        {
+          planHash: planVersion.plan_hash,
+          decision: 'APPROVE',
+          comment: 'Live E2E dry-run completed with 0 errors. Approved for cutover.',
+        },
+        userId,
+      );
+      expect(approval.approval_status).toBe('APPROVE');
+      expect(approval.resource_hash).toBe(planVersion.plan_hash);
+
+      // Verify the migration plan status transitioned to APPROVED
+      const updatedPlanContainer = await planService.getPlan(planContainer.id, userId);
+      expect(updatedPlanContainer.status).toBe('APPROVED');
+
+      // 10. Verify durable approval record in database
+      const approvalRecords = await db.query(
+        'SELECT * FROM approvals WHERE resource_id = $1 AND approval_status = $2',
+        [planVersion.id, 'APPROVE'],
+      );
+      expect(approvalRecords.rows.length).toBe(1);
+      expect(approvalRecords.rows[0].resource_hash).toBe(planVersion.plan_hash);
+      const approverId = approvalRecords.rows[0].approver_user_id || approvalRecords.rows[0].approved_by;
+      expect(approverId).toBe(userId);
     });
   });
 });

@@ -353,6 +353,28 @@ export const apiClient = {
     return request<MigrationPlan[]>(`/projects/${projectId}/plans`, {}, MOCK_PLANS);
   },
 
+  async createPlan(projectId = 'default', name: string): Promise<MigrationPlan> {
+    return request<MigrationPlan>(`/projects/${projectId}/plans`, {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    });
+  },
+
+  async getPlan(planId: string): Promise<MigrationPlan> {
+    return request<MigrationPlan>(`/plans/${planId}`);
+  },
+
+  async createPlanVersion(planId: string, versionData: any): Promise<any> {
+    return request(`/plans/${planId}/versions`, {
+      method: 'POST',
+      body: JSON.stringify(versionData),
+    });
+  },
+
+  async getPlanVersion(versionId: string): Promise<any> {
+    return request(`/plan-versions/${versionId}`);
+  },
+
   async startDryRun(versionId: string): Promise<DryRunResult> {
     if (!versionId || typeof versionId !== 'string' || versionId.trim() === '') {
       throw new Error('Cannot execute dry run: plan versionId is required and must not be empty.');
@@ -372,10 +394,13 @@ export const apiClient = {
   },
 
   async approvePlan(planVersionId: string, planHash: string, comment: string): Promise<{ approved: boolean; hash: string }> {
+    if (!planVersionId || typeof planVersionId !== 'string' || planVersionId.trim() === '') {
+      throw new Error('Cannot approve plan: planVersionId is required and must not be empty.');
+    }
     return request(
-      `/plan-versions/${planVersionId}/approvals`,
+      `/plan-versions/${planVersionId.trim()}/approvals`,
       { method: 'POST', body: JSON.stringify({ planHash, decision: 'APPROVE', comment }) },
-      { approved: true, hash: planHash }
+      isDemoModeEnabled() ? { approved: true, hash: planHash } : undefined
     );
   },
 

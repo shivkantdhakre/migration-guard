@@ -485,6 +485,21 @@ export async function analyzeReadQueryAst(sql: string): Promise<SqlAstAnalysis |
   return analyzeReadQueryAstSync(sql);
 }
 
+function parsePgStringArray(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item));
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+      const inner = trimmed.slice(1, -1).trim();
+      if (!inner) return [];
+      return inner.split(',').map((item) => item.trim().replace(/^"(.*)"$/, '$1'));
+    }
+  }
+  return [];
+}
+
 /**
  * Inspects PostgreSQL system catalogs (`current_schemas`, `pg_class`, `pg_attribute`, `pg_type`,
  * `pg_rewrite`, `pg_proc`, `pg_operator`, `pg_cast`) to verify semantic resolution safety before retry.
@@ -518,15 +533,15 @@ async function runSemanticCatalogVerification(
   let explicitSchemas: string[] = [];
   try {
     const schemaRes = await queryable.query<{
-      search_schemas: string[];
-      explicit_schemas: string[];
-    }>('SELECT current_schemas(true) AS search_schemas, current_schemas(false) AS explicit_schemas');
+      search_schemas: string[] | string;
+      explicit_schemas: string[] | string;
+    }>('SELECT current_schemas(true)::text[] AS search_schemas, current_schemas(false)::text[] AS explicit_schemas');
     const row = schemaRes?.rows?.[0];
-    if (!row || !Array.isArray(row.search_schemas) || row.search_schemas.length === 0) {
+    searchSchemasWithImplicit = parsePgStringArray(row?.search_schemas);
+    explicitSchemas = parsePgStringArray(row?.explicit_schemas);
+    if (!row || searchSchemasWithImplicit.length === 0) {
       return { safe: false, reason: 'Semantic catalog inspection unavailable (current_schemas returned empty).' };
     }
-    searchSchemasWithImplicit = row.search_schemas;
-    explicitSchemas = Array.isArray(row.explicit_schemas) ? row.explicit_schemas : [];
   } catch (err: any) {
     return {
       safe: false,
@@ -569,16 +584,16 @@ async function runSemanticCatalogVerification(
     }
 
     const clsQuery = rel.schemaname
-      ? `SELECT c.oid, n.nspname, c.relname, c.relkind, c.relrowsecurity
+      ? `SELECT c.oid, n.nspname::text AS nspname, c.relname::text AS relname, c.relkind::text AS relkind, c.relrowsecurity
          FROM pg_catalog.pg_class c
          JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-         WHERE n.nspname = $1 AND c.relname = $2
+         WHERE n.nspname::text = $1::text AND c.relname::text = $2::text
          LIMIT 1`
-      : `SELECT c.oid, n.nspname, c.relname, c.relkind, c.relrowsecurity
+      : `SELECT c.oid, n.nspname::text AS nspname, c.relname::text AS relname, c.relkind::text AS relkind, c.relrowsecurity
          FROM pg_catalog.pg_class c
          JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-         WHERE n.nspname = ANY($1) AND c.relname = $2
-         ORDER BY array_position($1, n.nspname) ASC
+         WHERE n.nspname::text = ANY($1::text[]) AND c.relname::text = $2::text
+         ORDER BY array_position($1::text[], n.nspname::text) ASC
          LIMIT 1`;
     const clsParams = rel.schemaname ? [rel.schemaname, rel.relname] : [searchSchemasWithImplicit, rel.relname];
     const clsRes = await queryable.query<any>(clsQuery, clsParams);
@@ -622,7 +637,7 @@ async function runSemanticCatalogVerification(
         typnamespace: string;
         typtype: string;
       }>(
-        `SELECT a.attname, t.typname, tn.nspname AS typnamespace, t.typtype
+        `SELECT a.attname::text AS attname, t.typname::text AS typname, tn.nspname::text AS typnamespace, t.typtype::text AS typtype
          FROM pg_catalog.pg_attribute a
          JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
          JOIN pg_catalog.pg_namespace tn ON tn.oid = t.typnamespace
@@ -763,11 +778,11 @@ async function runSemanticCatalogVerification(
       nspname: string;
       provolatile: string;
     }>(
-      `SELECT p.proname, n.nspname, p.provolatile
+      `SELECT p.proname::text AS proname, n.nspname::text AS nspname, p.provolatile::text AS provolatile
        FROM pg_catalog.pg_proc p
        JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
-       WHERE LOWER(p.proname) = ANY($1)
-         AND (n.nspname = 'pg_catalog' OR n.nspname = ANY($2))`,
+       WHERE LOWER(p.proname::text) = ANY($1::text[])
+         AND (n.nspname::text = 'pg_catalog' OR n.nspname::text = ANY($2::text[]))`,
       [fnNames, nonCatalogSchemas],
     );
 
@@ -809,14 +824,14 @@ async function runSemanticCatalogVerification(
       oprschema: string;
       fnschema: string;
     }>(
-      `SELECT o.oprname, onsp.nspname AS oprschema, COALESCE(fnsp.nspname, 'pg_catalog') AS fnschema
+      `SELECT o.oprname::text AS oprname, onsp.nspname::text AS oprschema, COALESCE(fnsp.nspname::text, 'pg_catalog') AS fnschema
        FROM pg_catalog.pg_operator o
        JOIN pg_catalog.pg_namespace onsp ON onsp.oid = o.oprnamespace
        LEFT JOIN pg_catalog.pg_proc p ON p.oid = o.oprcode
        LEFT JOIN pg_catalog.pg_namespace fnsp ON fnsp.oid = p.pronamespace
-       WHERE o.oprname = ANY($1)
-         AND (onsp.nspname = ANY($2) OR fnsp.nspname = ANY($2))
-         AND (onsp.nspname <> 'pg_catalog' OR COALESCE(fnsp.nspname, 'pg_catalog') <> 'pg_catalog')
+       WHERE o.oprname::text = ANY($1::text[])
+         AND (onsp.nspname::text = ANY($2::text[]) OR fnsp.nspname::text = ANY($2::text[]))
+         AND (onsp.nspname::text <> 'pg_catalog' OR COALESCE(fnsp.nspname::text, 'pg_catalog') <> 'pg_catalog')
        LIMIT 1`,
       [opNames, nonCatalogSchemas],
     );
@@ -840,9 +855,9 @@ async function runSemanticCatalogVerification(
       tgttype: string;
       fnschema: string;
     }>(
-      `SELECT sn.nspname AS srcschema, st.typname AS srctype,
-              tn.nspname AS tgtschema, tt.typname AS tgttype,
-              pn.nspname AS fnschema
+      `SELECT sn.nspname::text AS srcschema, st.typname::text AS srctype,
+              tn.nspname::text AS tgtschema, tt.typname::text AS tgttype,
+              pn.nspname::text AS fnschema
        FROM pg_catalog.pg_cast c
        JOIN pg_catalog.pg_type st ON st.oid = c.castsource
        JOIN pg_catalog.pg_namespace sn ON sn.oid = st.typnamespace
@@ -850,10 +865,10 @@ async function runSemanticCatalogVerification(
        JOIN pg_catalog.pg_namespace tn ON tn.oid = tt.typnamespace
        JOIN pg_catalog.pg_proc p ON p.oid = c.castfunc
        JOIN pg_catalog.pg_namespace pn ON pn.oid = p.pronamespace
-       WHERE tn.nspname = 'pg_catalog'
-         AND tt.typname = ANY($1)
-         AND pn.nspname <> 'pg_catalog'
-         AND (sn.nspname = 'pg_catalog' OR sn.nspname = ANY($2))
+       WHERE tn.nspname::text = 'pg_catalog'
+         AND tt.typname::text = ANY($1::text[])
+         AND pn.nspname::text <> 'pg_catalog'
+         AND (sn.nspname::text = 'pg_catalog' OR sn.nspname::text = ANY($2::text[]))
        LIMIT 1`,
       [targets, nonCatalogSchemas],
     );

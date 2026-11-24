@@ -304,6 +304,35 @@ describe('Backend PostgreSQL Live Persistence Integration (Run 005.2 & Run 005.5
       await DatabaseService.initSqlParser();
 
       try {
+        // Pre-verify semantic catalog rejection reasons explicitly (guards against false passes from unrelated catalog errors)
+        const semCastType = await DatabaseService.verifyQuerySemanticRetrySafety(
+          hazardPool,
+          `SELECT custom_value::text FROM "${hazardSchema}".records`,
+        );
+        expect(semCastType.safe).toBe(false);
+        expect(semCastType.reason).toMatch(/non-builtin type/i);
+
+        const semOverloadOnCleanTable = await DatabaseService.verifyQuerySemanticRetrySafety(
+          hazardPool,
+          `SELECT LOWER(name) FROM "${cleanSchema}".safe_records`,
+        );
+        expect(semOverloadOnCleanTable.safe).toBe(false);
+        expect(semOverloadOnCleanTable.reason).toMatch(/overload/i);
+
+        const semOperatorOnCleanTable = await DatabaseService.verifyQuerySemanticRetrySafety(
+          hazardPool,
+          `SELECT left_num + right_num FROM "${cleanSchema}".safe_records`,
+        );
+        expect(semOperatorOnCleanTable.safe).toBe(false);
+        expect(semOperatorOnCleanTable.reason).toMatch(/Custom operator/i);
+
+        const semCastFnOnCleanTable = await DatabaseService.verifyQuerySemanticRetrySafety(
+          hazardPool,
+          `SELECT name::text FROM "${cleanSchema}".safe_records`,
+        );
+        expect(semCastFnOnCleanTable.safe).toBe(false);
+        expect(semCastFnOnCleanTable.reason).toMatch(/cast function/i);
+
         // Case 1: custom_value::text (custom source type -> built-in text cast)
         const tracker1 = wrapPoolWithTransientDropOnAttempt1(hazardPool, (s) => s.includes('custom_value::text'));
         await expect(
@@ -337,7 +366,13 @@ describe('Backend PostgreSQL Live Persistence Integration (Run 005.2 & Run 005.5
         expect(counts.custom_lower_overload).toBe(1);
         expect(counts.custom_plus_op).toBe(1);
 
-        // Case 4: Safe built-in query in clean schema DOES retry once on ECONNRESET and succeeds
+        // Case 4: Safe built-in query in clean schema passes semantic check, DOES retry once on ECONNRESET, and succeeds
+        const semClean = await DatabaseService.verifyQuerySemanticRetrySafety(
+          cleanPool,
+          `SELECT id, LOWER(name) AS lname, left_num + right_num AS total FROM "${cleanSchema}".safe_records WHERE id = $1`,
+        );
+        expect(semClean).toEqual({ safe: true });
+
         const safeTracker = wrapPoolWithTransientDropOnAttempt1(cleanPool, (s) => s.includes('LOWER(name)'));
         const okRes = await cleanDb.query(
           `SELECT id, LOWER(name) AS lname, left_num + right_num AS total FROM "${cleanSchema}".safe_records WHERE id = $1`,
